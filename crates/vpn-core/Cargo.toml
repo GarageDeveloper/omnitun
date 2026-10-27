@@ -1,0 +1,20 @@
+[package]
+name = "vpn-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+ipnet.workspace = true
+hex.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+toml.workspace = true

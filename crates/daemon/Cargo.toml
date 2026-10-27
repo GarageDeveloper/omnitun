@@ -1,0 +1,25 @@
+[package]
+name = "omnitund"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vpn-core.workspace = true
+vpn-platform.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+ipnet.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+nix = { version = "0.31", features = ["user", "fs", "resource"] }
+zeroize = "1"
+libc = "0.2"
+
+[dev-dependencies]
+omnitun-engine.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

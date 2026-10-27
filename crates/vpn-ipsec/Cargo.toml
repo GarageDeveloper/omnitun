@@ -1,0 +1,45 @@
+[package]
+name = "vpn-ipsec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vpn-core.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+ipnet.workspace = true
+rand.workspace = true
+hex.workspace = true
+aes = { version = "0.8", features = ["zeroize"] }
+aes-gcm = { version = "0.10", features = ["zeroize"] }
+chacha20poly1305 = "0.10"
+hmac = "0.12"
+sha1 = "0.10"
+sha2 = "0.10"
+md4 = "0.10"
+des = { version = "0.8", features = ["zeroize"] }
+num-bigint = "0.4"
+p256 = { version = "0.13", features = ["ecdh"] }
+p384 = { version = "0.13", features = ["ecdh"] }
+p521 = { version = "0.13", features = ["ecdh"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+zeroize = "1"
+ring = "0.17"
+rustls-pki-types = { version = "1", features = ["std"] }
+webpki = { package = "rustls-webpki", version = "0.103", features = ["ring", "std"] }
+webpki-roots = "1"
+x509-parser = "0.18"
+
+[dev-dependencies]
+rcgen = "0.14.10"
+toml.workspace = true
+tracing-subscriber.workspace = true
+# The interop example signs RSA SHA-1 (classic IKEv2 method), which ring
+# does not do.
+rsa = "0.9"
+sha1 = { version = "0.10", features = ["oid"] }

@@ -1,0 +1,101 @@
+# Client side of the scenarios, run by run.sh against the server
+# containers: server N listens on 172.32.0.1N (see entrypoint.sh and the
+# table in run.sh) and its pppd answers ping on 10.9.N.1. PSK
+# "omnitun-interop-psk", user "alice", password "alice-password"; run.sh
+# gives the wrong ones to the reject-* scenarios, which must fail.
+
+# Main mode, MS-CHAPv2 (the server's pppd: require-mschap-v2). No user
+# name in the profile: it is asked.
+[[profile]]
+name = "psk-mschapv2"
+protocol = "l2tp"
+gateway = "172.32.0.11"
+
+# The server only does CHAP-MD5 (require-chap): the profile allows the
+# three methods and prefers MS-CHAPv2.
+[[profile]]
+name = "chap-md5"
+protocol = "l2tp"
+gateway = "172.32.0.12"
+username = "alice"
+
+# The server only does PAP (require-pap).
+[[profile]]
+name = "pap"
+protocol = "l2tp"
+gateway = "172.32.0.13"
+username = "alice"
+
+# Aggressive mode with a group name, sent as a KEY_ID identity (as macOS
+# does); the server's connection is for that identity only.
+[[profile]]
+name = "aggressive-group"
+protocol = "l2tp"
+gateway = "172.32.0.14"
+username = "alice"
+local_id = "omnitun-group"
+
+# The server offers 3DES, SHA-1 and MODP-1024 only.
+[[profile]]
+name = "legacy-3des"
+protocol = "l2tp"
+gateway = "172.32.0.15"
+username = "alice"
+ike = ["3des-sha1-modp1024"]
+esp = ["3des-sha1"]
+legacy_algorithms = true
+
+# IPCP gives two DNS servers (ms-dns 10.9.6.53 and 10.9.6.54).
+[[profile]]
+name = "dns-ipcp"
+protocol = "l2tp"
+gateway = "172.32.0.16"
+username = "alice"
+
+# The server rekeys the ESP SA after 60 s (it expires after 90 s); run.sh
+# keeps the tunnel up and pings across it (INTEROP_DURATION).
+[[profile]]
+name = "rekey"
+protocol = "l2tp"
+gateway = "172.32.0.17"
+username = "alice"
+
+# The server re-authenticates after 60 s with a new main mode it starts;
+# run.sh keeps the tunnel up and pings across it (INTEROP_DURATION).
+[[profile]]
+name = "reauth"
+protocol = "l2tp"
+gateway = "172.32.0.18"
+username = "alice"
+
+# We rekey: the ESP SA lasts 120 s, so the client rekeys it after 108 s,
+# keeps accepting the replaced one until its end, then deletes it. The
+# server keeps its own (long) lifetimes.
+[[profile]]
+name = "rekey-client"
+protocol = "l2tp"
+gateway = "172.32.0.12"
+username = "alice"
+phase2_lifetime = 120
+
+# run.sh gives a wrong PSK.
+[[profile]]
+name = "reject-wrong-psk"
+protocol = "l2tp"
+gateway = "172.32.0.11"
+username = "alice"
+
+# run.sh gives a wrong PPP password.
+[[profile]]
+name = "reject-wrong-password"
+protocol = "l2tp"
+gateway = "172.32.0.11"
+username = "alice"
+
+# The server wants PAP, the profile allows MS-CHAPv2 only.
+[[profile]]
+name = "reject-auth-method"
+protocol = "l2tp"
+gateway = "172.32.0.13"
+username = "alice"
+ppp_auth = ["ms-chap-v2"]

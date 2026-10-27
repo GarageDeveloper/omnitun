@@ -1,0 +1,182 @@
+//! Import of Viscosity connections. Viscosity keeps each one as an OpenVPN
+//! configuration, `config.conf`, with the files it names next to it, in a
+//! numbered folder of its library; exported connections are the same
+//! folder named `<name>.visc`. Its own settings are `#viscosity` comments.
+//! Passwords stay in Viscosity's Keychain items: never read.
+
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, bail};
+
+use super::{Found, Imported};
+
+/// Viscosity's library, under the user's home.
+pub const VISCOSITY_LIBRARY: &str = "Library/Application Support/Viscosity/OpenVPN";
+
+/// Most connections read from a library.
+const MAX_CONNECTIONS: usize = 64;
+
+/// The connections of Viscosity's library (`path` None, or a library
+/// folder), of an exported `.visc` folder, or of one `config.conf`.
+pub fn viscosity(path: Option<&Path>, existing: &[String]) -> anyhow::Result<Vec<Found>> {
+    let path = match path {
+        Some(path) => path.to_owned(),
+        None => std::env::var_os("HOME").map(PathBuf::from).context("no home folder")?.join(VISCOSITY_LIBRARY),
+    };
+    if path.extension().is_some_and(|e| e == "visz") {
+        bail!("{} is compressed: open it in the Finder to unpack the .visc folder, then import that", path.display());
+    }
+    let configs = if path.is_file() {
+        vec![path.clone()]
+    } else if path.join("config.conf").is_file() {
+        vec![path.join("config.conf")]
+    } else {
+        let entries =
+            std::fs::read_dir(&path).with_context(|| format!("no Viscosity connections in {}", path.display()))?;
+        let mut configs: Vec<PathBuf> =
+            entries.filter_map(Result::ok).map(|e| e.path().join("config.conf")).filter(|c| c.is_file()).collect();
+        // Viscosity numbers its folders in creation order.
+        configs.sort_by_key(|c| {
+            let folder = c.parent().and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned());
+            (folder.as_deref().and_then(|n| n.parse::<u64>().ok()).unwrap_or(u64::MAX), folder)
+        });
+        configs.truncate(MAX_CONNECTIONS);
+        configs
+    };
+    let mut taken = existing.to_vec();
+    let mut out = Vec::new();
+    for config in configs {
+        let settings = settings(&config);
+        let folder = config.parent().and_then(Path::file_stem).map(|n| n.to_string_lossy().into_owned());
+        let display = settings.name.clone().or(folder).unwrap_or_else(|| "viscosity".into());
+        let result = convert(&config, &display, &settings, &taken);
+        if let Ok(imported) = &result {
+            taken.push(imported.name.clone());
+        }
+        out.push(Found { display, result });
+    }
+    Ok(out)
+}
+
+/// What the `#viscosity` comments say that matters here.
+#[derive(Default)]
+struct Settings {
+    name: Option<String>,
+    protocol: Option<String>,
+    dns: Option<String>,
+}
+
+fn settings(config: &Path) -> Settings {
+    let mut settings = Settings::default();
+    let Ok(text) = super::ovpn::read_config(config) else { return settings };
+    for line in text.lines() {
+        let Some(rest) = line.trim().strip_prefix("#viscosity ") else { continue };
+        let (key, value) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+        let value: String = value.trim().chars().filter(|c| !c.is_control()).take(128).collect();
+        match key {
+            "name" if !value.is_empty() => settings.name = Some(value),
+            "protocol" => settings.protocol = Some(value),
+            "dns" => settings.dns = Some(value),
+            _ => {}
+        }
+    }
+    settings
+}
+
+fn convert(config: &Path, display: &str, settings: &Settings, existing: &[String]) -> anyhow::Result<Imported> {
+    if let Some(protocol) = settings.protocol.as_deref().filter(|p| !p.eq_ignore_ascii_case("openvpn")) {
+        bail!("{protocol} connections are not supported");
+    }
+    let base = super::name_or(display, "viscosity");
+    let origin = format!("Viscosity: \"{display}\"");
+    let mut imported = super::ovpn::convert_file(config, &base, Some(display), &origin, existing)?;
+    match settings.dns.as_deref() {
+        None | Some("automatic") | Some("split") | Some("full") => {}
+        Some(other) => imported
+            .notes
+            .push(format!("Viscosity's DNS mode \"{other}\" is not kept: the DNS servers the server pushes are used")),
+    }
+    Ok(imported)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn library(connections: &[(&str, &str)]) -> tempdir::Dir {
+        let dir = tempdir::Dir::new();
+        for (folder, config) in connections {
+            let folder = dir.path().join(folder);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join("config.conf"), config).unwrap();
+            std::fs::write(folder.join("ca.crt"), super::super::ovpn::tests::ca_pem()).unwrap();
+        }
+        dir
+    }
+
+    fn config(name: &str, extra: &str) -> String {
+        format!(
+            "#-- Config Auto Generated By Viscosity --#\n\n#viscosity startonopen false\n#viscosity dhcp true\n\
+             #viscosity dnssupport true\n#viscosity name {name}\n#viscosity protocol openvpn\n#viscosity dns automatic\n\
+             remote vpn.example.com 1194 tcp-client\npull\ntls-client\ndev tun\nnobind\nca ca.crt\nauth-user-pass\n\
+             remote-cert-tls server\nroute 10.20.0.0 255.255.0.0\n{extra}"
+        )
+    }
+
+    #[test]
+    fn imports_the_library() {
+        let dir = library(&[
+            ("8", &config("Bureau Paris", "")),
+            ("4", &config("Lab (old)", "")),
+            ("12", &config("Tap", "dev tap\n")),
+        ]);
+        let found = viscosity(Some(dir.path()), &["Bureau Paris".into()]).unwrap();
+        let names: Vec<&str> = found.iter().map(|c| c.display.as_str()).collect();
+        assert_eq!(names, ["Lab (old)", "Bureau Paris", "Tap"], "in Viscosity's order");
+        let lab = found[0].result.as_ref().unwrap();
+        assert_eq!(lab.name, "Lab (old)");
+        let paris = found[1].result.as_ref().unwrap();
+        assert_eq!(paris.name, "Bureau Paris 2", "renamed: the name is taken");
+        assert!(paris.toml.contains("# Imported from Viscosity: \"Bureau Paris\""));
+        let file: vpn_core::ProfileFile = toml::from_str(&paris.toml).unwrap();
+        let profile = &file.profiles[0];
+        assert_eq!(profile.description.as_deref(), Some("Bureau Paris"));
+        let vpn_core::ProtocolConfig::OpenVpn(p) = &profile.protocol else { panic!() };
+        assert_eq!(p.extra_routes, ["10.20.0.0/16".parse().unwrap()]);
+        assert_eq!(p.remotes[0].transport, vpn_core::Transport::Tcp);
+        assert!(found[2].result.is_err(), "dev tap is refused");
+
+        // An exported connection: the .visc folder, or its config.conf.
+        let one = viscosity(Some(&dir.path().join("4")), &[]).unwrap();
+        assert_eq!(one.len(), 1);
+        assert!(viscosity(Some(&dir.path().join("x.visz")), &[]).is_err());
+    }
+
+    /// A temporary folder, removed on drop.
+    mod tempdir {
+        pub struct Dir(std::path::PathBuf);
+
+        impl Dir {
+            pub fn new() -> Self {
+                let path = std::env::temp_dir().join(format!("omnitun-visc-{}", rand_suffix()));
+                std::fs::create_dir_all(&path).unwrap();
+                Self(path)
+            }
+
+            pub fn path(&self) -> &std::path::Path {
+                &self.0
+            }
+        }
+
+        impl Drop for Dir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        fn rand_suffix() -> String {
+            let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+            format!("{}-{nanos}", std::process::id())
+        }
+    }
+}

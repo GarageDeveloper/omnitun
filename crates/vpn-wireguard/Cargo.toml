@@ -1,0 +1,23 @@
+[package]
+name = "vpn-wireguard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vpn-core.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+ipnet.workspace = true
+rand.workspace = true
+base64 = "0.22"
+boringtun = { version = "0.7", default-features = false }
+zeroize = "1"
+
+[dev-dependencies]
+toml.workspace = true
+tokio-util.workspace = true
+tracing-subscriber.workspace = true

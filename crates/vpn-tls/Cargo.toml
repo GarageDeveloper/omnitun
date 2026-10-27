@@ -1,0 +1,14 @@
+[package]
+name = "vpn-tls"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vpn-core.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+hex.workspace = true
+ring = "0.17"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+x509-parser = "0.18"

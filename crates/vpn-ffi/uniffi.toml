@@ -1,0 +1,5 @@
+[bindings.swift]
+# Swift module of the generated bindings; the app imports it.
+module_name = "VPNClientCore"
+ffi_module_name = "VPNClientCoreFFI"
+ffi_module_filename = "VPNClientCoreFFI"

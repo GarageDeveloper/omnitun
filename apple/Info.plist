@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>@BUNDLE_ID@</string>
+    <key>CFBundleName</key>
+    <string>@PRODUCT@</string>
+    <key>CFBundleDisplayName</key>
+    <string>@PRODUCT@</string>
+    <key>CFBundleExecutable</key>
+    <string>@PRODUCT@</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@VERSION@</string>
+    <key>CFBundleVersion</key>
+    <string>@BUILD@</string>
+    <!-- The commit built, shown next to the version; never compared. -->
+    <key>BuildCommit</key>
+    <string>@COMMIT@</string>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <!-- Also lists the app under System Settings › Language & Region › Applications. -->
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>en</string>
+        <string>fr</string>
+    </array>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <!-- Menu bar only: no Dock icon, no main menu. -->
+    <key>LSUIElement</key>
+    <true/>
+    <!-- .vpnprofile files: VPN profiles handed out by an IT department. -->
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>@PRODUCT@ VPN Profile</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>@RDNS@.vpnprofile</string>
+            </array>
+        </dict>
+        <!-- OpenVPN configurations: offered in Open With, without taking
+             them from the OpenVPN client the user may have. -->
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>OpenVPN Configuration</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>net.openvpn.ovpn</string>
+            </array>
+        </dict>
+    </array>
+    <key>UTImportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>net.openvpn.ovpn</string>
+            <key>UTTypeDescription</key>
+            <string>OpenVPN Configuration</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.plain-text</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>ovpn</string>
+                </array>
+            </dict>
+        </dict>
+    </array>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>@RDNS@.vpnprofile</string>
+            <key>UTTypeDescription</key>
+            <string>@PRODUCT@ VPN Profile</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>vpnprofile</string>
+                </array>
+            </dict>
+        </dict>
+    </array>
+    <!-- Sparkle: the latest GitHub Release's appcast.xml lists the
+         version; its .pkg is signed with the EdDSA key whose public half
+         is below (private half: login Keychain, account "omnitun").
+         Checked daily, installed when the user accepts. -->
+    <key>SUFeedURL</key>
+    <string>@FEED_URL@</string>
+    <key>SUPublicEDKey</key>
+    <string>peDskHzmxuRsSOsL+TqJFYme/VWtiHYoVVun5Ytmtyc=</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <integer>86400</integer>
+    <key>SUAllowsAutomaticUpdates</key>
+    <false/>
+    <key>NSHumanReadableCopyright</key>
+    <string>@PRODUCT@</string>
+</dict>
+</plist>

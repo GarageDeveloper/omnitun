@@ -1,0 +1,16 @@
+[package]
+name = "vpn-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vpn-core.workspace = true
+anyhow.workspace = true
+bytes.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+ipnet.workspace = true
+nix = { version = "0.31", features = ["socket", "uio", "fs"] }
+tun-rs = { version = "2.8", features = ["async_tokio"] }

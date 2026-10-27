@@ -1,0 +1,9 @@
+target/
+/apple/Generated/
+/apple/.build/
+/apple/dist/
+/apple/signing.env
+.claude/
+interop/*/last-*.log
+interop/*/pki/
+.vscode/

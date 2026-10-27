@@ -1,0 +1,13 @@
+# gitleaks git . : test fixtures that protect nothing.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test-only keys"
+paths = [
+    '''crates/vpn-fortissl/tests/data/client-rsa\.key''',
+]
+regexes = [
+    # The WireGuard key parser's test vector.
+    '''YpdTsMtb/QCdYKzHlzKkLcLzEbdTK0vP4ILmdcIvnh''',
+]

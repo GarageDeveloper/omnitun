@@ -1,0 +1,6 @@
+#!/bin/sh
+# Stops the running service (it closes its tunnels on SIGTERM) and the app,
+# so the new binaries start cleanly.
+launchctl bootout system/@LABEL@ 2>/dev/null || true
+pkill -x @PRODUCT@ 2>/dev/null || true
+exit 0

@@ -1,0 +1,14 @@
+[package]
+name = "utun-probe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Experiment for milestone 2: can an unprivileged, sandboxed engine use a
+# utun opened by root and passed over a Unix socket?
+
+[dependencies]
+anyhow.workspace = true
+tun-rs = "2.8"
+nix = { version = "0.31", features = ["socket", "uio", "poll", "user", "fs"] }

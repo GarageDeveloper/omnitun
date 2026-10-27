@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.root42.omnitun.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/PrivilegedHelperTools/omnitund</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <!-- Time to close the tunnels on stop before SIGKILL (omnitund gives up after 15 s). -->
+    <key>ExitTimeOut</key>
+    <integer>30</integer>
+    <!-- The log names servers, accounts and addresses: not for everyone. -->
+    <key>Umask</key>
+    <integer>23</integer>
+    <key>StandardErrorPath</key>
+    <string>/var/log/omnitund.log</string>
+</dict>
+</plist>

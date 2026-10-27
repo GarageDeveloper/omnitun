@@ -1,0 +1,272 @@
+# Client side of the scenarios, run by run.sh against the container.
+# The gateway container is 172.30.0.2. PSK "omnitun-interop-psk", user
+# "alice", password "alice-password". The interop client replaces the
+# pki placeholders by the files of make-pki.sh; scenarios named reject-*
+# must fail.
+
+[[profile]]
+name = "v2-gcm"
+protocol = "ipsec"
+gateway = "172.30.0.2"
+local_id = "psk@omnitun.test"
+remote_id = "gw.omnitun.test"
+ike = ["aes256gcm16-prfsha256-ecp256"]
+esp = ["aes256gcm16"]
+
+[[profile]]
+name = "v2-cbc"
+protocol = "ipsec"
+gateway = "172.30.0.2"
+local_id = "psk@omnitun.test"
+remote_id = "gw.omnitun.test"
+ike = ["aes256-sha256-modp2048"]
+esp = ["aes256-sha256"]
+
+[[profile]]
+name = "v2-chacha"
+protocol = "ipsec"
+gateway = "172.30.0.2"
+local_id = "psk@omnitun.test"
+remote_id = "gw.omnitun.test"
+ike = ["chacha20poly1305-prfsha256-x25519"]
+esp = ["chacha20poly1305"]
+
+[[profile]]
+name = "v2-3des"
+protocol = "ipsec"
+gateway = "172.30.0.2"
+local_id = "psk@omnitun.test"
+remote_id = "gw.omnitun.test"
+ike = ["3des-sha1-modp1024"]
+esp = ["3des-sha1"]
+legacy_algorithms = true
+
+[[profile]]
+name = "v2-eap"
+protocol = "ipsec"
+gateway = "172.30.0.2"
+local_id = "eap@omnitun.test"
+remote_id = "gw.omnitun.test"
+username = "alice"
+ike = ["aes256gcm16-prfsha256-ecp256"]
+esp = ["aes256gcm16"]
+
+[[profile]]
+name = "v1-xauth"
+protocol = "ipsec"
+gateway = "172.30.0.2"
+ike_version = 1
+exchange_mode = "aggressive"
+xauth = true
+local_id = "xauth@omnitun.test"
+username = "alice"
+ike = ["aes256-sha256-modp1536"]
+esp = ["aes256-sha256-modp1536"]
+
+[[profile]]
+name = "v1-gcm"
+protocol = "ipsec"
+gateway = "172.30.0.2"
+ike_version = 1
+exchange_mode = "aggressive"
+xauth = true
+local_id = "xauth@omnitun.test"
+username = "alice"
+ike = ["aes128-sha1-modp1536"]
+esp = ["aes256gcm16"]
+
+[[profile]]
+name = "v1-3des"
+protocol = "ipsec"
+gateway = "172.30.0.2"
+ike_version = 1
+exchange_mode = "aggressive"
+xauth = true
+local_id = "xauth@omnitun.test"
+username = "alice"
+ike = ["3des-sha1-modp1024"]
+esp = ["3des-sha1-modp1024"]
+legacy_algorithms = true
+
+[[profile]]
+name = "cert-rsa-eap"
+protocol = "ipsec"
+gateway = "172.30.0.2"
+gateway_auth = "certificate"
+ca_pem = """@pki:ca.pem@"""
+local_id = "eap-rsa@omnitun.test"
+remote_id = "gw-rsa.omnitun.test"
+username = "alice"
+ike = ["aes256gcm16-prfsha256-ecp256"]
+esp = ["aes256gcm16"]
+
+[[profile]]
+name = "cert-p256-eap"
+protocol = "ipsec"
+gateway = "172.30.0.2"
+gateway_auth = "certificate"
+ca_pem = """@pki:ca.pem@"""
+local_id = "eap-p256@omnitun.test"
+remote_id = "gw-p256.omnitun.test"
+username = "alice"
+ike = ["aes256gcm16-prfsha256-ecp256"]
+esp = ["aes256gcm16"]
+
+[[profile]]
+name = "cert-p384-psk"
+protocol = "ipsec"
+gateway = "172.30.0.2"
+gateway_auth = "certificate"
+ca_pem = """@pki:ca.pem@"""
+local_id = "psk-p384@omnitun.test"
+remote_id = "gw-p384.omnitun.test"
+ike = ["aes256gcm16-prfsha384-ecp384"]
+esp = ["aes256gcm16"]
+
+# Signed by a CA the profile does not trust: refused...
+[[profile]]
+name = "reject-cert-untrusted"
+protocol = "ipsec"
+gateway = "172.30.0.2"
+gateway_auth = "certificate"
+ca_pem = """@pki:ca.pem@"""
+local_id = "psk-rogue@omnitun.test"
+remote_id = "gw-rogue.omnitun.test"
+ike = ["aes256gcm16-prfsha256-ecp256"]
+esp = ["aes256gcm16"]
+
+# ...unless pinned.
+[[profile]]
+name = "cert-pinned"
+protocol = "ipsec"
+gateway = "172.30.0.2"
+gateway_auth = "certificate"
+trusted_cert = ["@pki:gw-rogue.sha256@"]
+local_id = "psk-rogue@omnitun.test"
+remote_id = "gw-rogue.omnitun.test"
+ike = ["aes256gcm16-prfsha256-ecp256"]
+esp = ["aes256gcm16"]
+
+# A pinned certificate that is not the one presented: blocked.
+[[profile]]
+name = "reject-cert-changed"
+protocol = "ipsec"
+gateway = "172.30.0.2"
+gateway_auth = "certificate"
+ca_pem = """@pki:ca.pem@"""
+trusted_cert = ["@pki:gw-p256.sha256@"]
+local_id = "eap-rsa@omnitun.test"
+remote_id = "gw-rsa.omnitun.test"
+username = "alice"
+ike = ["aes256gcm16-prfsha256-ecp256"]
+esp = ["aes256gcm16"]
+
+# The profile expects a certificate, the gateway uses the PSK: refused.
+[[profile]]
+name = "reject-psk-downgrade"
+protocol = "ipsec"
+gateway = "172.30.0.2"
+gateway_auth = "certificate"
+local_id = "psk@omnitun.test"
+remote_id = "gw.omnitun.test"
+ike = ["aes256gcm16-prfsha256-ecp256"]
+esp = ["aes256gcm16"]
+
+# Our certificate: the interop client signs with the PKCS#8 key in place
+# of the Keychain.
+[[profile]]
+name = "cert-client-rsa"
+protocol = "ipsec"
+gateway = "172.30.0.2"
+gateway_auth = "certificate"
+ca_pem = """@pki:ca.pem@"""
+client_certificate = "@pki:client-rsa.sha256@"
+client_chain_pem = """@pki:client-rsa.pem@"""
+local_id = "client-rsa@omnitun.test"
+remote_id = "gw-rsa.omnitun.test"
+ike = ["aes256gcm16-prfsha256-ecp256"]
+esp = ["aes256gcm16"]
+
+# The certificate's subject as identity (no local_id).
+[[profile]]
+name = "cert-client-p256"
+protocol = "ipsec"
+gateway = "172.30.0.2"
+gateway_auth = "certificate"
+ca_pem = """@pki:ca.pem@"""
+client_certificate = "@pki:client-p256.sha256@"
+client_chain_pem = """@pki:client-p256.pem@"""
+remote_id = "gw-p256.omnitun.test"
+ike = ["aes256gcm16-prfsha256-ecp256"]
+esp = ["aes256gcm16"]
+
+[[profile]]
+name = "cert-client-psk-gateway"
+protocol = "ipsec"
+gateway = "172.30.0.2"
+client_certificate = "@pki:client-p384.sha256@"
+client_chain_pem = """@pki:client-p384.pem@"""
+local_id = "client-p384@omnitun.test"
+remote_id = "gw.omnitun.test"
+ike = ["aes256gcm16-prfsha384-ecp384"]
+esp = ["aes256gcm16"]
+
+# A client certificate from a CA the gateway does not trust.
+[[profile]]
+name = "reject-client-untrusted"
+protocol = "ipsec"
+gateway = "172.30.0.2"
+gateway_auth = "certificate"
+ca_pem = """@pki:ca.pem@"""
+client_certificate = "@pki:client-rogue.sha256@"
+client_chain_pem = """@pki:client-rogue.pem@"""
+local_id = "client-rogue@omnitun.test"
+remote_id = "gw-rsa.omnitun.test"
+ike = ["aes256gcm16-prfsha256-ecp256"]
+esp = ["aes256gcm16"]
+
+# IKEv1 main mode (identity protection), with and without XAuth.
+[[profile]]
+name = "v1-main-xauth"
+protocol = "ipsec"
+gateway = "172.30.0.2"
+ike_version = 1
+exchange_mode = "main"
+xauth = true
+local_id = "xauth-main@omnitun.test"
+username = "alice"
+ike = ["aes256-sha256-modp1536"]
+esp = ["aes256gcm16"]
+
+[[profile]]
+name = "v1-main-psk"
+protocol = "ipsec"
+gateway = "172.30.0.2"
+ike_version = 1
+exchange_mode = "main"
+local_id = "main@omnitun.test"
+remote_id = "gw.omnitun.test"
+ike = ["aes256-sha256-modp2048"]
+esp = ["aes256-sha256"]
+
+[[profile]]
+name = "v1-main-3des"
+protocol = "ipsec"
+gateway = "172.30.0.2"
+ike_version = 1
+exchange_mode = "main"
+local_id = "main@omnitun.test"
+ike = ["3des-sha1-modp1024"]
+esp = ["3des-sha1"]
+legacy_algorithms = true
+
+# The client answers a wrong PSK in *wrong-psk scenarios.
+[[profile]]
+name = "reject-v1-main-wrong-psk"
+protocol = "ipsec"
+gateway = "172.30.0.2"
+ike_version = 1
+exchange_mode = "main"
+local_id = "main@omnitun.test"
+ike = ["aes256-sha256-modp2048"]
+esp = ["aes256-sha256"]

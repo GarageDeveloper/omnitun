@@ -1,0 +1,16 @@
+Omnitun includes the following third-party software. The source code of the
+MPL-2.0 components (uniffi, unmodified) is at https://github.com/mozilla/uniffi-rs.
+
+{{#each overview}}
+- {{{name}}}: {{count}} crate(s)
+{{/each}}
+
+{{#each licenses}}
+================================================================================
+{{{name}}}
+Used by: {{#each used_by}}{{crate.name}} {{crate.version}}{{#unless @last}}, {{/unless}}{{/each}}
+--------------------------------------------------------------------------------
+
+{{{text}}}
+
+{{/each}}

@@ -1,0 +1,74 @@
+#!/bin/sh
+# Sets up the service the payload installed: group allowed to drive it,
+# account for the engines, launchd job, CLI link.
+set -u
+app="${3%/}/Applications/@PRODUCT@.app"
+plist="/Library/LaunchDaemons/@LABEL@.plist"
+
+# The app and the daemon inside it must stay root-owned: a user-writable
+# daemon binary would let any program of the session become root.
+chown -R root:wheel "$app"
+chmod -R go-w "$app"
+
+# Members of this group may use the control socket.
+dseditgroup -o read @ID@ >/dev/null 2>&1 || dseditgroup -o create -r "@PRODUCT@ VPN users" @ID@
+user=$(stat -f%Su /dev/console)
+if [ -n "$user" ] && [ "$user" != root ] && [ "$user" != loginwindow ]; then
+  dseditgroup -o edit -a "$user" -t user @ID@
+fi
+
+# Engines run as this hidden system account, without a shell or a home.
+if ! dscl . -read /Users/@ENGINE_USER@ >/dev/null 2>&1; then
+  id=300
+  while dscl . -list /Users UniqueID | awk '{print $2}' | grep -qx "$id" ||
+        dscl . -list /Groups PrimaryGroupID | awk '{print $2}' | grep -qx "$id"; do
+    id=$((id + 1))
+  done
+  dscl . -create /Groups/@ENGINE_USER@
+  dscl . -create /Groups/@ENGINE_USER@ PrimaryGroupID "$id"
+  dscl . -create /Groups/@ENGINE_USER@ RealName "@PRODUCT@ VPN engines"
+  dscl . -create /Groups/@ENGINE_USER@ Password "*"
+  dscl . -create /Users/@ENGINE_USER@
+  dscl . -create /Users/@ENGINE_USER@ UniqueID "$id"
+  dscl . -create /Users/@ENGINE_USER@ PrimaryGroupID "$id"
+  dscl . -create /Users/@ENGINE_USER@ RealName "@PRODUCT@ VPN engines"
+  dscl . -create /Users/@ENGINE_USER@ UserShell /usr/bin/false
+  dscl . -create /Users/@ENGINE_USER@ NFSHomeDirectory /var/empty
+  dscl . -create /Users/@ENGINE_USER@ Password "*"
+  dscl . -create /Users/@ENGINE_USER@ IsHidden 1
+fi
+
+# Installs made by hand before the package, and the jobs of earlier names
+# (com.vpnd, then com.omnitun.daemon before the reverse-DNS identifiers).
+for old in com.vpnd com.omnitun.daemon; do
+  launchctl bootout "system/$old" 2>/dev/null || true
+  rm -f "/Library/LaunchDaemons/$old.plist"
+done
+
+# The root daemon, its engine and the launchd job come in the package's
+# payload, root-owned; nothing is copied from the app.
+for f in /Library/PrivilegedHelperTools/@DAEMON@ /Library/PrivilegedHelperTools/@ENGINE@ "$plist"; do
+  chown root:wheel "$f"
+  chmod go-w "$f"
+done
+
+# The log names servers, accounts and addresses: readable by root and
+# the administrators only (it was world-readable before).
+log=/var/log/@DAEMON@.log
+[ -L "$log" ] && rm -f "$log"
+touch "$log"
+chown root:admin "$log"
+chmod 640 "$log"
+
+launchctl bootout system/@LABEL@ 2>/dev/null || true
+launchctl bootstrap system "$plist"
+
+mkdir -p /usr/local/bin
+# -n: replace a link, never write through one.
+ln -sfn "$app/Contents/MacOS/@CLI@" /usr/local/bin/@CLI@
+
+# Opens the app in the user's session.
+if [ -n "$user" ] && [ "$user" != root ] && [ "$user" != loginwindow ]; then
+  launchctl asuser "$(id -u "$user")" sudo -u "$user" open "$app" || true
+fi
+exit 0

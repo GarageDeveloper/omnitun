@@ -1,0 +1,249 @@
+# Client side of the scenarios, run by run.sh against the server
+# container (172.31.0.2): scenario N's server listens on port 2000+N (see
+# servers/) and answers ping on 10.8.N.1. User "alice", password
+# "alice-password", one-time code "123456" (static and dynamic
+# challenges). The interop client replaces the pki placeholders by the
+# files of make-pki.sh and signs with the client certificate's PKCS#8 key;
+# scenarios named reject-* must fail.
+
+# Certificate only, over UDP, with an RSA then an ECDSA P-256 client key.
+[[profile]]
+name = "udp-cert-rsa"
+protocol = "openvpn"
+remotes = [{ host = "172.31.0.2", port = 2001, transport = "udp" }]
+ca_pem = """@pki:ca.pem@"""
+client_certificate = "@pki:client-rsa.sha256@"
+client_chain_pem = """@pki:client-rsa.pem@"""
+
+[[profile]]
+name = "udp-cert-p256"
+protocol = "openvpn"
+remotes = [{ host = "172.31.0.2", port = 2001, transport = "udp" }]
+ca_pem = """@pki:ca.pem@"""
+client_certificate = "@pki:client-p256.sha256@"
+client_chain_pem = """@pki:client-p256.pem@"""
+
+# The server certificate's common name checked (verify-x509-name ... name).
+[[profile]]
+name = "udp-x509-name"
+protocol = "openvpn"
+remotes = [{ host = "172.31.0.2", port = 2001, transport = "udp" }]
+ca_pem = """@pki:ca.pem@"""
+client_certificate = "@pki:client-rsa.sha256@"
+client_chain_pem = """@pki:client-rsa.pem@"""
+verify_x509_name = { name = "server.omnitun.test", kind = "name" }
+
+[[profile]]
+name = "tcp-cert"
+protocol = "openvpn"
+remotes = [{ host = "172.31.0.2", port = 2002, transport = "tcp" }]
+ca_pem = """@pki:ca.pem@"""
+client_certificate = "@pki:client-rsa.sha256@"
+client_chain_pem = """@pki:client-rsa.pem@"""
+
+# auth-user-pass only: the server does not ask for a certificate.
+[[profile]]
+name = "password"
+protocol = "openvpn"
+remotes = [{ host = "172.31.0.2", port = 2003, transport = "udp" }]
+ca_pem = """@pki:ca.pem@"""
+auth_user_pass = true
+username = "alice"
+
+[[profile]]
+name = "cert-password"
+protocol = "openvpn"
+remotes = [{ host = "172.31.0.2", port = 2004, transport = "udp" }]
+ca_pem = """@pki:ca.pem@"""
+client_certificate = "@pki:client-rsa.sha256@"
+client_chain_pem = """@pki:client-rsa.pem@"""
+auth_user_pass = true
+username = "alice"
+
+# The password goes as SCRV1:base64(password):base64(code).
+[[profile]]
+name = "static-challenge"
+protocol = "openvpn"
+remotes = [{ host = "172.31.0.2", port = 2005, transport = "udp" }]
+ca_pem = """@pki:ca.pem@"""
+auth_user_pass = true
+username = "alice"
+static_challenge = { text = "Enter the code", echo = true }
+
+# The server answers the password with a CRV1 challenge: the code is
+# asked, then sent on a new connection.
+[[profile]]
+name = "dynamic-challenge"
+protocol = "openvpn"
+remotes = [{ host = "172.31.0.2", port = 2006, transport = "udp" }]
+ca_pem = """@pki:ca.pem@"""
+auth_user_pass = true
+username = "alice"
+
+[[profile]]
+name = "tls-auth"
+protocol = "openvpn"
+remotes = [{ host = "172.31.0.2", port = 2007, transport = "udp" }]
+ca_pem = """@pki:ca.pem@"""
+client_certificate = "@pki:client-rsa.sha256@"
+client_chain_pem = """@pki:client-rsa.pem@"""
+control_channel = "tls-auth"
+static_key = """@pki:tls-auth.key@"""
+key_direction = 1
+auth_digest = "SHA256"
+
+[[profile]]
+name = "tls-crypt"
+protocol = "openvpn"
+remotes = [{ host = "172.31.0.2", port = 2008, transport = "udp" }]
+ca_pem = """@pki:ca.pem@"""
+client_certificate = "@pki:client-rsa.sha256@"
+client_chain_pem = """@pki:client-rsa.pem@"""
+control_channel = "tls-crypt"
+static_key = """@pki:tls-crypt.key@"""
+
+# Each server allows one data cipher; the client offers the three.
+[[profile]]
+name = "cipher-aes-256-gcm"
+protocol = "openvpn"
+remotes = [{ host = "172.31.0.2", port = 2009, transport = "udp" }]
+ca_pem = """@pki:ca.pem@"""
+client_certificate = "@pki:client-rsa.sha256@"
+client_chain_pem = """@pki:client-rsa.pem@"""
+
+[[profile]]
+name = "cipher-aes-128-gcm"
+protocol = "openvpn"
+remotes = [{ host = "172.31.0.2", port = 2010, transport = "udp" }]
+ca_pem = """@pki:ca.pem@"""
+client_certificate = "@pki:client-rsa.sha256@"
+client_chain_pem = """@pki:client-rsa.pem@"""
+
+[[profile]]
+name = "cipher-chacha20-poly1305"
+protocol = "openvpn"
+remotes = [{ host = "172.31.0.2", port = 2011, transport = "udp" }]
+ca_pem = """@pki:ca.pem@"""
+client_certificate = "@pki:client-rsa.sha256@"
+client_chain_pem = """@pki:client-rsa.pem@"""
+
+# Compression framing pushed by the server, without compression.
+[[profile]]
+name = "compress-stub-v2"
+protocol = "openvpn"
+remotes = [{ host = "172.31.0.2", port = 2012, transport = "udp" }]
+ca_pem = """@pki:ca.pem@"""
+client_certificate = "@pki:client-rsa.sha256@"
+client_chain_pem = """@pki:client-rsa.pem@"""
+compression = "stub-v2"
+
+[[profile]]
+name = "comp-lzo-no"
+protocol = "openvpn"
+remotes = [{ host = "172.31.0.2", port = 2013, transport = "udp" }]
+ca_pem = """@pki:ca.pem@"""
+client_certificate = "@pki:client-rsa.sha256@"
+client_chain_pem = """@pki:client-rsa.pem@"""
+compression = "lzo"
+
+[[profile]]
+name = "topology-net30"
+protocol = "openvpn"
+remotes = [{ host = "172.31.0.2", port = 2014, transport = "udp" }]
+ca_pem = """@pki:ca.pem@"""
+client_certificate = "@pki:client-rsa.sha256@"
+client_chain_pem = """@pki:client-rsa.pem@"""
+
+# Pushed route 10.99.0.0/16 (10.99.0.1 is pinged), redirect-gateway def1,
+# DNS 10.8.15.53 and domain omnitun.test.
+[[profile]]
+name = "push-options"
+protocol = "openvpn"
+remotes = [{ host = "172.31.0.2", port = 2015, transport = "udp" }]
+ca_pem = """@pki:ca.pem@"""
+client_certificate = "@pki:client-rsa.sha256@"
+client_chain_pem = """@pki:client-rsa.pem@"""
+
+# The server renegotiates every 60 s; run.sh keeps the tunnel up and pings
+# across it (INTEROP_DURATION).
+[[profile]]
+name = "reneg"
+protocol = "openvpn"
+remotes = [{ host = "172.31.0.2", port = 2016, transport = "udp" }]
+ca_pem = """@pki:ca.pem@"""
+client_certificate = "@pki:client-rsa.sha256@"
+client_chain_pem = """@pki:client-rsa.pem@"""
+
+[[profile]]
+name = "tls12"
+protocol = "openvpn"
+remotes = [{ host = "172.31.0.2", port = 2017, transport = "udp" }]
+ca_pem = """@pki:ca.pem@"""
+client_certificate = "@pki:client-rsa.sha256@"
+client_chain_pem = """@pki:client-rsa.pem@"""
+
+[[profile]]
+name = "tls13"
+protocol = "openvpn"
+remotes = [{ host = "172.31.0.2", port = 2018, transport = "udp" }]
+ca_pem = """@pki:ca.pem@"""
+client_certificate = "@pki:client-rsa.sha256@"
+client_chain_pem = """@pki:client-rsa.pem@"""
+
+# A server certificate without serverAuth: accepted without
+# remote-cert-tls server.
+[[profile]]
+name = "no-eku-unchecked"
+protocol = "openvpn"
+remotes = [{ host = "172.31.0.2", port = 2019, transport = "udp" }]
+ca_pem = """@pki:ca.pem@"""
+client_certificate = "@pki:client-rsa.sha256@"
+client_chain_pem = """@pki:client-rsa.pem@"""
+remote_cert_tls = false
+
+# Expected failures.
+[[profile]]
+name = "reject-password"
+protocol = "openvpn"
+remotes = [{ host = "172.31.0.2", port = 2003, transport = "udp" }]
+ca_pem = """@pki:ca.pem@"""
+auth_user_pass = true
+username = "alice"
+
+# A client certificate from another CA: the server refuses it.
+[[profile]]
+name = "reject-rogue-client"
+protocol = "openvpn"
+remotes = [{ host = "172.31.0.2", port = 2001, transport = "udp" }]
+ca_pem = """@pki:ca.pem@"""
+client_certificate = "@pki:client-rogue.sha256@"
+client_chain_pem = """@pki:client-rogue.pem@"""
+
+# A server certificate without serverAuth (remote-cert-tls server).
+[[profile]]
+name = "reject-server-eku"
+protocol = "openvpn"
+remotes = [{ host = "172.31.0.2", port = 2019, transport = "udp" }]
+ca_pem = """@pki:ca.pem@"""
+client_certificate = "@pki:client-rsa.sha256@"
+client_chain_pem = """@pki:client-rsa.pem@"""
+
+# Not the server's tls-crypt key: the server drops every packet.
+[[profile]]
+name = "reject-tls-crypt-key"
+protocol = "openvpn"
+remotes = [{ host = "172.31.0.2", port = 2008, transport = "udp" }]
+ca_pem = """@pki:ca.pem@"""
+client_certificate = "@pki:client-rsa.sha256@"
+client_chain_pem = """@pki:client-rsa.pem@"""
+control_channel = "tls-crypt"
+static_key = """@pki:tls-crypt-other.key@"""
+
+[[profile]]
+name = "reject-x509-name"
+protocol = "openvpn"
+remotes = [{ host = "172.31.0.2", port = 2001, transport = "udp" }]
+ca_pem = """@pki:ca.pem@"""
+client_certificate = "@pki:client-rsa.sha256@"
+client_chain_pem = """@pki:client-rsa.pem@"""
+verify_x509_name = { name = "other.omnitun.test", kind = "name" }

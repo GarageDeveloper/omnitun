@@ -1,0 +1,24 @@
+[package]
+name = "vpn-l2tp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vpn-core.workspace = true
+vpn-ipsec.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+ipnet.workspace = true
+rand.workspace = true
+hex.workspace = true
+md-5 = "0.10"
+zeroize = "1"
+
+[dev-dependencies]
+toml.workspace = true
+tracing-subscriber.workspace = true

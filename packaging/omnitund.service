@@ -1,0 +1,24 @@
+[Unit]
+Description=Omnitun VPN daemon (Fortinet SSL VPN and IPsec)
+After=network-online.target systemd-resolved.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/sbin/omnitund
+# A shutdown request exits cleanly so that the new binary starts.
+Restart=always
+# Time to close the tunnels before SIGKILL (omnitund gives up after 15 s).
+TimeoutStopSec=30
+# Root is only needed for tun, routes and resolved, and to start the engines
+# under their own account (setuid, setgid, kill); keep the rest locked down.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID CAP_KILL
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RuntimeDirectory=omnitund
+ReadWritePaths=/run
+NoNewPrivileges=yes
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

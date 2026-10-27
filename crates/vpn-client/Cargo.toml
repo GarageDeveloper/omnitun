@@ -1,0 +1,34 @@
+[package]
+name = "vpn-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vpn-core.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+toml_edit = "0.25"
+zeroize = "1"
+plist = "1"
+base64 = "0.23"
+hex.workspace = true
+ipnet.workspace = true
+sha2 = "0.10"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+tracing.workspace = true
+libc = "0.2"
+x509-parser = "0.18"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+keyring = { version = "3", features = ["apple-native", "sync-secret-service", "crypto-rust"] }
+
+[dev-dependencies]
+rcgen = "0.14.10"
+ring = "0.17"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = { version = "3", features = ["macos-12"] }

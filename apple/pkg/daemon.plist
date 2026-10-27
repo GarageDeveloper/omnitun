@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>@LABEL@</string>
+    <!-- Copied out of the app by the installer: /Applications is writable by
+         administrators, /Library/PrivilegedHelperTools only by root. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/PrivilegedHelperTools/@DAEMON@</string>
+    </array>
+    <!-- Shows the app's name and icon in Login Items. -->
+    <key>AssociatedBundleIdentifiers</key>
+    <array>
+        <string>@BUNDLE_ID@</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <!-- Time to close the tunnels on stop before SIGKILL (the daemon gives up after 15 s). -->
+    <key>ExitTimeOut</key>
+    <integer>30</integer>
+    <!-- The log names servers, accounts and addresses: root's and the
+         administrators' only (the installer sets root:admin 0640). -->
+    <key>Umask</key>
+    <integer>23</integer>
+    <key>StandardErrorPath</key>
+    <string>/var/log/@DAEMON@.log</string>
+</dict>
+</plist>
