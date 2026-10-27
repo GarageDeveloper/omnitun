@@ -20,8 +20,16 @@ final class Notifier {
         await center?.notificationSettings().authorizationStatus
     }
 
+    /// One request at a time: a second one while the system prompt is up
+    /// fails at once, before the user answers.
+    private var pending: Task<Void, Never>?
+
     func requestAuthorization() async {
-        _ = try? await center?.requestAuthorization(options: [.alert, .sound])
+        if let pending { return await pending.value }
+        let request = Task { _ = try? await center?.requestAuthorization(options: [.alert, .sound]) }
+        pending = request
+        await request.value
+        pending = nil
     }
 
     func post(title: String, body: String) {
