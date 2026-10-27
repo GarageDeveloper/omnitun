@@ -105,6 +105,9 @@ struct WelcomeView: View {
                                 notifications = await Notifier.shared.status()
                             }
                         }
+                    } else if notifications == .denied, let id = Bundle.main.bundleIdentifier,
+                              let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=\(id)") {
+                        Button("Open System Settings") { NSWorkspace.shared.open(url) }
                     }
                 }
                 Toggle(isOn: $openAtLogin) {
@@ -134,7 +137,12 @@ struct WelcomeView: View {
         .frame(width: 480)
         .task {
             model.refreshService()
-            notifications = await Notifier.shared.status()
+            // The answer comes from the system prompt or System Settings,
+            // whenever the user gives it: follow it while the window is open.
+            while !Task.isCancelled {
+                notifications = await Notifier.shared.status()
+                try? await Task.sleep(for: .seconds(1))
+            }
         }
     }
 }
