@@ -1134,6 +1134,21 @@ mod tests {
     }
 
     #[test]
+    fn split_mode_overrides_a_full_tunnel() {
+        let p = profile(serde_json::json!({ "full_tunnel": true, "split_routes": ["10.1.0.0/16", "192.168.5.0/24"] }));
+        let split = p.clone().in_split_mode().unwrap();
+        // The gateway takes all traffic, or pushes its own networks: only
+        // the split-mode networks remain.
+        for pushed in [settings(&[], true, &[]), settings(&["10.0.0.0/8"], false, &[])] {
+            let s = apply_profile(&split, pushed).unwrap();
+            assert!(!s.full_tunnel);
+            assert!(s.routes.starts_with(&["10.1.0.0/16".parse().unwrap(), "192.168.5.0/24".parse().unwrap()]));
+            assert!(!s.routes.contains(&"10.0.0.0/8".parse().unwrap()));
+        }
+        assert!(apply_profile(&p, settings(&[], true, &[])).unwrap().full_tunnel, "normal connection unchanged");
+    }
+
+    #[test]
     fn extra_dns_domains_are_merged_once() {
         let p = profile(serde_json::json!({ "dns_domains": ["corp.example", "extra.example", "extra.example"] }));
         let s = apply_profile(&p, settings(&["10.0.0.0/8"], false, &["corp.example"])).unwrap();

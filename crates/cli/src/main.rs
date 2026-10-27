@@ -36,6 +36,10 @@ enum Command {
         /// Without the VPNs the profiles are chained through.
         #[arg(long)]
         direct: bool,
+        /// In split mode: only the profiles' `split_routes` go through the
+        /// VPN.
+        #[arg(long)]
+        split: bool,
     },
     /// Tear down sessions.
     Disconnect {
@@ -167,7 +171,7 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("note: using {}; move it to ~/.config/{}/", store.path().display(), brand::ID);
     }
     match cli.command {
-        Command::Connect { names, direct } => {
+        Command::Connect { names, direct, split } => {
             if names.is_empty() {
                 bail!("name at least one profile");
             }
@@ -176,7 +180,9 @@ async fn main() -> anyhow::Result<()> {
                 let profile = store.find(&key)?;
                 let name = profile.name.clone();
                 let terminal = Terminal { name: name.clone(), store: &store };
-                if let Err(e) = vpn_client::connect_with(profile.clone(), &store, brand::CLI, &terminal, direct).await {
+                let options = vpn_client::ConnectOptions { direct, split };
+                if let Err(e) = vpn_client::connect_with(profile.clone(), &store, brand::CLI, &terminal, options).await
+                {
                     if let FailureKind::CertificateChanged { certificate, pinned } = vpn_core::failure::kind_of(&e) {
                         eprintln!(
                             "{name}: the server certificate CHANGED. This can be a renewal or an interception.\n  \
@@ -248,6 +254,10 @@ async fn main() -> anyhow::Result<()> {
             }
             if let Some(routes) = &profile.routes {
                 println!("  networks: {}", routes.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "));
+            }
+            if !profile.split_routes.is_empty() {
+                let networks = profile.split_routes.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+                println!("  networks in split mode: {networks}");
             }
             for domain in &profile.dns_domains {
                 println!("  names ending in .{domain} are resolved by the VPN");

@@ -319,7 +319,7 @@ struct ReplaceCertificateView: View {
                     do {
                         try model.client.replaceTrustedCertificate(id: profile, sha256: presented.sha256)
                         close()
-                        model.connect(profile)
+                        model.connectAgain(profile)
                     } catch {
                         self.error = describe(error)
                     }

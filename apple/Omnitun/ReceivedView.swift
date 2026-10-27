@@ -67,6 +67,12 @@ struct ReceivedView: View {
                         Text(verbatim: routes.joined(separator: ", ")).font(.caption).textSelection(.enabled)
                     }
                 }
+                if !form.splitRoutes.isEmpty {
+                    GridRow(alignment: .top) {
+                        Text("Split Mode").foregroundStyle(.secondary)
+                        Text(verbatim: form.splitRoutes.joined(separator: ", ")).font(.caption).textSelection(.enabled)
+                    }
+                }
                 if !form.dnsDomains.isEmpty {
                     GridRow(alignment: .top) {
                         Text("Name Resolution").foregroundStyle(.secondary)

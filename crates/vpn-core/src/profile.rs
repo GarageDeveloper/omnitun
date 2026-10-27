@@ -30,6 +30,12 @@ pub struct Profile {
     /// Force (or refuse) full-tunnel mode regardless of the gateway.
     #[serde(default)]
     pub full_tunnel: Option<bool>,
+    /// The networks of a connection in split mode, chosen when connecting
+    /// ("Connect in Split Mode", `omnitunctl connect --split`): only they go
+    /// through the VPN, whatever the gateway and `full_tunnel` say. Empty:
+    /// no split mode.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub split_routes: Vec<Ipv4Net>,
     /// Extra split-DNS domains, in addition to those pushed.
     #[serde(default)]
     pub dns_domains: Vec<String>,
@@ -360,6 +366,9 @@ pub fn valid_folder(folder: &str) -> bool {
 /// Most VPNs a profile lists to be chained through.
 pub const MAX_VIA: usize = 4;
 
+/// At most as many as the daemon accepts from a gateway.
+pub const MAX_SPLIT_ROUTES: usize = 256;
+
 /// Lowest SAML callback port: the daemon runs as root and must not be
 /// made to listen on a privileged port.
 pub const MIN_SAML_PORT: u16 = 1024;
@@ -496,10 +505,29 @@ impl Profile {
                 anyhow::bail!("invalid VPN to chain through: {parent:?}");
             }
         }
+        if self.split_routes.len() > MAX_SPLIT_ROUTES {
+            anyhow::bail!("split mode takes at most {MAX_SPLIT_ROUTES} networks");
+        }
+        if self.split_routes.iter().any(|net| net.prefix_len() == 0) {
+            anyhow::bail!("split mode is for some networks: 0.0.0.0/0 would take all traffic");
+        }
         if self.description.as_ref().is_some_and(|d| d.len() > 256 || d.chars().any(char::is_control)) {
             anyhow::bail!("the description must be one line of at most 256 characters");
         }
         Ok(())
+    }
+}
+
+impl Profile {
+    /// This profile as connected in split mode: `split_routes` replace the
+    /// gateway's routes, and the tunnel never takes all traffic.
+    pub fn in_split_mode(mut self) -> anyhow::Result<Self> {
+        if self.split_routes.is_empty() {
+            anyhow::bail!("{} has no networks for split mode (split_routes)", self.name);
+        }
+        self.routes = Some(self.split_routes.clone());
+        self.full_tunnel = Some(false);
+        Ok(self)
     }
 }
 
@@ -602,6 +630,36 @@ mod tests {
         let text = format!("{:?}", ssl("vpn.example.com", FortiSslAuth::Password));
         assert!(!text.contains("SECRET-KEY"), "{text}");
         assert!(text.contains("vpn.example.com"));
+    }
+
+    #[test]
+    fn split_mode() {
+        let mut p = ssl("vpn.example.com", FortiSslAuth::Password);
+        p.full_tunnel = Some(true);
+        let err = p.clone().in_split_mode().unwrap_err();
+        assert!(err.to_string().contains("no networks for split mode"), "{err}");
+        p.split_routes = vec!["10.1.0.0/16".parse().unwrap()];
+        p.exclusive = true;
+        let split = p.clone().in_split_mode().unwrap();
+        assert_eq!(split.routes, Some(p.split_routes.clone()));
+        assert_eq!(split.full_tunnel, Some(false));
+        assert!(split.exclusive, "a company VPN still runs alone");
+        assert!(split.validate().is_ok());
+
+        p.split_routes.push("0.0.0.0/0".parse().unwrap());
+        assert!(p.validate().is_err(), "0.0.0.0/0 is not a split");
+        p.split_routes =
+            (0..=MAX_SPLIT_ROUTES as u32).map(|i| Ipv4Net::new((0x0a00_0000 + (i << 8)).into(), 24).unwrap()).collect();
+        assert!(p.validate().is_err());
+
+        let file: ProfileFile = toml::from_str(
+            "[[profile]]\nname = \"t\"\nprotocol = \"forti-ssl\"\nhost = \"h.example\"\nsplit_routes = [\"10.2.0.0/16\"]",
+        )
+        .unwrap();
+        assert_eq!(file.profiles[0].split_routes, vec!["10.2.0.0/16".parse::<Ipv4Net>().unwrap()]);
+        let written =
+            toml::to_string(&ProfileFile { profiles: vec![ssl("h.example", FortiSslAuth::Password)] }).unwrap();
+        assert!(!written.contains("split_routes"), "left out when empty");
     }
 
     #[test]

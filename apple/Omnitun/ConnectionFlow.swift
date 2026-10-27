@@ -17,6 +17,8 @@ final class ConnectionFlow: ConnectionDelegate, @unchecked Sendable {
     let profile: String
     /// Without the VPNs the profile is chained through.
     let direct: Bool
+    /// Only the profile's split-mode networks through the VPN.
+    let split: Bool
     private weak var model: AppModel?
     // Main thread only, like everything below.
     private var connection: Connection?
@@ -34,17 +36,18 @@ final class ConnectionFlow: ConnectionDelegate, @unchecked Sendable {
     }
 
     @MainActor
-    init(profile: String, direct: Bool = false, model: AppModel) {
+    init(profile: String, direct: Bool = false, split: Bool = false, model: AppModel) {
         self.profile = profile
         self.current = profile
         self.direct = direct
+        self.split = split
         self.model = model
     }
 
     @MainActor
     func start(client: Client) {
         self.client = client
-        connection = client.connect(id: profile, direct: direct, delegate: self)
+        connection = client.connect(id: profile, direct: direct, split: split, delegate: self)
     }
 
     /// Gives up: the daemon drops the attempt once its client is gone; the

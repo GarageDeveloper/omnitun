@@ -585,6 +585,7 @@ fn convert(config: &Config, text: &str, notes: &mut Vec<String>) -> anyhow::Resu
         }),
         routes,
         full_tunnel,
+        split_routes: Vec::new(),
         dns_domains,
         allow_route_overlap: false,
         via: Vec::new(),

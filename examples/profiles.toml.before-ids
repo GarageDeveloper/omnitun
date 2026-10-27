@@ -1,0 +1,44 @@
+# ~/.config/omnitun/profiles.toml
+
+# Fortinet SSL VPN, password + FortiToken (the token is asked when needed).
+[[profile]]
+name = "paris"
+protocol = "forti-ssl"
+host = "vpn.example.com"
+username = "alice"
+# Self-signed FortiGate: pin its certificate (omnitunctl prints the fingerprint
+# when validation fails).
+trusted_cert = ["3f1a…"]
+# Extra split-DNS domains on top of what the gateway pushes.
+dns_domains = ["corp.example"]
+
+# Fortinet SSL VPN with SAML (Azure AD, Okta…) in the browser.
+[[profile]]
+name = "lab"
+protocol = "forti-ssl"
+host = "lab.example.com"
+port = 10443
+auth = { method = "saml", port = 8020 }
+
+# FortiGate IKEv2 dial-up: PSK + EAP username/password.
+[[profile]]
+name = "branch"
+protocol = "ipsec"
+gateway = "203.0.113.10"
+username = "bob"
+local_id = "fct-dialup"
+# Ignore the pushed traffic selectors and only route this network.
+routes = ["10.50.0.0/16"]
+
+# A gateway that takes all traffic, also offered in split mode: the menu's
+# "Connect in Split Mode" or `omnitunctl connect --split office` sends only
+# these networks through the VPN. dns_domains say which names its DNS
+# servers resolve then.
+[[profile]]
+name = "office"
+protocol = "l2tp"
+gateway = "vpn.example.com"
+username = "carol"
+full_tunnel = true
+split_routes = ["10.20.0.0/16", "192.168.30.0/24"]
+dns_domains = ["office.example"]

@@ -69,17 +69,28 @@ pub async fn connect(
     client: &str,
     user: &dyn Interaction,
 ) -> anyhow::Result<()> {
-    connect_with(profile, store, client, user, false).await
+    connect_with(profile, store, client, user, ConnectOptions::default()).await
 }
 
-/// `direct`: without the VPNs the profile is chained through.
+/// How to connect, besides the profile.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ConnectOptions {
+    /// Without the VPNs the profile is chained through.
+    pub direct: bool,
+    /// In split mode: only the profile's `split_routes` go through the VPN.
+    pub split: bool,
+}
+
 pub async fn connect_with(
     profile: Profile,
     store: &ProfileStore,
     client: &str,
     user: &dyn Interaction,
-    direct: bool,
+    options: ConnectOptions,
 ) -> anyhow::Result<()> {
+    let ConnectOptions { direct, split } = options;
+    // A company VPN still runs alone in split mode.
+    let profile = if split { profile.in_split_mode()? } else { profile };
     let sessions = Daemon::open(client).await?.status().await?;
     let others = exclusive_conflicts(&profile, &sessions, &store.load()?, direct);
     ensure!(others.is_empty(), "{}", exclusive_refusal(&profile, &others));
