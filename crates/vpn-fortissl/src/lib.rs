@@ -114,11 +114,14 @@ impl Engine for FortiSslEngine {
             FortiSslAuth::Saml { port } => auth::saml_login(&mut client, &self.profile, *port, ctx).await?,
         }
         tracing::info!(session = ctx.name, "authenticated to {}", self.profile.host);
+        // Kept from now on: `disconnect` logs out even if the rest fails or
+        // the attempt is stopped.
+        let client = self.client.insert(client);
 
-        let cfg = Self::fetch_config(&mut client).await?;
+        let cfg = Self::fetch_config(client).await?;
         tracing::debug!(session = ctx.name, ?cfg, "tunnel configuration");
 
-        let mut tunnel = Tunnel::open(&client, MRU).await?;
+        let mut tunnel = Tunnel::open(client, MRU).await?;
         tunnel.negotiate(ctx).await?;
 
         let address = tunnel.ppp.address().or(cfg.assigned).context("gateway assigned no tunnel address")?;
@@ -139,7 +142,6 @@ impl Engine for FortiSslEngine {
         };
         tracing::info!(session = ctx.name, %address, routes = settings.routes.len(), full_tunnel, "tunnel up");
 
-        self.client = Some(client);
         self.tunnel = Some(tunnel);
         Ok(settings)
     }

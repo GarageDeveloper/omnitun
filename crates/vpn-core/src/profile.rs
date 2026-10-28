@@ -340,6 +340,15 @@ impl ProtocolConfig {
         }
     }
 
+    /// Every server the engine may connect to: an OpenVPN profile's
+    /// remotes, tried in turn, or the one endpoint.
+    pub fn servers(&self) -> Vec<(&str, u16)> {
+        match self {
+            ProtocolConfig::OpenVpn(p) => p.remotes.iter().map(|r| (r.host.as_str(), r.port)).collect(),
+            _ => vec![self.endpoint()],
+        }
+    }
+
     /// The certificate authorities the Keychain trusts, for this
     /// connection; none for OpenVPN, which only trusts its own CA.
     pub fn keychain_ca_pem(&mut self) -> Option<&mut Option<String>> {

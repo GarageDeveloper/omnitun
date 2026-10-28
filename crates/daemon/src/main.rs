@@ -7,9 +7,10 @@ mod logfile;
 mod manager;
 mod prompter;
 
+use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use clap::Parser;
@@ -28,6 +29,9 @@ use crate::prompter::ClientLink;
 const CLIENT_QUEUE: usize = 64;
 /// Concurrent control connections.
 const MAX_CLIENTS: usize = 32;
+/// Of which one user (root aside) may hold: more than the sessions a user
+/// may start at once, with their watchers, but not every slot.
+const MAX_CLIENTS_PER_USER: usize = 12;
 
 /// Requests larger than this are rejected (a profile with an inlined CA
 /// bundle stays well below).
@@ -137,6 +141,7 @@ async fn main() -> anyhow::Result<()> {
     manager::prepare_prompt_dir(&vpn_core::ipc::prompt_socket_dir(&args.socket))?;
     let manager = Arc::new(Manager::new(launcher, args.socket.clone()));
     let clients = Arc::new(tokio::sync::Semaphore::new(MAX_CLIENTS));
+    let quotas = Arc::new(Quotas::default());
 
     // Every catchable signal that would end the process tears the tunnels
     // down first (SIGKILL cannot be caught: the route journal covers it).
@@ -148,8 +153,13 @@ async fn main() -> anyhow::Result<()> {
         tokio::select! {
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => {
+                    let Ok(uid) = stream.peer_cred().map(|c| c.uid()) else { continue };
                     let Ok(permit) = clients.clone().try_acquire_owned() else {
                         tracing::warn!("too many control connections, refusing one");
+                        continue;
+                    };
+                    let Some(slot) = quotas.take(uid) else {
+                        tracing::warn!("too many control connections from uid {uid}, refusing one");
                         continue;
                     };
                     let manager = manager.clone();
@@ -157,7 +167,7 @@ async fn main() -> anyhow::Result<()> {
                         if let Err(e) = serve(stream, manager).await {
                             tracing::debug!("client: {e:#}");
                         }
-                        drop(permit);
+                        drop((permit, slot));
                     });
                 }
                 Err(e) => tracing::warn!("accept: {e}"),
@@ -198,6 +208,42 @@ fn bind(path: &str, group: &str) -> anyhow::Result<UnixListener> {
     std::os::unix::fs::chown(path, Some(0), Some(gid.as_raw()))?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
     Ok(listener)
+}
+
+/// Control connections per user: one group member cannot take every slot
+/// and lock the others out (connections that said hello have no idle
+/// timeout: a watcher or a waiting `connect` is idle).
+#[derive(Default)]
+struct Quotas(Mutex<HashMap<u32, usize>>);
+
+/// One connection of `uid`, given back when dropped.
+struct Slot {
+    quotas: Arc<Quotas>,
+    uid: u32,
+}
+
+impl Quotas {
+    fn take(self: &Arc<Self>, uid: u32) -> Option<Slot> {
+        let mut counts = self.0.lock().unwrap();
+        let count = counts.entry(uid).or_default();
+        if uid != 0 && *count >= MAX_CLIENTS_PER_USER {
+            return None;
+        }
+        *count += 1;
+        Some(Slot { quotas: self.clone(), uid })
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let mut counts = self.quotas.0.lock().unwrap();
+        if let Some(count) = counts.get_mut(&self.uid) {
+            *count -= 1;
+            if *count == 0 {
+                counts.remove(&self.uid);
+            }
+        }
+    }
 }
 
 /// Optional capabilities announced in `Hello`.
@@ -348,6 +394,19 @@ mod tests {
 
     fn hello(protocol: u32) -> serde_json::Value {
         serde_json::json!({ "request": "hello", "protocol": protocol, "client": "test", "version": "0" })
+    }
+
+    #[test]
+    fn one_user_cannot_hold_every_connection() {
+        let quotas = Arc::new(Quotas::default());
+        let mine: Vec<Slot> = (0..MAX_CLIENTS_PER_USER).map(|_| quotas.take(1000).unwrap()).collect();
+        assert!(quotas.take(1000).is_none());
+        let theirs = quotas.take(1001);
+        assert!(theirs.is_some() && quotas.take(0).is_some(), "other users and root still get in");
+        drop(mine);
+        assert!(quotas.take(1000).is_some(), "slots come back");
+        drop(theirs);
+        assert!(quotas.0.lock().unwrap().is_empty(), "no count left behind");
     }
 
     #[tokio::test]

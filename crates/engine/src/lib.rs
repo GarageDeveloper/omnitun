@@ -102,17 +102,27 @@ async fn attempt(
     fds: Arc<StdUnixStream>,
 ) -> anyhow::Result<()> {
     let mut engine = make_engine(profile);
-    let settings = {
+    // None: stopped by the daemon.
+    let connected = {
         let connect = engine.connect(ctx);
         tokio::pin!(connect);
         loop {
             tokio::select! {
-                res = &mut connect => break res?,
+                res = &mut connect => break Some(res),
                 message = messages.recv() => match message {
-                    Some(ToEngine::Stop) | None => return Ok(()),
+                    Some(ToEngine::Stop) | None => break None,
                     Some(other) => tracing::warn!("unexpected {other:?} while connecting"),
                 },
             }
+        }
+    };
+    let settings = match connected {
+        Some(Ok(settings)) => settings,
+        // Possibly logged in already (a FortiGate session cookie): closed
+        // on the gateway too.
+        ended => {
+            logout(engine.as_mut()).await;
+            return ended.map_or(Ok(()), |res| res.map(drop));
         }
     };
     let mtu = settings.mtu;

@@ -234,50 +234,51 @@ impl Manager {
     /// Stops a session; `uid` must own it unless it is root.
     /// `id`: the session's profile id.
     pub async fn disconnect(&self, id: &str, uid: u32) -> anyhow::Result<()> {
-        let task = {
+        let (task, info) = {
             let mut sessions = self.sessions.lock().unwrap();
             let session = sessions
                 .get_mut(id)
                 .filter(|s| uid == 0 || s.owner == uid)
                 .with_context(|| format!("{id} is not active"))?;
             session.cancel.cancel();
-            session.task.take()
+            (session.task.take(), session.info.clone())
         };
         if let Some(task) = task {
             let _ = task.await;
         }
-        self.forget(id);
+        self.forget(id, &info);
         Ok(())
     }
 
     /// Closes every session at once: the service manager kills the daemon
     /// if stopping takes too long, so teardowns must not queue up.
     pub async fn disconnect_all(&self) {
-        let tasks: Vec<(String, Option<tokio::task::JoinHandle<()>>)> = {
+        let tasks: Vec<_> = {
             let mut sessions = self.sessions.lock().unwrap();
             sessions
                 .iter_mut()
                 .map(|(name, session)| {
                     session.cancel.cancel();
-                    (name.clone(), session.task.take())
+                    (name.clone(), session.task.take(), session.info.clone())
                 })
                 .collect()
         };
-        for (name, task) in tasks {
+        for (name, task, info) in tasks {
             if let Some(task) = task {
                 let _ = task.await;
             }
-            self.forget(&name);
+            self.forget(&name, &info);
         }
     }
 
     /// Sends the current sessions, then every state change of `uid`'s
     /// sessions (all of them for root), until the client goes away.
-    pub fn watch(&self, uid: u32, link: ClientLink) {
+    pub fn watch(self: &Arc<Self>, uid: u32, link: ClientLink) {
         let mut rx = self.events.subscribe();
         if !link.send(Event::Status { sessions: self.status(uid) }) {
             return;
         }
+        let manager = self.clone();
         tokio::spawn(async move {
             loop {
                 let watched = tokio::select! {
@@ -290,7 +291,13 @@ impl Manager {
                             return;
                         }
                     }
-                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Ok(_) => {}
+                    // Changes were lost: the whole state again instead.
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        if !link.send(Event::Status { sessions: manager.status(uid) }) {
+                            return;
+                        }
+                    }
                     Err(broadcast::error::RecvError::Closed) => return,
                 }
             }
@@ -331,8 +338,13 @@ impl Manager {
         checked
     }
 
-    fn forget(&self, name: &str) {
-        self.sessions.lock().unwrap().remove(name);
+    /// Removes the session `info` belongs to; not a new session of the
+    /// same profile, connected since this one ended.
+    fn forget(&self, name: &str, info: &Arc<Mutex<SessionInfo>>) {
+        let mut sessions = self.sessions.lock().unwrap();
+        if sessions.get(name).is_some_and(|s| Arc::ptr_eq(&s.info, info)) {
+            sessions.remove(name);
+        }
     }
 
     /// The tunnel interface of a connected session.
@@ -471,7 +483,7 @@ impl Runner {
         // Failed sessions stay visible, with their error, until dismissed
         // or for an hour.
         if self.info.lock().unwrap().state != SessionState::Failed {
-            self.manager.forget(&self.profile.id);
+            self.manager.forget(&self.profile.id, &self.info);
         } else {
             let (manager, name, info) = (self.manager.clone(), self.profile.id.clone(), self.info.clone());
             tokio::spawn(async move {
@@ -497,6 +509,9 @@ impl Runner {
         // Only the first attempt waits for the client that asked for it;
         // reconnections use remembered answers or an attached client.
         let attach_wait = if first && self.client.is_attached() { self.manager.attach_wait } else { Duration::ZERO };
+        // Resolved now, as the engine is about to: the answer may change
+        // before the check (a short TTL expiring during a login).
+        let resolved = resolve_servers(&self.profile).await.0;
         if let Err(e) = engine.start(&self.profile, attach_wait).await {
             return Outcome::Failed(e);
         }
@@ -509,7 +524,7 @@ impl Runner {
         };
         // The engine is untrusted: what it negotiated is checked here.
         let connected = match connected {
-            Ok(settings) => check_gateway(&self.profile, settings).await,
+            Ok(settings) => check_gateway(&self.profile, settings, &resolved).await,
             Err(e) => Err(e),
         };
         let settings = match connected.and_then(|s| apply_profile(&self.profile, s)) {
@@ -760,22 +775,44 @@ fn pushed_domain_acceptable(domain: &str) -> bool {
 }
 
 /// The gateway the engine reports gets a host route through the physical
-/// interface: it must be the profile's server, not any address the engine
-/// would like to take out of the tunnels.
-async fn check_gateway(profile: &Profile, settings: TunnelSettings) -> anyhow::Result<TunnelSettings> {
-    let (host, port) = profile.protocol.endpoint();
-    let addresses: Vec<IpAddr> = match host.parse::<IpAddr>() {
-        Ok(ip) => vec![ip],
-        Err(_) => tokio::net::lookup_host((host, port))
-            .await
-            .with_context(|| format!("cannot resolve {host} to check the gateway"))?
-            .map(|a| a.ip())
-            .collect(),
-    };
-    if !addresses.contains(&settings.gateway) {
-        bail!("the engine reported gateway {} which is not an address of {host}", settings.gateway);
+/// interface: it must be one of the profile's servers, not any address the
+/// engine would like to take out of the tunnels. `resolved`: the servers'
+/// addresses when the engine started; they are resolved again here, and
+/// either answer is accepted.
+async fn check_gateway(
+    profile: &Profile,
+    settings: TunnelSettings,
+    resolved: &[IpAddr],
+) -> anyhow::Result<TunnelSettings> {
+    if resolved.contains(&settings.gateway) {
+        return Ok(settings);
     }
-    Ok(settings)
+    let (addresses, error) = resolve_servers(profile).await;
+    if addresses.contains(&settings.gateway) {
+        return Ok(settings);
+    }
+    let hosts: Vec<&str> = profile.protocol.servers().into_iter().map(|(host, _)| host).collect();
+    match error {
+        Some(e) if addresses.is_empty() && resolved.is_empty() => {
+            Err(e.context(format!("cannot resolve {} to check the gateway", hosts.join(", "))))
+        }
+        _ => bail!("the engine reported gateway {} which is not an address of {}", settings.gateway, hosts.join(", ")),
+    }
+}
+
+/// The addresses of the profile's servers, and the last resolution error.
+async fn resolve_servers(profile: &Profile) -> (Vec<IpAddr>, Option<anyhow::Error>) {
+    let (mut addresses, mut error) = (Vec::new(), None);
+    for (host, port) in profile.protocol.servers() {
+        match host.parse::<IpAddr>() {
+            Ok(ip) => addresses.push(ip),
+            Err(_) => match tokio::net::lookup_host((host, port)).await {
+                Ok(found) => addresses.extend(found.map(|a| a.ip())),
+                Err(e) => error = Some(anyhow::Error::from(e).context(format!("cannot resolve {host}"))),
+            },
+        }
+    }
+    (addresses, error)
 }
 
 /// Creates (or checks) the directory of the prompt sockets: a real
@@ -1123,11 +1160,35 @@ mod tests {
     #[tokio::test]
     async fn the_gateway_must_be_the_profile_server() {
         let p = profile(serde_json::json!({ "host": "203.0.113.1" }));
-        assert!(check_gateway(&p, settings(&["10.0.0.0/8"], false, &[])).await.is_ok());
+        assert!(check_gateway(&p, settings(&["10.0.0.0/8"], false, &[]), &[]).await.is_ok());
         let mut s = settings(&["10.0.0.0/8"], false, &[]);
         s.gateway = IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3));
-        let err = check_gateway(&p, s).await.unwrap_err();
+        let err = check_gateway(&p, s.clone(), &[]).await.unwrap_err();
         assert!(err.to_string().contains("not an address of 203.0.113.1"), "{err}");
+
+        // What the servers resolved to when the engine started also counts
+        // (a DNS answer that changed during the login), nothing else.
+        let early = [IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3))];
+        assert!(check_gateway(&p, s.clone(), &early).await.is_ok());
+        let other = [IpAddr::V4(Ipv4Addr::new(10, 9, 9, 9))];
+        assert!(check_gateway(&p, s, &other).await.is_err());
+    }
+
+    /// An OpenVPN profile's engine moves to the next remote when one does
+    /// not answer: any of them is the gateway.
+    #[tokio::test]
+    async fn every_openvpn_remote_is_a_gateway() {
+        let p: Profile = serde_json::from_value(serde_json::json!({
+            "name": "ovpn",
+            "protocol": "openvpn",
+            "remotes": [{ "host": "198.51.100.1" }, { "host": "203.0.113.1" }],
+        }))
+        .unwrap();
+        assert!(check_gateway(&p, settings(&["10.0.0.0/8"], false, &[]), &[]).await.is_ok(), "second remote");
+        let mut s = settings(&["10.0.0.0/8"], false, &[]);
+        s.gateway = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let err = check_gateway(&p, s, &[]).await.unwrap_err();
+        assert!(err.to_string().contains("not an address of 198.51.100.1, 203.0.113.1"), "{err}");
     }
 
     #[test]
@@ -1299,6 +1360,56 @@ mod tests {
         m.disconnect(&test_id("bob-vpn"), 0).await.unwrap();
         assert!(bob.is_cancelled());
         assert!(names(0).is_empty());
+    }
+
+    /// A watcher that fell behind gets the whole state again.
+    #[tokio::test]
+    async fn a_lagging_watcher_gets_the_status_again() {
+        let m = Arc::new(Manager::default());
+        let (tx, mut rx) = mpsc::channel(2 * WATCH_QUEUE);
+        m.watch(1000, ClientLink::new(tx));
+        assert!(matches!(rx.recv().await, Some(Event::Status { .. })));
+        fake_session(&m, "paris", 1000);
+        for i in 0..WATCH_QUEUE + 10 {
+            let event = Event::Warning { message: i.to_string() };
+            let _ = m.events.send(Watched { owner: 1000, event });
+        }
+        let Some(Event::Status { sessions }) = timeout(Duration::from_secs(2), rx.recv()).await.unwrap() else {
+            panic!("expected the status first")
+        };
+        assert_eq!(sessions.len(), 1);
+    }
+
+    /// A session ends and leaves the table as its task finishes; a new
+    /// session of the same profile, connected before `disconnect` returns,
+    /// must not be removed with it.
+    #[tokio::test]
+    async fn disconnect_keeps_a_session_connected_meanwhile() {
+        let m = Arc::new(Manager::default());
+        let id = test_id("paris");
+        let cancel = fake_session(&m, "paris", 1000);
+        let info = m.sessions.lock().unwrap()[&id].info.clone();
+        let (ended, ended_rx) = tokio::sync::oneshot::channel();
+        let (resume, resume_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn({
+            let (m, id) = (m.clone(), id.clone());
+            async move {
+                cancel.cancelled().await;
+                m.forget(&id, &info); // as the runner does
+                ended.send(()).unwrap();
+                let _ = resume_rx.await;
+            }
+        });
+        m.sessions.lock().unwrap().get_mut(&id).unwrap().task = Some(task);
+        let disconnect = tokio::spawn({
+            let (m, id) = (m.clone(), id.clone());
+            async move { m.disconnect(&id, 1000).await }
+        });
+        ended_rx.await.unwrap();
+        fake_session(&m, "paris", 1000); // connected again meanwhile
+        resume.send(()).unwrap();
+        disconnect.await.unwrap().unwrap();
+        assert_eq!(m.status(1000).len(), 1, "the new session is still listed");
     }
 
     #[tokio::test]

@@ -805,6 +805,9 @@ async fn tunnel_refused_by_gateway() {
     let mut engine = FortiSslEngine::new(gw.profile(Some("alice")));
     let err = format!("{:#}", connect(&mut engine, &ctx).await.unwrap_err());
     assert!(err.contains("gateway refused the tunnel"), "{err}");
+    // Logged in before the failure: the gateway's session is closed too.
+    timeout(T, engine.disconnect()).await.unwrap().unwrap();
+    gw.wait_for("GET /remote/logout").await;
 }
 
 #[tokio::test]
