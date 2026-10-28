@@ -1,0 +1,43 @@
+# Local toolchain and the commands CI runs (.github/workflows/ci.yml).
+
+[tools]
+# CI builds with dtolnay/rust-toolchain@stable: same channel here, so a
+# global pin (an older Rust) does not leak into this project.
+rust = { version = "stable", components = "rustfmt,clippy" }
+
+[env]
+# Release builds strip their proc-macro dylibs with Xcode's strip, whose
+# output the macOS 27 loader refuses ("mis-aligned LINKEDIT string pool"):
+# every derive then fails with "can't find crate". Keeping the symbols
+# only makes the release artifacts larger.
+CARGO_PROFILE_RELEASE_STRIP = "none"
+CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP = "none"
+
+[tasks."dev:fmt"]
+description = "Check formatting"
+run = "cargo fmt --all --check"
+
+[tasks."dev:clippy"]
+description = "Lint every target, warnings denied"
+run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
+
+[tasks."dev:test"]
+description = "Unit tests and loopback tests against fake gateways"
+run = "cargo test --workspace --locked"
+
+[tasks."dev:deny"]
+description = "Check dependency licenses against deny.toml"
+run = "cargo deny check licenses"
+
+[tasks."dev:ci"]
+description = "Everything CI checks"
+depends = ["dev:fmt", "dev:clippy", "dev:test", "dev:deny"]
+
+[tasks."dev:bindings"]
+description = "UniFFI Swift bindings and the universal static library"
+run = "apple/build-bindings.sh"
+
+[tasks."dev:smoke"]
+description = "Check the generated bindings without the app"
+depends = ["dev:bindings"]
+run = "swift run --package-path apple Smoke"
