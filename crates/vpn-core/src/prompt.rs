@@ -88,6 +88,53 @@ pub fn is_tls_client_signature_octets(data: &[u8]) -> bool {
     length.is_some_and(|l| data.len() > 4 + l)
 }
 
+/// The server name (SNI) in the ClientHello that TLS 1.2 octets to sign
+/// start with; `None` without one, or for TLS 1.3 octets, which hold only
+/// a hash and bind no name.
+pub fn tls12_server_name(data: &[u8]) -> Option<String> {
+    let length = u32::from_be_bytes([0, *data.get(1)?, *data.get(2)?, *data.get(3)?]) as usize;
+    if data[0] != 1 {
+        return None;
+    }
+    let mut hello = Reader(data.get(4..4 + length)?);
+    hello.take(2 + 32)?; // version, random
+    for prefix in [1, 2, 1] {
+        hello.vector(prefix)?; // session id, cipher suites, compression
+    }
+    let mut extensions = Reader(hello.vector(2)?);
+    while !extensions.0.is_empty() {
+        let kind = extensions.take(2)?;
+        let body = extensions.vector(2)?;
+        if kind == [0, 0] {
+            let mut list = Reader(Reader(body).vector(2)?);
+            while !list.0.is_empty() {
+                let name_type = list.take(1)?[0];
+                let name = list.vector(2)?;
+                if name_type == 0 {
+                    return std::str::from_utf8(name).ok().map(str::to_owned);
+                }
+            }
+        }
+    }
+    None
+}
+
+struct Reader<'a>(&'a [u8]);
+
+impl<'a> Reader<'a> {
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        let (head, rest) = self.0.split_at_checked(n)?;
+        self.0 = rest;
+        Some(head)
+    }
+
+    /// A vector with a `prefix`-byte length.
+    fn vector(&mut self, prefix: usize) -> Option<&'a [u8]> {
+        let length = self.take(prefix)?.iter().fold(0, |n, b| n << 8 | usize::from(*b));
+        self.take(length)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Prompt {
     /// Stable key, e.g. `"password"`, `"otp"`, `"psk"`, `"username"`.
@@ -167,5 +214,36 @@ mod tests {
         assert!(is_tls_client_signature_octets(&tls12));
         assert!(!is_tls_client_signature_octets(b"\x30\x82 a certificate to sign"));
         assert!(!is_tls_client_signature_octets(&[]));
+        assert_eq!(tls12_server_name(&tls12), None, "too short for a hello");
+        assert_eq!(tls12_server_name(&tls13), None);
+    }
+
+    /// A ClientHello with `extensions`, then a ServerHello.
+    fn hello(extensions: &[u8]) -> Vec<u8> {
+        let mut body = vec![3, 3];
+        body.extend_from_slice(&[9; 32]);
+        body.extend_from_slice(&[0, 0, 2, 0x13, 0x01, 1, 0]);
+        body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        body.extend_from_slice(extensions);
+        let mut out = vec![1, 0];
+        out.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        out.extend_from_slice(&body);
+        out.extend_from_slice(&[2, 0, 0, 0]);
+        out
+    }
+
+    #[test]
+    fn tls12_names() {
+        let name = b"vpn.example.com";
+        let mut sni = vec![0, 0, 0, name.len() as u8 + 5, 0, name.len() as u8 + 3, 0, 0, name.len() as u8];
+        sni.extend_from_slice(name);
+        let other = [0, 10, 0, 2, 0, 29]; // supported groups
+        let signed = hello(&[&other[..], &sni].concat());
+        assert!(is_tls_client_signature_octets(&signed));
+        assert_eq!(tls12_server_name(&signed).as_deref(), Some("vpn.example.com"));
+        assert_eq!(tls12_server_name(&hello(&other)), None, "no SNI");
+        let mut broken = signed.clone();
+        broken[4 + 2 + 32 + 7 + 1] = 0xff; // extensions longer than the hello
+        assert_eq!(tls12_server_name(&broken), None);
     }
 }
