@@ -49,10 +49,17 @@ fn probe() -> anyhow::Result<()> {
         bail!("run as root: sudo {}", std::env::args().next().unwrap_or_default());
     }
     let nobody = nix::unistd::User::from_name("nobody")?.context("no user nobody")?;
-    // nobody cannot enter the user's home: run the engine from a copy.
-    let exe = "/private/var/tmp/utun-probe";
-    std::fs::copy(std::env::current_exe()?, exe).context("cannot copy the probe to /var/tmp")?;
-    std::fs::set_permissions(exe, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
+    // nobody cannot enter the user's home: run the engine from a copy, in
+    // a directory of our own (/var/tmp is writable by everyone, who could
+    // have left a link or a binary of theirs there).
+    let dir = nix::unistd::mkdtemp("/private/var/tmp/utun-probe.XXXXXX").context("cannot create a directory")?;
+    std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o711))?;
+    let path = dir.join("utun-probe");
+    if let Err(e) = copy_new(&std::env::current_exe()?, &path) {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(e.context("cannot copy the probe to /var/tmp"));
+    }
+    let exe = path.to_str().context("non-UTF-8 directory")?;
     println!("utun-probe: engine runs as nobody (uid {}), interface {LOCAL} -> {PEER}\n", nobody.uid);
 
     let mut results = Vec::new();
@@ -74,12 +81,25 @@ fn probe() -> anyhow::Result<()> {
         results.push((label, outcome));
         println!();
     }
-    let _ = std::fs::remove_file(exe);
+    let _ = std::fs::remove_dir_all(&dir);
     println!("== summary");
     for (label, outcome) in results {
         let ok = outcome.as_ref().is_ok_and(|r| r.iter().any(|l| l.starts_with("ping replies") && !l.contains(" 0/")));
         println!("   {label:<26} {}", if ok { "engine can use the utun" } else { "engine CANNOT use the utun" });
     }
+    Ok(())
+}
+
+/// Copies `from` to a new file `to`, mode 0755, never through a link.
+fn copy_new(from: &std::path::Path, to: &std::path::Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o755)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(to)?;
+    std::io::copy(&mut std::fs::File::open(from)?, &mut out)?;
     Ok(())
 }
 
