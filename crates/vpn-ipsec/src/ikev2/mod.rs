@@ -137,6 +137,9 @@ pub(crate) struct Limits {
     pub child_rekey_after: Duration,
     /// ...or after this many kilobytes.
     pub child_rekey_kb: Option<u64>,
+    /// Past these, a CHILD SA that could not be rekeyed ends the session.
+    pub child_lifetime: Duration,
+    pub child_lifetime_kb: Option<u64>,
     pub dpd: bool,
 }
 
@@ -146,6 +149,8 @@ impl Limits {
             ike_max_age: Duration::from_secs(profile.phase1_lifetime.into()).mul_f32(0.95),
             child_rekey_after: crate::lifetime(profile.phase2_lifetime).mul_f32(0.9),
             child_rekey_kb: profile.phase2_lifetime_kb.map(|kb| kb.saturating_mul(1024) / 10 * 9 / 1024),
+            child_lifetime: crate::lifetime(profile.phase2_lifetime),
+            child_lifetime_kb: profile.phase2_lifetime_kb,
             dpd: profile.dpd,
         }
     }

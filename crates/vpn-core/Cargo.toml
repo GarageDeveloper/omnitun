@@ -15,6 +15,7 @@ serde.workspace = true
 ipnet.workspace = true
 hex.workspace = true
 rand.workspace = true
+libc = "0.2"
 
 [dev-dependencies]
 toml.workspace = true

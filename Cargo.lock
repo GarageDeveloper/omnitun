@@ -3130,6 +3130,7 @@ dependencies = [
  "bytes",
  "hex",
  "ipnet",
+ "libc",
  "rand 0.9.5",
  "serde",
  "thiserror",

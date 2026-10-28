@@ -201,6 +201,41 @@ fn inbound_packet(tag: u8) -> Vec<u8> {
     ip_packet([10, 0, 0, 1], [10, 9, 0, 2], tag)
 }
 
+fn profile(port: u16, ike_spec: &str, esp_spec: &str) -> IpsecProfile {
+    IpsecProfile {
+        gateway: "127.0.0.1".into(),
+        port,
+        ike_version: 2,
+        exchange_mode: Default::default(),
+        xauth: false,
+        local_id: Some("roadwarrior@corp.test".into()),
+        remote_id: Some(GATEWAY_ID.into()),
+        username: None,
+        ike: vec![ike_spec.into()],
+        esp: vec![esp_spec.into()],
+        phase1_lifetime: 86_400,
+        phase2_lifetime: 43_200,
+        phase2_lifetime_kb: None,
+        dpd: true,
+        legacy_algorithms: ike_spec.starts_with("3des"),
+        gateway_auth: Default::default(),
+        ca_pem: None,
+        trusted_cert: Vec::new(),
+        keychain_ca_pem: None,
+        client_certificate: None,
+        client_chain_pem: None,
+    }
+}
+
+fn context() -> SessionContext {
+    SessionContext {
+        name: "test".into(),
+        prompter: Arc::new(StaticPrompter),
+        cancel: CancellationToken::new(),
+        stats: Arc::default(),
+    }
+}
+
 #[tokio::test]
 async fn handshake_esp_rekey_and_delete_over_loopback() {
     let cases = [
@@ -214,35 +249,8 @@ async fn handshake_esp_rekey_and_delete_over_loopback() {
         let init = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let natt = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let (init_port, natt_port) = (init.local_addr().unwrap().port(), natt.local_addr().unwrap().port());
-        let profile = IpsecProfile {
-            gateway: "127.0.0.1".into(),
-            port: init_port,
-            ike_version: 2,
-            exchange_mode: Default::default(),
-            xauth: false,
-            local_id: Some("roadwarrior@corp.test".into()),
-            remote_id: Some(GATEWAY_ID.into()),
-            username: None,
-            ike: vec![ike_spec.into()],
-            esp: vec![esp_spec.into()],
-            phase1_lifetime: 86_400,
-            phase2_lifetime: 43_200,
-            phase2_lifetime_kb: None,
-            dpd: true,
-            legacy_algorithms: ike_spec.starts_with("3des"),
-            gateway_auth: Default::default(),
-            ca_pem: None,
-            trusted_cert: Vec::new(),
-            keychain_ca_pem: None,
-            client_certificate: None,
-            client_chain_pem: None,
-        };
-        let ctx = SessionContext {
-            name: "test".into(),
-            prompter: Arc::new(StaticPrompter),
-            cancel: CancellationToken::new(),
-            stats: Arc::default(),
-        };
+        let profile = profile(init_port, ike_spec, esp_spec);
+        let ctx = context();
         let gateway = tokio::spawn(fake_gateway(init, natt, ike_spec, esp_spec));
         let mut est = establish_with_natt_port(&profile, &ctx, natt_port).await.unwrap();
         let mut gw = gateway.await.unwrap();
@@ -386,6 +394,39 @@ async fn handshake_esp_rekey_and_delete_over_loopback() {
         assert!(closer.await.unwrap());
         assert_eq!(ctx.stats.rx_packets.load(std::sync::atomic::Ordering::Relaxed), 2);
     }
+}
+
+/// A refused rekey is retried later, not at every tick, whatever triggered
+/// it; the SA still ends at its lifetime.
+#[tokio::test]
+async fn refused_rekey_waits_then_the_sa_expires() {
+    let (ike_spec, esp_spec) = ("aes256gcm16-prfsha256-ecp256", "aes256gcm16");
+    let init = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let natt = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let (init_port, natt_port) = (init.local_addr().unwrap().port(), natt.local_addr().unwrap().port());
+    let ctx = context();
+    let gateway = tokio::spawn(fake_gateway(init, natt, ike_spec, esp_spec));
+    let mut est = establish_with_natt_port(&profile(init_port, ike_spec, esp_spec), &ctx, natt_port).await.unwrap();
+    let mut gw = gateway.await.unwrap();
+    // Rekey due by volume at once; the SA ends 3 s after its creation.
+    est.limits.child_rekey_kb = Some(0);
+    est.limits.child_lifetime = Duration::from_secs(3);
+
+    let (to_tun, _tun_rx) = mpsc::channel(8);
+    let (_tun_tx, from_tun) = mpsc::channel(8);
+    let run_ctx = ctx.clone();
+    let runner = tokio::spawn(async move { est.run(&run_ctx, PacketIo { to_tun, from_tun }).await });
+
+    let rekey = gw.recv_ike().await;
+    assert_eq!(rekey.header.exchange, exchange::CREATE_CHILD_SA);
+    let refused = Payload::Notify(Notify::new(notify::NO_PROPOSAL_CHOSEN, Vec::new()));
+    gw.send_ike(exchange::CREATE_CHILD_SA, flags::RESPONSE, rekey.header.msg_id, &[refused]).await;
+
+    let result = timeout(Duration::from_secs(6), runner).await.unwrap().unwrap();
+    assert!(result.unwrap_err().to_string().contains("expired"));
+    // Before the fix, a new CREATE_CHILD_SA went out every second.
+    let again = timeout(Duration::from_millis(100), gw.recv_raw(true)).await;
+    assert!(again.is_err(), "no second rekey before the retry delay");
 }
 
 #[tokio::test]

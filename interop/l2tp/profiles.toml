@@ -19,12 +19,14 @@ protocol = "l2tp"
 gateway = "172.32.0.12"
 username = "alice"
 
-# The server only does PAP (require-pap).
+# The server only does PAP (require-pap): the profile must allow it, PAP
+# is not offered by default.
 [[profile]]
 name = "pap"
 protocol = "l2tp"
 gateway = "172.32.0.13"
 username = "alice"
+ppp_auth = ["pap"]
 
 # Aggressive mode with a group name, sent as a KEY_ID identity (as macOS
 # does); the server's connection is for that identity only.

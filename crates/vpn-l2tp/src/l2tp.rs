@@ -109,6 +109,44 @@ struct Avp<'a> {
     value: &'a [u8],
 }
 
+/// What the header of a control message says.
+struct Control<'a> {
+    tunnel: u16,
+    ns: u16,
+    nr: u16,
+    body: &'a [u8],
+}
+
+/// A control message; `None` for a data message (checked to be at least
+/// 6 bytes of L2TP version 2).
+fn control_header(datagram: &[u8]) -> anyhow::Result<Option<Control<'_>>> {
+    ensure!(datagram.len() >= 6, "truncated L2TP message");
+    let flags = u16::from_be_bytes([datagram[0], datagram[1]]);
+    ensure!(flags & 0x000f == VERSION, "not L2TP version 2");
+    if flags & FLAG_TYPE == 0 {
+        return Ok(None);
+    }
+    ensure!(datagram.len() >= 12 && flags & FLAG_LENGTH != 0, "malformed L2TP control message");
+    let len = usize::from(u16::from_be_bytes([datagram[2], datagram[3]]));
+    ensure!(len >= 12 && len <= datagram.len(), "invalid L2TP length");
+    let field = |at: usize| u16::from_be_bytes([datagram[at], datagram[at + 1]]);
+    Ok(Some(Control { tunnel: field(4), ns: field(8), nr: field(10), body: &datagram[12..len] }))
+}
+
+/// The attributes of a control message, and its type.
+fn message_avps(body: &[u8]) -> anyhow::Result<(Vec<Avp<'_>>, u16)> {
+    let avps = parse_avps(body)?;
+    let first = avps.first().context("L2TP control message without a type")?;
+    ensure!(first.kind == AVP_MESSAGE_TYPE && first.vendor == 0, "L2TP message type missing");
+    let message = u16_value(&avps, AVP_MESSAGE_TYPE).context("invalid L2TP message type")?;
+    Ok((avps, message))
+}
+
+fn malformed(e: anyhow::Error) -> Received {
+    debug!("malformed L2TP datagram dropped: {e:#}");
+    Received::Nothing
+}
+
 fn parse_avps(mut data: &[u8]) -> anyhow::Result<Vec<Avp<'_>>> {
     let mut out = Vec::new();
     while !data.is_empty() {
@@ -256,26 +294,20 @@ impl Tunnel {
         self.state = State::Closed;
     }
 
+    /// A malformed datagram is dropped: only the server closing the tunnel
+    /// or the session, or a message this client cannot follow, is an error.
     pub fn receive(&mut self, datagram: &[u8], now: Instant) -> anyhow::Result<Received> {
-        ensure!(datagram.len() >= 6, "truncated L2TP message");
-        let flags = u16::from_be_bytes([datagram[0], datagram[1]]);
-        ensure!(flags & 0x000f == VERSION, "not L2TP version 2");
-        if flags & FLAG_TYPE == 0 {
-            return self.receive_data(flags, datagram);
-        }
-        ensure!(datagram.len() >= 12 && flags & FLAG_LENGTH != 0, "malformed L2TP control message");
-        let len = usize::from(u16::from_be_bytes([datagram[2], datagram[3]]));
-        ensure!(len >= 12 && len <= datagram.len(), "invalid L2TP length");
-        let tunnel = u16::from_be_bytes([datagram[4], datagram[5]]);
-        let ns = u16::from_be_bytes([datagram[8], datagram[9]]);
-        let nr = u16::from_be_bytes([datagram[10], datagram[11]]);
+        let Control { tunnel, ns, nr, body } = match control_header(datagram) {
+            Ok(Some(header)) => header,
+            Ok(None) => return Ok(self.receive_data(datagram).unwrap_or_else(malformed)),
+            Err(e) => return Ok(malformed(e)),
+        };
         if tunnel != self.local_tunnel {
             debug!(tunnel, "L2TP message for another tunnel ignored");
             return Ok(Received::Nothing);
         }
         // Nr acknowledges everything before it.
         self.unacked.retain(|m| nr.wrapping_sub(m.ns).wrapping_sub(1) >= 0x8000);
-        let body = &datagram[12..len];
         if body.is_empty() {
             return Ok(Received::Nothing); // ZLB
         }
@@ -285,12 +317,13 @@ impl Tunnel {
             self.owe_ack = true;
             return Ok(Received::Nothing);
         }
+        // Not acknowledged if unreadable: the server sends it again.
+        let (avps, message) = match message_avps(body) {
+            Ok(parsed) => parsed,
+            Err(e) => return Ok(malformed(e)),
+        };
         self.nr = self.nr.wrapping_add(1);
         self.owe_ack = true;
-        let avps = parse_avps(body)?;
-        let first = avps.first().context("L2TP control message without a type")?;
-        ensure!(first.kind == AVP_MESSAGE_TYPE && first.vendor == 0, "L2TP message type missing");
-        let message = u16_value(&avps, AVP_MESSAGE_TYPE).context("invalid L2TP message type")?;
         if let Some(a) = avps.iter().skip(1).find(|a| a.mandatory && (a.hidden || a.vendor != 0)) {
             bail!("the L2TP server sent an attribute this client cannot read ({}:{})", a.vendor, a.kind);
         }
@@ -333,7 +366,8 @@ impl Tunnel {
         Ok(Received::Nothing)
     }
 
-    fn receive_data(&self, flags: u16, datagram: &[u8]) -> anyhow::Result<Received> {
+    fn receive_data(&self, datagram: &[u8]) -> anyhow::Result<Received> {
+        let flags = u16::from_be_bytes([datagram[0], datagram[1]]);
         let mut at = 2;
         let mut end = datagram.len();
         if flags & FLAG_LENGTH != 0 {
@@ -428,6 +462,25 @@ mod tests {
         let stop = server(&t, 2, 4, STOP_CCN, &[avp(AVP_RESULT_CODE, &[0, 6, 0, 0, b'b', b'y', b'e'])]);
         let err = t.receive(&stop, now).err().unwrap();
         assert!(err.to_string().contains("result 6: bye"), "{err}");
+    }
+
+    #[test]
+    fn malformed_datagrams_are_dropped() {
+        let now = Instant::now();
+        let mut t = Tunnel::new(now);
+        t.take_output();
+        let mut unreadable = server(&t, 0, 1, SCCRP, &[]);
+        unreadable.extend_from_slice(&[0x80, 0x09]); // a truncated attribute
+        let len = unreadable.len() as u16;
+        unreadable[2..4].copy_from_slice(&len.to_be_bytes());
+        let truncated_data = [0x40, 0x02, 0, 3, 0, 0, 0, 0];
+        for datagram in [&[0xc8][..], &[0xc8, 0x03, 0, 12, 0, 0], &truncated_data, &unreadable] {
+            assert!(matches!(t.receive(datagram, now).unwrap(), Received::Nothing), "{datagram:02x?}");
+        }
+        assert!(t.take_output().is_empty(), "an unreadable message is not acknowledged");
+        let sccrp = server(&t, 0, 1, SCCRP, &[avp(AVP_ASSIGNED_TUNNEL_ID, &77u16.to_be_bytes())]);
+        t.receive(&sccrp, now).unwrap();
+        assert_eq!(message_type(&t.take_output()[0]), Some(SCCCN), "still expecting Ns 0");
     }
 
     #[test]

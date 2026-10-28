@@ -21,6 +21,7 @@ pub mod engine_ipc;
 pub mod failure;
 pub mod ipc;
 pub mod l2tp;
+pub mod net;
 pub mod openvpn;
 pub mod profile;
 pub mod prompt;

@@ -144,9 +144,11 @@ impl Control {
         Ok(self.keys.last_mut().unwrap())
     }
 
-    /// Starts a new key state (1 to 7, never 0 again): renegotiation.
+    /// Starts a new key state (1 to 7, never 0 again): renegotiation. The
+    /// id follows the primary key's, not the highest one: a lame duck 7
+    /// next to a primary 1 must give 2, not replace the primary.
     pub fn renegotiate(&mut self) -> anyhow::Result<u8> {
-        let current = self.keys.iter().map(|k| k.key_id).max().unwrap_or(0);
+        let current = self.primary().map_or(0, |k| k.key_id);
         let key_id = if current >= 7 { 1 } else { current + 1 };
         self.keys.retain(|k| k.key_id != key_id);
         self.add_key(key_id, wire::SOFT_RESET_V1)?;
@@ -182,7 +184,11 @@ impl Control {
         let sender: SessionId = packet[1..9].try_into().unwrap();
         let body = ControlBody::decode(opcode, &body).map_err(bad)?;
         match self.remote_sid {
-            None if opcode == wire::HARD_RESET_SERVER_V2 => self.remote_sid = Some(sender),
+            // Only a reset that acknowledges ours: without tls-auth, a
+            // spoofed reset arriving first would otherwise lock us out.
+            None if opcode == wire::HARD_RESET_SERVER_V2 && body.acked_session == Some(self.local_sid) => {
+                self.remote_sid = Some(sender)
+            }
             Some(sid) if sid == sender => {}
             _ => {
                 tracing::debug!("control packet from another session ignored");
@@ -216,7 +222,12 @@ impl Control {
                 wire::CONTROL_V1 if key.reset_received => {
                     let mut input = payload.as_slice();
                     while !input.is_empty() {
-                        key.tls.read_tls(&mut input)?;
+                        // Nothing read: the server closed this TLS session
+                        // (close_notify), the rest is dropped.
+                        if key.tls.read_tls(&mut input)? == 0 {
+                            tracing::debug!(key_id, "data after the end of the TLS session ignored");
+                            break;
+                        }
                         if let Err(e) = key.tls.process_new_packets() {
                             if let Some(error) = sign_error.lock().unwrap().take() {
                                 return Err(error.context("cannot sign with the client certificate"));
@@ -377,7 +388,10 @@ pub const HAND_WINDOW: Duration = Duration::from_secs(60);
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::crypto::DataKeys;
 
     #[test]
     fn server_key_material() {
@@ -395,5 +409,123 @@ mod tests {
         assert_eq!((r1, r2, used), ([1; 32], [2; 32], full));
         message[4] = 1;
         assert!(server_key_method_2(&message).is_err(), "key method 1");
+    }
+
+    const SERVER_SID: SessionId = [5; 8];
+
+    /// A control channel without tls-auth, trusting the returned server.
+    fn control() -> (Control, rustls::ServerConnection) {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["server".into()]).unwrap().self_signed(&key).unwrap();
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert.der().clone()).unwrap();
+        let config = rustls::ClientConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let setup = TlsSetup { config: Arc::new(config), rejected: Default::default(), sign_error: Default::default() };
+        let hello = Hello {
+            options: "V4".into(),
+            username: String::new(),
+            password: Zeroizing::new(String::new()),
+            peer_info: String::new(),
+        };
+        let control = Control::new(Wrap::None, setup, ServerName::try_from("server").unwrap(), false, hello).unwrap();
+        let server_config = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.der().clone()], key.serialize_der().try_into().unwrap())
+            .unwrap();
+        (control, rustls::ServerConnection::new(Arc::new(server_config)).unwrap())
+    }
+
+    /// A packet from `sender`, acknowledging `acked` (our message 0).
+    fn packet(opcode: u8, sender: SessionId, acked: Option<SessionId>, id: u32, payload: &[u8]) -> Vec<u8> {
+        let body = ControlBody {
+            acks: acked.map(|_| vec![0]).unwrap_or_default(),
+            acked_session: acked,
+            message_id: Some(id),
+            payload: payload.to_vec(),
+        };
+        let mut packet = vec![wire::header_byte(opcode, 0)];
+        packet.extend_from_slice(&sender);
+        packet.extend_from_slice(&body.encode());
+        packet
+    }
+
+    /// The TLS bytes in our pending control packets.
+    fn tls_out(control: &mut Control) -> Vec<u8> {
+        let mut out = Vec::new();
+        for packet in control.outgoing(Instant::now()).unwrap() {
+            if wire::opcode(packet[0]) == wire::CONTROL_V1 {
+                out.extend(ControlBody::decode(wire::CONTROL_V1, &packet[9..]).unwrap().payload);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn session_adopted_only_from_a_reset_acknowledging_ours() {
+        let (mut control, _) = control();
+        let local = control.local_sid;
+        let spoofed = packet(wire::HARD_RESET_SERVER_V2, [6; 8], None, 0, &[]);
+        assert!(control.receive(&spoofed).unwrap().is_empty());
+        let other = packet(wire::HARD_RESET_SERVER_V2, [6; 8], Some([7; 8]), 0, &[]);
+        assert!(control.receive(&other).unwrap().is_empty());
+        assert_eq!(control.remote_sid, None, "a reset that does not acknowledge ours");
+        control.receive(&packet(wire::HARD_RESET_SERVER_V2, SERVER_SID, Some(local), 0, &[])).unwrap();
+        assert_eq!(control.remote_sid, Some(SERVER_SID));
+    }
+
+    #[test]
+    fn data_after_close_notify_is_dropped() {
+        let (mut control, mut server) = control();
+        let local = control.local_sid;
+        control.receive(&packet(wire::HARD_RESET_SERVER_V2, SERVER_SID, Some(local), 0, &[])).unwrap();
+        let mut id = 1;
+        while server.is_handshaking() {
+            server.read_tls(&mut tls_out(&mut control).as_slice()).unwrap();
+            server.process_new_packets().unwrap();
+            let mut reply = Vec::new();
+            while server.wants_write() {
+                server.write_tls(&mut reply).unwrap();
+            }
+            if !reply.is_empty() {
+                control.receive(&packet(wire::CONTROL_V1, SERVER_SID, None, id, &reply)).unwrap();
+                id += 1;
+            }
+        }
+        assert!(!control.keys[0].tls.is_handshaking());
+        server.send_close_notify();
+        let mut closing = Vec::new();
+        server.write_tls(&mut closing).unwrap();
+        // Before the fix, the bytes after the alert spun the loop forever.
+        closing.extend_from_slice(&[0x17, 3, 3, 0, 1, 0]);
+        control.receive(&packet(wire::CONTROL_V1, SERVER_SID, None, id, &closing)).unwrap();
+        let more = packet(wire::CONTROL_V1, SERVER_SID, None, id + 1, &[0x17, 3, 3, 0, 1, 0]);
+        control.receive(&more).unwrap();
+    }
+
+    #[test]
+    fn renegotiation_follows_the_primary_key() {
+        let (mut control, _) = control();
+        control.keys.clear();
+        let now = Instant::now();
+        for (key_id, age) in [(7, 30), (1, 10)] {
+            let key = control.add_key(key_id, wire::SOFT_RESET_V1).unwrap();
+            key.data = Some(DataKeys::new(DataCipher::Aes256Gcm, &[key_id; 256]).unwrap());
+            key.started = now - Duration::from_secs(age);
+        }
+        control.keys[0].retire_at = Some(now + Duration::from_secs(5));
+        assert_eq!(control.renegotiate().unwrap(), 2, "the lame duck 7 is not the current id");
+        let ids: Vec<u8> = control.keys.iter().map(|k| k.key_id).collect();
+        assert_eq!(ids, [7, 1, 2], "the primary key is kept");
+
+        control.keys.retain(|k| k.key_id == 7);
+        control.keys[0].retire_at = None;
+        assert_eq!(control.renegotiate().unwrap(), 1, "7 wraps to 1, never 0");
     }
 }

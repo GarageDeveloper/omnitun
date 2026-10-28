@@ -174,7 +174,8 @@ pub(crate) fn dpd_notify(sa: &IsakmpSa, kind: u16, seq: u32) -> Payload {
 pub(crate) enum Info {
     RuThere(u32),
     RuThereAck(u32),
-    DeleteIsakmp,
+    /// The cookies (16-byte SPIs) of the deleted ISAKMP SAs.
+    DeleteIsakmp(Vec<Vec<u8>>),
     DeleteEsp(Vec<u32>),
     Error(String),
     Other,
@@ -190,7 +191,7 @@ pub(crate) fn classify_informational(msg: &Message) -> Vec<Info> {
                 Info::RuThereAck(u32::from_be_bytes(n.data[..4].try_into().unwrap()))
             }
             Payload::Notify(n) if n.is_error() => Info::Error(notify::describe(n.kind)),
-            Payload::Delete { protocol: protocol::ISAKMP, .. } => Info::DeleteIsakmp,
+            Payload::Delete { protocol: protocol::ISAKMP, spis, .. } => Info::DeleteIsakmp(spis.clone()),
             Payload::Delete { protocol: protocol::ESP, spi_size: 4, spis } => Info::DeleteEsp(
                 spis.iter().filter_map(|s| s.as_slice().try_into().ok()).map(u32::from_be_bytes).collect(),
             ),

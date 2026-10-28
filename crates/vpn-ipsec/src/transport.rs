@@ -1,7 +1,6 @@
 //! UDP transport for IKE and UDP-encapsulated ESP (RFC 3948). On port
 //! 4500, IKE messages carry a 4-byte zero "non-ESP marker".
 
-use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use anyhow::{Context, bail};
@@ -10,6 +9,8 @@ use tracing::debug;
 
 pub const NATT_PORT: u16 = 4500;
 const NON_ESP_MARKER: [u8; 4] = [0; 4];
+/// The largest UDP payload over IPv4.
+const MAX_DATAGRAM: usize = 65_535;
 
 pub enum Datagram {
     Ike(Vec<u8>),
@@ -62,13 +63,12 @@ impl Transport {
         self.send(&[0xff]).await
     }
 
-    /// Network errors (ICMP unreachable, interface down while roaming…)
-    /// are transient: retransmission and dead peer detection decide
-    /// whether the gateway is gone.
+    /// Transient network errors (`vpn_core::net::transient`) only lose
+    /// the datagram.
     async fn send(&self, data: &[u8]) -> anyhow::Result<()> {
         match self.socket.send(data).await {
             Ok(_) => Ok(()),
-            Err(e) if is_transient(&e) => {
+            Err(e) if vpn_core::net::transient(&e) => {
                 debug!("transient UDP send error: {e}");
                 Ok(())
             }
@@ -78,38 +78,31 @@ impl Transport {
 
     /// Next datagram from the gateway. ICMP-induced errors are skipped.
     pub async fn recv(&self) -> anyhow::Result<Datagram> {
-        let mut buf = vec![0u8; 16384];
         loop {
-            let len = match self.socket.recv(&mut buf).await {
+            // Room for any UDP datagram: an IKE_AUTH with a long certificate
+            // chain and no IKE fragmentation exceeds 16 KiB. Not zeroed,
+            // and handed up without a copy.
+            let mut buf = Vec::with_capacity(MAX_DATAGRAM);
+            let len = match self.socket.recv_buf(&mut buf).await {
                 Ok(len) => len,
-                Err(e) if is_transient(&e) => {
+                Err(e) if vpn_core::net::transient(&e) => {
                     debug!("transient UDP error: {e}");
                     continue;
                 }
                 Err(e) => return Err(e.into()),
             };
-            let data = &buf[..len];
             if !self.natt {
-                return Ok(Datagram::Ike(data.to_vec()));
+                return Ok(Datagram::Ike(buf));
             }
-            match data {
+            match buf.as_slice() {
                 [0xff] => return Ok(Datagram::Keepalive),
-                [0, 0, 0, 0, rest @ ..] => return Ok(Datagram::Ike(rest.to_vec())),
-                _ if len >= 8 => return Ok(Datagram::Esp(data.to_vec())),
+                [0, 0, 0, 0, ..] => {
+                    buf.drain(..NON_ESP_MARKER.len());
+                    return Ok(Datagram::Ike(buf));
+                }
+                _ if len >= 8 => return Ok(Datagram::Esp(buf)),
                 _ => debug!("ignoring {len}-byte datagram"),
             }
         }
     }
-}
-
-fn is_transient(e: &std::io::Error) -> bool {
-    matches!(
-        e.kind(),
-        ErrorKind::ConnectionRefused
-            | ErrorKind::ConnectionReset
-            | ErrorKind::NetworkUnreachable
-            | ErrorKind::HostUnreachable
-            | ErrorKind::NetworkDown
-            | ErrorKind::AddrNotAvailable
-    )
 }

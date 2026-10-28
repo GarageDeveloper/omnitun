@@ -66,6 +66,9 @@ struct Runner<'a> {
     last_rx: Instant,
     last_tx: Instant,
     rekey_at: Instant,
+    /// After a refused rekey, no new attempt before this, whatever the
+    /// trigger (time, sequence number or volume).
+    next_rekey_attempt: Instant,
     limits: super::Limits,
 }
 
@@ -78,6 +81,7 @@ impl Established {
             transport,
             ike: &mut self.ike,
             rekey_at: self.child.created + self.limits.child_rekey_after,
+            next_rekey_attempt: now,
             limits: self.limits,
             child: &mut self.child,
             local_ts: &self.local_ts,
@@ -193,7 +197,7 @@ impl Runner<'_> {
             PendingKind::RekeyChild { spi, nonce, kx } => {
                 if let Err(e) = self.finish_rekey(&msg, spi, &nonce, &kx).await {
                     warn!("CHILD SA rekey failed: {e:#}; retrying in {}s", REKEY_RETRY.as_secs());
-                    self.rekey_at = Instant::now() + REKEY_RETRY;
+                    self.next_rekey_attempt = Instant::now() + REKEY_RETRY;
                 }
             }
         }
@@ -415,12 +419,7 @@ impl Runner<'_> {
                 p.wait = (p.wait * 2).min(Duration::from_secs(8));
                 self.transport.send_ike(&p.bytes).await?;
             }
-        } else if now >= self.rekey_at
-            || self.child.outbound.seq() >= SEQ_REKEY_THRESHOLD
-            || self.limits.child_rekey_kb.is_some_and(|kb| {
-                self.child.inbound.bytes().max(self.child.outbound.bytes()) >= kb.saturating_mul(1024)
-            })
-        {
+        } else if now >= self.next_rekey_attempt && self.rekey_due(now) {
             self.start_rekey().await?;
         } else if self.limits.dpd && now.duration_since(self.last_rx) >= DPD_IDLE {
             self.start_request(exchange::INFORMATIONAL, Vec::new(), PendingKind::Dpd).await?;
@@ -432,8 +431,27 @@ impl Runner<'_> {
         if now.duration_since(self.ike.established) >= self.limits.ike_max_age {
             bail!("IKE SA reached its maximum age; reconnect to re-authenticate");
         }
+        if self.child_expired(now) {
+            bail!("IPsec SA expired and could not be rekeyed");
+        }
         self.old.retain(|(_, since)| now.duration_since(*since) < OLD_SA_GRACE);
         Ok(())
+    }
+
+    fn traffic(&self) -> u64 {
+        self.child.inbound.bytes().max(self.child.outbound.bytes())
+    }
+
+    fn rekey_due(&self, now: Instant) -> bool {
+        now >= self.rekey_at
+            || self.child.outbound.seq() >= SEQ_REKEY_THRESHOLD
+            || self.limits.child_rekey_kb.is_some_and(|kb| self.traffic() >= kb.saturating_mul(1024))
+    }
+
+    /// Past the end: the SA must not be used any more.
+    fn child_expired(&self, now: Instant) -> bool {
+        now >= self.child.created + self.limits.child_lifetime
+            || self.limits.child_lifetime_kb.is_some_and(|kb| self.traffic() >= kb.saturating_mul(1024))
     }
 
     async fn start_request(&mut self, exchange: u8, payloads: Vec<Payload>, kind: PendingKind) -> anyhow::Result<()> {

@@ -88,9 +88,18 @@ impl Allowed {
 }
 
 impl Session {
+    /// Once the peer has answered, a transient network error (an ICMP
+    /// unreachable while it restarts, roaming…) only loses the datagram:
+    /// WireGuard's timers recover, or give up with `ConnectionExpired`.
     async fn send_datagram(&self, datagram: &[u8]) -> anyhow::Result<()> {
-        self.socket.send(datagram).await.kind(FailureKind::Unreachable).context("cannot send to the WireGuard peer")?;
-        Ok(())
+        match self.socket.send(datagram).await {
+            Ok(_) => Ok(()),
+            Err(e) if self.established() && vpn_core::net::transient(&e) => {
+                debug!("transient UDP send error: {e}");
+                Ok(())
+            }
+            Err(e) => Err(e).kind(FailureKind::Unreachable).context("cannot send to the WireGuard peer"),
+        }
     }
 
     /// Feeds one datagram to boringtun; returns the IPv4 packets for the
@@ -285,15 +294,18 @@ impl Engine for WireGuardEngine {
         let mut receive = vec![0; BUFFER];
         loop {
             tokio::select! {
-                received = session.socket.recv(&mut receive) => {
-                    let len = received.kind(FailureKind::Unreachable).context("WireGuard socket")?;
-                    for packet in session.received(&receive[..len]).await? {
-                        ctx.stats.record_rx(packet.len());
-                        if to_tun.send(packet).await.is_err() {
-                            bail!("tun interface closed");
+                received = session.socket.recv(&mut receive) => match received {
+                    Ok(len) => {
+                        for packet in session.received(&receive[..len]).await? {
+                            ctx.stats.record_rx(packet.len());
+                            if to_tun.send(packet).await.is_err() {
+                                bail!("tun interface closed");
+                            }
                         }
                     }
-                }
+                    Err(e) if vpn_core::net::transient(&e) => debug!("transient UDP error: {e}"),
+                    Err(e) => return Err(e).kind(FailureKind::Unreachable).context("WireGuard socket"),
+                },
                 packet = from_tun.recv() => match packet {
                     Some(packet) if packet.first().is_some_and(|b| b >> 4 == 4) => {
                         session.outgoing(&packet).await?;
@@ -343,6 +355,73 @@ mod tests {
         .unwrap();
         let vpn_core::ProtocolConfig::WireGuard(p) = profile.protocol else { unreachable!() };
         WireGuardEngine::new(p)
+    }
+
+    struct NoPrompter;
+
+    #[async_trait]
+    impl vpn_core::Prompter for NoPrompter {
+        async fn ask(&self, _prompt: Prompt) -> anyhow::Result<String> {
+            bail!("no prompt in this test")
+        }
+
+        async fn open_url(&self, _url: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Answers handshakes and keepalives as the WireGuard server would.
+    async fn serve(socket: UdpSocket, mut tunn: Tunn) {
+        let (mut buffer, mut out) = (vec![0; BUFFER], vec![0; BUFFER]);
+        while let Ok((len, from)) = socket.recv_from(&mut buffer).await {
+            let mut result = tunn.decapsulate(Some(from.ip()), &buffer[..len], &mut out);
+            while let TunnResult::WriteToNetwork(reply) = result {
+                let _ = socket.send_to(reply, from).await;
+                result = tunn.decapsulate(None, &[], &mut out);
+            }
+        }
+    }
+
+    /// The server restarts: its port answers ICMP port unreachable for a
+    /// while. The tunnel stays up, as with wg-quick.
+    #[tokio::test]
+    async fn icmp_errors_do_not_end_the_tunnel() {
+        let (ours, theirs) = (StaticSecret::from([1; 32]), StaticSecret::from([2; 32]));
+        let server_tunn = Tunn::new(theirs.clone(), PublicKey::from(&ours), None, None, 2, None);
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = server.local_addr().unwrap();
+        let serving = tokio::spawn(serve(server, server_tunn));
+
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        socket.connect(addr).await.unwrap();
+        let allowed = Allowed { networks: vec![Ipv4Net::default()], local: vec![Ipv4Addr::new(10, 7, 0, 2)] };
+        let tunn = Tunn::new(ours, PublicKey::from(&theirs), None, None, 1, None);
+        let mut session = Session { socket, peer: addr.ip(), tunn, allowed, send: vec![0; BUFFER] };
+        session.handshake().await.unwrap();
+        serving.abort();
+        let _ = serving.await; // the port is closed from now on
+
+        let mut engine = engine("\"0.0.0.0/0\"", "");
+        engine.session = Some(session);
+        let ctx = SessionContext {
+            name: "wg".into(),
+            prompter: std::sync::Arc::new(NoPrompter),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            stats: Default::default(),
+        };
+        let (to_tun, _tun_rx) = tokio::sync::mpsc::channel(8);
+        let (tun_tx, from_tun) = tokio::sync::mpsc::channel(8);
+        let run_ctx = ctx.clone();
+        let run = tokio::spawn(async move { engine.run(&run_ctx, PacketIo { to_tun, from_tun }).await });
+        let packet = [&[0x45, 0, 0, 20][..], &[0; 8], &[10, 7, 0, 2], &[10, 7, 0, 1]].concat();
+        for _ in 0..3 {
+            tun_tx.send(Bytes::from(packet.clone())).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(!run.is_finished(), "{:?}", run.await.unwrap());
+        ctx.cancel.cancel();
+        run.await.unwrap().unwrap();
+        assert_eq!(ctx.stats.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 3);
     }
 
     #[test]
