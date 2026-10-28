@@ -1655,7 +1655,7 @@ dependencies = [
 
 [[package]]
 name = "omnitun-engine"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1677,7 +1677,7 @@ dependencies = [
 
 [[package]]
 name = "omnitunctl"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1692,7 +1692,7 @@ dependencies = [
 
 [[package]]
 name = "omnitund"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3071,7 +3071,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "utun-probe"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "nix 0.31.3",
@@ -3092,7 +3092,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vpn-client"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3123,7 +3123,7 @@ dependencies = [
 
 [[package]]
 name = "vpn-core"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3140,7 +3140,7 @@ dependencies = [
 
 [[package]]
 name = "vpn-ffi"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3161,7 +3161,7 @@ dependencies = [
 
 [[package]]
 name = "vpn-fortissl"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3185,7 +3185,7 @@ dependencies = [
 
 [[package]]
 name = "vpn-ipsec"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -3224,7 +3224,7 @@ dependencies = [
 
 [[package]]
 name = "vpn-l2tp"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3245,7 +3245,7 @@ dependencies = [
 
 [[package]]
 name = "vpn-openvpn"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "aes",
  "anyhow",
@@ -3276,7 +3276,7 @@ dependencies = [
 
 [[package]]
 name = "vpn-platform"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3291,7 +3291,7 @@ dependencies = [
 
 [[package]]
 name = "vpn-tls"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "hex",
@@ -3304,7 +3304,7 @@ dependencies = [
 
 [[package]]
 name = "vpn-wireguard"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-trait",
