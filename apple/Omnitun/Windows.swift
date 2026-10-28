@@ -153,7 +153,7 @@ final class Windows {
     func showSetup(model: AppModel) {
         Settings.offeredImport = true
         show(Self.setupKey, title: String(localized: "Welcome to \(brand.product)")) {
-            ImportView(model: model, sources: [.fortiClient, .viscosity, .macOS], setup: true)
+            ImportView(model: model, sources: [.fortiClient, .viscosity, .openVpnConnect, .macOS], setup: true)
         }
     }
 

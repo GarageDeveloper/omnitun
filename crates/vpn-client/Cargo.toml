@@ -10,6 +10,7 @@ vpn-core.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 toml_edit = "0.25"

@@ -169,6 +169,14 @@ enum ImportSource {
         #[arg(long)]
         write: bool,
     },
+    /// OpenVPN Connect's profiles: its folder, or another of the same
+    /// layout.
+    OpenvpnConnect {
+        path: Option<PathBuf>,
+        /// Append to the profiles file instead of printing.
+        #[arg(long)]
+        write: bool,
+    },
     /// The VPNs of macOS's System Settings (Cisco IPSec); their secrets
     /// stay in the System keychain.
     Macos {
@@ -382,6 +390,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Import { source: ImportSource::Forticlient { from, write } } => {
             let imported = import::forticlient(&from)?;
+            let existing = store.load()?;
             if imported.is_empty() {
                 bail!("no profile in {}", from.display());
             }
@@ -396,6 +405,7 @@ async fn main() -> anyhow::Result<()> {
                 for note in &i.notes {
                     eprintln!("{}: {note}", i.name);
                 }
+                warn_duplicate(i, &existing);
                 if i.needs_psk {
                     let name = &i.name;
                     eprintln!(
@@ -406,7 +416,8 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Import { source: ImportSource::Openvpn { path, write } } => {
-            let existing: Vec<String> = store.load()?.into_iter().map(|p| p.name).collect();
+            let profiles = store.load()?;
+            let existing: Vec<String> = profiles.iter().map(|p| p.name.clone()).collect();
             let imported = import::openvpn(&path, &existing)?;
             if write {
                 store.append(&imported.toml)?;
@@ -417,10 +428,15 @@ async fn main() -> anyhow::Result<()> {
             for note in &imported.notes {
                 eprintln!("{}: {note}", imported.name);
             }
+            warn_duplicate(&imported, &profiles);
         }
         Command::Import { source: ImportSource::Viscosity { path, write } } => {
             let existing: Vec<String> = store.load()?.into_iter().map(|p| p.name).collect();
             add_found(&store, import::viscosity(path.as_deref(), &existing)?, write, "Viscosity connection")?;
+        }
+        Command::Import { source: ImportSource::OpenvpnConnect { path, write } } => {
+            let existing: Vec<String> = store.load()?.into_iter().map(|p| p.name).collect();
+            add_found(&store, import::openvpn_connect(path.as_deref(), &existing)?, write, "OpenVPN Connect profile")?;
         }
         Command::Import { source: ImportSource::Macos { from, write } } => {
             let existing: Vec<String> = store.load()?.into_iter().map(|p| p.name).collect();
@@ -707,6 +723,7 @@ fn add_found(store: &ProfileStore, found: Vec<import::Found>, write: bool, what:
     if found.is_empty() {
         bail!("no {what} found");
     }
+    let existing = store.load()?;
     let mut text = String::new();
     for connection in &found {
         match &connection.result {
@@ -716,6 +733,7 @@ fn add_found(store: &ProfileStore, found: Vec<import::Found>, write: bool, what:
                 for note in &imported.notes {
                     eprintln!("{}: {note}", imported.name);
                 }
+                warn_duplicate(imported, &existing);
                 if imported.needs_psk {
                     let name = &imported.name;
                     eprintln!("{name}: pre-shared key not imported: {} secret set {name} --key psk", brand::CLI);
@@ -734,6 +752,13 @@ fn add_found(store: &ProfileStore, found: Vec<import::Found>, write: bool, what:
         print!("{text}");
     }
     Ok(())
+}
+
+/// Says when an imported profile has the same server as one added already.
+fn warn_duplicate(imported: &import::Imported, existing: &[vpn_core::Profile]) {
+    if let Some(other) = import::duplicate_of(&imported.toml, existing) {
+        eprintln!("{}: same server as {other}, already added", imported.name);
+    }
 }
 
 /// How each profile can be named on the command line, for completions.
