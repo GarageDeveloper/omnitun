@@ -14,3 +14,4 @@ serde_json.workspace = true
 clap.workspace = true
 zeroize = "1"
 rpassword = "7"
+libc = "0.2"

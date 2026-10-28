@@ -1,6 +1,8 @@
 //! `omnitunctl`: user-side CLI. Reads profiles from the user's config, keeps
 //! secrets in the OS keychain, and drives `omnitund` over its control socket.
 
+#[cfg(target_os = "macos")]
+mod app;
 mod log;
 
 use std::io::{BufRead, Write};
@@ -110,6 +112,20 @@ enum Command {
     },
     /// Disconnect everything and restart the service (after an update).
     Shutdown,
+    /// The menu bar app (macOS).
+    App {
+        #[command(subcommand)]
+        action: AppAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum AppAction {
+    /// Open the app, or bring it forward.
+    Start,
+    /// Quit the app, killing it if it is stuck, and open it again; the
+    /// VPNs stay connected.
+    Restart,
 }
 
 #[derive(Subcommand)]
@@ -376,6 +392,15 @@ async fn main() -> anyhow::Result<()> {
             daemon().await?.shutdown().await?;
             println!("{} is restarting; sessions were closed", brand::DAEMON);
         }
+        #[cfg(target_os = "macos")]
+        Command::App { action: AppAction::Start } => app::start()?,
+        #[cfg(target_os = "macos")]
+        Command::App { action: AppAction::Restart } => match app::restart()? {
+            true => println!("{} restarted; the VPNs stay connected", brand::PRODUCT),
+            false => println!("{} was not running: started", brand::PRODUCT),
+        },
+        #[cfg(not(target_os = "macos"))]
+        Command::App { .. } => bail!("the menu bar app only exists on macOS"),
         Command::Secret { action } => match action {
             SecretAction::Set { profile, key } => {
                 let profile = store.find(&profile)?;
