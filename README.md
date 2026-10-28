@@ -176,6 +176,7 @@ in Docker: strongSwan 5.9 (IKEv1, IKEv2), OpenVPN 2.6, strongSwan + xl2tpd
   fragmentation, no MOBIKE. With EAP and a gateway authenticated by a group
   PSK, anyone holding the PSK can capture MSCHAPv2 answers: prefer the
   gateway's certificate.
+- Certificates: no revocation check (CRL, OCSP).
 - Fortinet SSL VPN: no DTLS, no host check.
 - OpenVPN: no tls-crypt-v2, no browser login (WEB_AUTH), no CBC ciphers, no
   static key mode, no `dev tap`; compressed packets from the server are
