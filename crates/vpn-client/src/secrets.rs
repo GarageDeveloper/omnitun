@@ -48,6 +48,30 @@ pub fn get(profile: &Profile, key: &str) -> anyhow::Result<Option<Zeroizing<Stri
     }
 }
 
+/// Whether a secret is stored. On macOS, only its attributes are looked
+/// up: the value is not decrypted, so no Keychain access prompt shows up.
+pub fn exists(profile: &Profile, key: &str) -> anyhow::Result<bool> {
+    known(key)?;
+    #[cfg(target_os = "macos")]
+    {
+        use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
+        let found = ItemSearchOptions::new()
+            .class(ItemClass::generic_password())
+            .service(brand::ID)
+            .account(&account(profile, key))
+            .load_attributes(true)
+            .limit(Limit::Max(1))
+            .search();
+        match found {
+            Ok(items) => Ok(!items.is_empty()),
+            Err(e) if e.code() == security_framework_sys::base::errSecItemNotFound => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    Ok(get(profile, key)?.is_some())
+}
+
 /// Moves what earlier versions saved under the profile's name to its id,
 /// while the name is still the one they used (when ids are given, before
 /// any rename): later, a homonym never receives them.

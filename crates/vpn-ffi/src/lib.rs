@@ -326,9 +326,10 @@ impl Client {
         Ok(vpn_client::secrets::set(&self.store.find(&id)?, &key, &value)?)
     }
 
-    /// Whether a secret is stored (its value is not read out).
+    /// Whether a secret is stored (its value is not read out). It queries
+    /// the Keychain: call it off the main thread.
     pub fn has_secret(&self, id: String, key: String) -> bool {
-        self.store.find(&id).ok().and_then(|p| vpn_client::secrets::get(&p, &key).ok().flatten()).is_some()
+        self.store.find(&id).ok().is_some_and(|p| vpn_client::secrets::exists(&p, &key).unwrap_or(false))
     }
 
     /// Returns whether a secret was stored; false for a profile gone.

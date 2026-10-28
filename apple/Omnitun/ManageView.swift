@@ -71,10 +71,25 @@ final class ProfileEditing: ObservableObject {
         refreshStoredSecrets()
     }
 
+    /// Counts the lookups, so a slow one never overwrites a later one.
+    private var secretsLookup = 0
+
+    /// Asks the Keychain off the main thread: the interface never waits
+    /// for it.
     private func refreshStoredSecrets() {
-        storedSecrets = original.map { name in
-            Set(["psk", "password", "private_key"].filter { model.client.hasSecret(id: name, key: $0) })
-        } ?? []
+        secretsLookup += 1
+        let lookup = secretsLookup
+        guard let id = original else {
+            storedSecrets = []
+            return
+        }
+        let client = model.client
+        Task {
+            let stored = await Task.detached {
+                Set(["psk", "password", "private_key"].filter { client.hasSecret(id: id, key: $0) })
+            }.value
+            if lookup == secretsLookup { storedSecrets = stored }
+        }
     }
 
     /// The folder shown instead of a VPN.
@@ -405,8 +420,10 @@ final class ProfileEditing: ObservableObject {
         NSApp.activate()
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         do {
-            for key in ["password", "psk", "private_key"] { _ = try? model.client.deleteSecret(id: id, key: key) }
+            // The profile first: if it stays, so do its secrets (a WireGuard
+            // private key cannot be recovered).
             try model.client.removeProfile(id: id)
+            for key in ["password", "psk", "private_key"] { _ = try? model.client.deleteSecret(id: id, key: key) }
             model.reloadProfiles()
             model.forget(id)
             if id == selection {
@@ -788,12 +805,29 @@ struct ProfileEditor: View {
             panel.nameFieldStringValue = "\(model.displayName(id)).vpnprofile"
             panel.allowedContentTypes = [UTType(filenameExtension: "vpnprofile") ?? .data]
             guard panel.runModal() == .OK, let url = panel.url else { return }
-            try text.write(to: url, atomically: true, encoding: .utf8)
-            // Its shared keys are for the VPN's users, not everyone on this Mac.
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            try writePrivately(text, to: url)
         } catch {
             Windows.shared.alert(String(localized: "Cannot export the profile"), describe(error))
         }
+    }
+}
+
+/// Writes `text` to `url` readable by its owner only, from the start: its
+/// shared keys are for the VPN's users, not everyone on this Mac. The file
+/// is created 0600 beside `url`, then renamed over it.
+private func writePrivately(_ text: String, to url: URL) throws {
+    let temp = url.deletingLastPathComponent().appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString)")
+    let fd = open(temp.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+    guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+    do {
+        try handle.write(contentsOf: Data(text.utf8))
+        try handle.synchronize()
+        try handle.close()
+        guard rename(temp.path, url.path) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    } catch {
+        unlink(temp.path)
+        throw error
     }
 }
 

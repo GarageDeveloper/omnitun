@@ -86,8 +86,9 @@ struct TextPromptView: View {
     }
 }
 
-/// E4: one-time code, sent at the 6th digit; with FortiToken push, an
-/// approval on the phone instead.
+/// E4: one-time code. A FortiToken code is sent once its last digit is
+/// typed; any other code (a PIN and a token, letters) is typed hidden and
+/// sent as is. With FortiToken push, an approval on the phone instead.
 struct CodePromptView: View {
     let profile: String
     let prompt: Prompt
@@ -107,14 +108,19 @@ struct CodePromptView: View {
                 }
             } else {
                 Header(symbol: "number.square", title: String(localized: "Verification code"), subtitle: "\(profile) · \(prompt.message)")
-                TextField("123456", text: $code)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 22, weight: .medium, design: .monospaced))
-                    .onChange(of: code) { _, new in
-                        let digits = new.filter(\.isNumber)
-                        if digits != new { code = digits }
-                        if digits.count == 6 { reply(.init(value: digits, remember: false)) }
-                    }
+                if prompt.digits > 0 {
+                    TextField(String(repeating: "0", count: Int(prompt.digits)), text: $code)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 22, weight: .medium, design: .monospaced))
+                        .onChange(of: code) { _, new in
+                            let digits = new.filter(\.isNumber)
+                            if digits != new { code = digits }
+                            if digits.count == Int(prompt.digits) { reply(.init(value: digits, remember: false)) }
+                        }
+                } else {
+                    SecureField(String(localized: "Code"), text: $code)
+                        .textFieldStyle(.roundedBorder)
+                }
                 Text("The code is never saved.").font(.caption).foregroundStyle(.secondary)
                 HStack {
                     if prompt.push {

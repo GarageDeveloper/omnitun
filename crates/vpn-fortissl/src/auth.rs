@@ -47,13 +47,18 @@ pub async fn password_login(
         let Reply::Challenge(fields) = reply else {
             return Ok(());
         };
-        let push = field(&fields, "tokeninfo") == "ftm_push";
+        let token = field(&fields, "tokeninfo");
+        let push = token == "ftm_push";
         let message = match field(&fields, "chal_msg") {
             "" if push => "FortiToken code (leave empty to approve the push notification)".to_owned(),
             "" => "FortiToken / one-time code".to_owned(),
             msg => msg.to_owned(),
         };
-        let prompt = Prompt { push, ..Prompt::new("otp", PromptKind::Otp, message) };
+        // A FortiGate token (FortiToken, e-mail, SMS) is a 6-digit code; a
+        // RADIUS challenge (no token info) may want a PIN and a code, or
+        // letters, so it is sent as typed.
+        let digits = if token.is_empty() { 0 } else { 6 };
+        let prompt = Prompt { push, digits, ..Prompt::new("otp", PromptKind::Otp, message) };
         let code = ctx.prompter.ask(prompt).await?;
 
         let mut form = vec![("ajax", "1"), ("username", username.as_str()), ("realm", realm.as_str())];
