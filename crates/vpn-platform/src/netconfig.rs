@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::{LazyLock, Mutex};
+use std::sync::LazyLock;
 
 use anyhow::{Context, bail};
 use ipnet::{Ipv4Net, Ipv6Net};
@@ -13,8 +13,11 @@ use vpn_core::TunnelSettings;
 use crate::{cmd, journal};
 
 /// Gateway host routes are shared by sessions talking to the same gateway:
-/// count of sessions, and the uplink the route was added through.
-static GATEWAY_ROUTES: LazyLock<Mutex<HashMap<Ipv4Addr, (usize, Uplink)>>> = LazyLock::new(Default::default);
+/// count of sessions, and the uplink the route was added through. Held
+/// while the route is added or deleted: a second session must not count
+/// on a route the first one is still adding, and may fail to.
+static GATEWAY_ROUTES: LazyLock<tokio::sync::Mutex<HashMap<Ipv4Addr, (usize, Uplink)>>> =
+    LazyLock::new(Default::default);
 
 #[derive(Debug)]
 enum Undo {
@@ -80,17 +83,16 @@ impl AppliedConfig {
             self.undo.push(Undo::Route(Ipv4Net::from(gateway), via));
         } else if let IpAddr::V4(gateway) = settings.gateway {
             // Keep the encrypted transport itself off every tunnel.
-            let first = {
-                let mut routes = GATEWAY_ROUTES.lock().unwrap();
-                let (count, _) = routes.entry(gateway).or_insert((0, uplink.clone()));
-                *count += 1;
-                *count == 1
-            };
-            if first && let Err(e) = add_route(Ipv4Net::from(gateway), &Via::Physical(uplink.clone())).await {
+            let mut routes = GATEWAY_ROUTES.lock().await;
+            if let std::collections::hash_map::Entry::Vacant(entry) = routes.entry(gateway) {
                 // Never take ownership of a host route someone else installed.
-                GATEWAY_ROUTES.lock().unwrap().remove(&gateway);
-                return Err(e.context(format!("cannot add host route to gateway {gateway}")));
+                add_route(Ipv4Net::from(gateway), &Via::Physical(uplink.clone()))
+                    .await
+                    .with_context(|| format!("cannot add host route to gateway {gateway}"))?;
+                entry.insert((0, uplink.clone()));
             }
+            routes.get_mut(&gateway).expect("inserted above").0 += 1;
+            drop(routes);
             self.undo.push(Undo::GatewayRoute(gateway));
         }
 
@@ -143,19 +145,18 @@ impl AppliedConfig {
                 Undo::Route(net, via) => delete_route(*net, via).await,
                 Undo::Ipv6Block(net) => unblock_ipv6(*net, &self.interface).await,
                 Undo::GatewayRoute(gateway) => {
-                    let last = {
-                        let mut routes = GATEWAY_ROUTES.lock().unwrap();
-                        match routes.get_mut(gateway) {
-                            Some((count, _)) if *count > 1 => {
-                                *count -= 1;
-                                None
-                            }
-                            _ => routes.remove(gateway).map(|(_, uplink)| uplink),
+                    let mut routes = GATEWAY_ROUTES.lock().await;
+                    match routes.get_mut(gateway) {
+                        Some((count, _)) if *count > 1 => {
+                            *count -= 1;
+                            Ok(())
                         }
-                    };
-                    match last {
-                        Some(uplink) => delete_route(Ipv4Net::from(*gateway), &Via::Physical(uplink)).await,
-                        None => Ok(()),
+                        // The last session: deleted before another one may
+                        // add it again.
+                        _ => match routes.remove(gateway) {
+                            Some((_, uplink)) => delete_route(Ipv4Net::from(*gateway), &Via::Physical(uplink)).await,
+                            None => Ok(()),
+                        },
                     }
                 }
                 Undo::Dns => clear_dns(&self.session, &self.interface).await,

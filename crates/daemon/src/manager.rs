@@ -234,50 +234,51 @@ impl Manager {
     /// Stops a session; `uid` must own it unless it is root.
     /// `id`: the session's profile id.
     pub async fn disconnect(&self, id: &str, uid: u32) -> anyhow::Result<()> {
-        let task = {
+        let (task, info) = {
             let mut sessions = self.sessions.lock().unwrap();
             let session = sessions
                 .get_mut(id)
                 .filter(|s| uid == 0 || s.owner == uid)
                 .with_context(|| format!("{id} is not active"))?;
             session.cancel.cancel();
-            session.task.take()
+            (session.task.take(), session.info.clone())
         };
         if let Some(task) = task {
             let _ = task.await;
         }
-        self.forget(id);
+        self.forget(id, &info);
         Ok(())
     }
 
     /// Closes every session at once: the service manager kills the daemon
     /// if stopping takes too long, so teardowns must not queue up.
     pub async fn disconnect_all(&self) {
-        let tasks: Vec<(String, Option<tokio::task::JoinHandle<()>>)> = {
+        let tasks: Vec<_> = {
             let mut sessions = self.sessions.lock().unwrap();
             sessions
                 .iter_mut()
                 .map(|(name, session)| {
                     session.cancel.cancel();
-                    (name.clone(), session.task.take())
+                    (name.clone(), session.task.take(), session.info.clone())
                 })
                 .collect()
         };
-        for (name, task) in tasks {
+        for (name, task, info) in tasks {
             if let Some(task) = task {
                 let _ = task.await;
             }
-            self.forget(&name);
+            self.forget(&name, &info);
         }
     }
 
     /// Sends the current sessions, then every state change of `uid`'s
     /// sessions (all of them for root), until the client goes away.
-    pub fn watch(&self, uid: u32, link: ClientLink) {
+    pub fn watch(self: &Arc<Self>, uid: u32, link: ClientLink) {
         let mut rx = self.events.subscribe();
         if !link.send(Event::Status { sessions: self.status(uid) }) {
             return;
         }
+        let manager = self.clone();
         tokio::spawn(async move {
             loop {
                 let watched = tokio::select! {
@@ -290,7 +291,13 @@ impl Manager {
                             return;
                         }
                     }
-                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Ok(_) => {}
+                    // Changes were lost: the whole state again instead.
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        if !link.send(Event::Status { sessions: manager.status(uid) }) {
+                            return;
+                        }
+                    }
                     Err(broadcast::error::RecvError::Closed) => return,
                 }
             }
@@ -331,8 +338,13 @@ impl Manager {
         checked
     }
 
-    fn forget(&self, name: &str) {
-        self.sessions.lock().unwrap().remove(name);
+    /// Removes the session `info` belongs to; not a new session of the
+    /// same profile, connected since this one ended.
+    fn forget(&self, name: &str, info: &Arc<Mutex<SessionInfo>>) {
+        let mut sessions = self.sessions.lock().unwrap();
+        if sessions.get(name).is_some_and(|s| Arc::ptr_eq(&s.info, info)) {
+            sessions.remove(name);
+        }
     }
 
     /// The tunnel interface of a connected session.
@@ -471,7 +483,7 @@ impl Runner {
         // Failed sessions stay visible, with their error, until dismissed
         // or for an hour.
         if self.info.lock().unwrap().state != SessionState::Failed {
-            self.manager.forget(&self.profile.id);
+            self.manager.forget(&self.profile.id, &self.info);
         } else {
             let (manager, name, info) = (self.manager.clone(), self.profile.id.clone(), self.info.clone());
             tokio::spawn(async move {
@@ -1348,6 +1360,56 @@ mod tests {
         m.disconnect(&test_id("bob-vpn"), 0).await.unwrap();
         assert!(bob.is_cancelled());
         assert!(names(0).is_empty());
+    }
+
+    /// A watcher that fell behind gets the whole state again.
+    #[tokio::test]
+    async fn a_lagging_watcher_gets_the_status_again() {
+        let m = Arc::new(Manager::default());
+        let (tx, mut rx) = mpsc::channel(2 * WATCH_QUEUE);
+        m.watch(1000, ClientLink::new(tx));
+        assert!(matches!(rx.recv().await, Some(Event::Status { .. })));
+        fake_session(&m, "paris", 1000);
+        for i in 0..WATCH_QUEUE + 10 {
+            let event = Event::Warning { message: i.to_string() };
+            let _ = m.events.send(Watched { owner: 1000, event });
+        }
+        let Some(Event::Status { sessions }) = timeout(Duration::from_secs(2), rx.recv()).await.unwrap() else {
+            panic!("expected the status first")
+        };
+        assert_eq!(sessions.len(), 1);
+    }
+
+    /// A session ends and leaves the table as its task finishes; a new
+    /// session of the same profile, connected before `disconnect` returns,
+    /// must not be removed with it.
+    #[tokio::test]
+    async fn disconnect_keeps_a_session_connected_meanwhile() {
+        let m = Arc::new(Manager::default());
+        let id = test_id("paris");
+        let cancel = fake_session(&m, "paris", 1000);
+        let info = m.sessions.lock().unwrap()[&id].info.clone();
+        let (ended, ended_rx) = tokio::sync::oneshot::channel();
+        let (resume, resume_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn({
+            let (m, id) = (m.clone(), id.clone());
+            async move {
+                cancel.cancelled().await;
+                m.forget(&id, &info); // as the runner does
+                ended.send(()).unwrap();
+                let _ = resume_rx.await;
+            }
+        });
+        m.sessions.lock().unwrap().get_mut(&id).unwrap().task = Some(task);
+        let disconnect = tokio::spawn({
+            let (m, id) = (m.clone(), id.clone());
+            async move { m.disconnect(&id, 1000).await }
+        });
+        ended_rx.await.unwrap();
+        fake_session(&m, "paris", 1000); // connected again meanwhile
+        resume.send(()).unwrap();
+        disconnect.await.unwrap().unwrap();
+        assert_eq!(m.status(1000).len(), 1, "the new session is still listed");
     }
 
     #[tokio::test]
