@@ -1,13 +1,14 @@
 //! `omnitunctl`: user-side CLI. Reads profiles from the user's config, keeps
 //! secrets in the OS keychain, and drives `omnitund` over its control socket.
 
+mod completions;
 mod log;
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, bail};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueHint};
 use vpn_client::{Daemon, Interaction, Notice, ProfileStore, Trust, import, printable, secrets};
 use vpn_core::ipc::{Event, SessionInfo, SessionState};
 use vpn_core::{CertificateInfo, FailureKind, Prompt, PromptKind, brand};
@@ -20,7 +21,7 @@ static VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(vpn_core:
 #[command(version = VERSION.as_str(), about = "Omnitun command line: connect, disconnect and configure VPNs")]
 struct Cli {
     /// Profiles file (default: ~/.config/omnitun/profiles.toml).
-    #[arg(long, global = true)]
+    #[arg(long, global = true, value_hint = ValueHint::FilePath)]
     config: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
@@ -32,6 +33,7 @@ enum Command {
     /// profile (`via`) goes through its first VPN that is up, or brings it
     /// up first.
     Connect {
+        #[arg(value_name = "PROFILE")]
         names: Vec<String>,
         /// Without the VPNs the profiles are chained through.
         #[arg(long)]
@@ -43,6 +45,7 @@ enum Command {
     },
     /// Tear down sessions.
     Disconnect {
+        #[arg(value_name = "PROFILE")]
         names: Vec<String>,
         #[arg(long)]
         all: bool,
@@ -53,7 +56,12 @@ enum Command {
         json: bool,
     },
     /// List configured profiles.
-    Profiles,
+    Profiles {
+        /// Only the names to give other commands, one per line (for shell
+        /// completions).
+        #[arg(long)]
+        names: bool,
+    },
     /// List the Keychain certificates usable for IPsec authentication (the
     /// SHA-256 goes in a profile's client_certificate).
     Identities,
@@ -78,9 +86,10 @@ enum Command {
     /// Write a profile as a .vpnprofile file to share (no secret, key or
     /// user name).
     Export {
+        #[arg(value_name = "PROFILE")]
         name: String,
         /// File to write (default: standard output).
-        #[arg(long, short)]
+        #[arg(long, short, value_hint = ValueHint::FilePath)]
         output: Option<PathBuf>,
     },
     /// Follow state changes of your sessions until interrupted.
@@ -89,6 +98,7 @@ enum Command {
     /// lines, in local time. Readable by administrators.
     Log {
         /// Profile names.
+        #[arg(value_name = "PROFILE")]
         names: Vec<String>,
         /// How far back: 30m, 2h, 3d.
         #[arg(long, default_value = "24h", value_parser = log::duration)]
@@ -105,17 +115,22 @@ enum Command {
     /// domains and addresses replaced by placeholders.
     Diagnose {
         /// File to write (default: standard output).
-        #[arg(long, short)]
+        #[arg(long, short, value_hint = ValueHint::FilePath)]
         output: Option<PathBuf>,
     },
     /// Disconnect everything and restart the service (after an update).
     Shutdown,
+    /// Print the shell completion script: `omnitunctl completions zsh >
+    /// "${fpath[1]}/_omnitunctl"`, or for bash into
+    /// ~/.local/share/bash-completion/completions/omnitunctl.
+    Completions { shell: completions::Shell },
 }
 
 #[derive(Subcommand)]
 enum ImportSource {
     /// A .vpnprofile file received from someone else.
     File {
+        #[arg(value_hint = ValueHint::FilePath)]
         path: PathBuf,
         /// Add it without asking.
         #[arg(long)]
@@ -124,6 +139,7 @@ enum ImportSource {
     /// An OpenVPN client configuration (.ovpn, .conf); the files it names
     /// are read and inlined.
     Openvpn {
+        #[arg(value_hint = ValueHint::FilePath)]
         path: PathBuf,
         /// Append to the profiles file instead of printing.
         #[arg(long)]
@@ -131,6 +147,7 @@ enum ImportSource {
     },
     /// Viscosity's connections: its library, or an exported .visc folder.
     Viscosity {
+        #[arg(value_hint = ValueHint::AnyPath)]
         path: Option<PathBuf>,
         /// Append to the profiles file instead of printing.
         #[arg(long)]
@@ -139,7 +156,7 @@ enum ImportSource {
     /// The VPNs of macOS's System Settings (Cisco IPSec); their secrets
     /// stay in the System keychain.
     Macos {
-        #[arg(long, default_value = import::MACOS_NETWORK_PREFERENCES)]
+        #[arg(long, default_value = import::MACOS_NETWORK_PREFERENCES, value_hint = ValueHint::FilePath)]
         from: PathBuf,
         /// Append to the profiles file instead of printing.
         #[arg(long)]
@@ -147,7 +164,7 @@ enum ImportSource {
     },
     /// FortiClient's vpn.plist (macOS).
     Forticlient {
-        #[arg(long, default_value = import::FORTICLIENT_PLIST)]
+        #[arg(long, default_value = import::FORTICLIENT_PLIST, value_hint = ValueHint::FilePath)]
         from: PathBuf,
         /// Append to the profiles file instead of printing.
         #[arg(long)]
@@ -159,12 +176,14 @@ enum ImportSource {
 enum SecretAction {
     /// Store a secret (asked interactively).
     Set {
+        #[arg(value_name = "PROFILE")]
         profile: String,
         /// Which secret: password or psk.
         #[arg(long, default_value = "password")]
         key: String,
     },
     Delete {
+        #[arg(value_name = "PROFILE")]
         profile: String,
         #[arg(long, default_value = "password")]
         key: String,
@@ -174,6 +193,11 @@ enum SecretAction {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    // Needs no profiles file: run before opening one.
+    if let Command::Completions { shell } = cli.command {
+        print!("{}", completions::script(shell, &mut Cli::command())?);
+        return Ok(());
+    }
     let store = ProfileStore::open(cli.config)?;
     if store.is_legacy() {
         eprintln!("note: using {}; move it to ~/.config/{}/", store.path().display(), brand::ID);
@@ -232,7 +256,12 @@ async fn main() -> anyhow::Result<()> {
                 print_status(&sessions);
             }
         }
-        Command::Profiles => {
+        Command::Profiles { names: true } => {
+            for key in completion_keys(&store.load()?) {
+                println!("{key}");
+            }
+        }
+        Command::Profiles { names: false } => {
             for p in store.load()? {
                 println!("{:<32} {:<10} {}", vpn_client::profiles::path_of(&p), p.protocol.name(), p.id);
             }
@@ -376,6 +405,7 @@ async fn main() -> anyhow::Result<()> {
             daemon().await?.shutdown().await?;
             println!("{} is restarting; sessions were closed", brand::DAEMON);
         }
+        Command::Completions { .. } => unreachable!("handled before the profiles file is opened"),
         Command::Secret { action } => match action {
             SecretAction::Set { profile, key } => {
                 let profile = store.find(&profile)?;
@@ -630,4 +660,45 @@ fn add_found(store: &ProfileStore, found: Vec<import::Found>, write: bool, what:
         print!("{text}");
     }
     Ok(())
+}
+
+/// How each profile can be named on the command line, for completions.
+fn completion_keys(profiles: &[vpn_core::Profile]) -> Vec<String> {
+    profiles
+        .iter()
+        .map(|p| {
+            // `find` takes the bare name only when no other VPN has it.
+            if profiles.iter().filter(|other| other.name == p.name).count() == 1 {
+                p.name.clone()
+            } else {
+                vpn_client::profiles::path_of(p)
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn profile(name: &str, folder: Option<&str>) -> vpn_core::Profile {
+        let mut v = serde_json::json!({ "name": name, "protocol": "forti-ssl", "host": "vpn.example.com" });
+        if let Some(folder) = folder {
+            v["folder"] = folder.into();
+        }
+        serde_json::from_value(v).unwrap()
+    }
+
+    /// What `find` accepts, shortest first: the bare name when it is the
+    /// only one, the folder path when several VPNs share it.
+    #[test]
+    fn completion_keys_are_names_unless_shared() {
+        let profiles = [
+            profile("paris", None),
+            profile("EU", Some("Clients/Acme")),
+            profile("EU", Some("Clients/Beta")),
+            profile("lyon office", Some("Sites")),
+        ];
+        assert_eq!(completion_keys(&profiles), ["paris", "Clients/Acme/EU", "Clients/Beta/EU", "lyon office"]);
+    }
 }

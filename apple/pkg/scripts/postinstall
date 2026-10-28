@@ -66,6 +66,11 @@ launchctl bootstrap system "$plist"
 mkdir -p /usr/local/bin
 # -n: replace a link, never write through one.
 ln -sfn "$app/Contents/MacOS/@CLI@" /usr/local/bin/@CLI@
+# Shell completions: zsh's default fpath has the first folder; bash-completion
+# 2 (Homebrew) reads the second when XDG_DATA_DIRS is unset.
+mkdir -p /usr/local/share/zsh/site-functions /usr/local/share/bash-completion/completions
+ln -sfn "$app/Contents/Resources/completions/_@CLI@" /usr/local/share/zsh/site-functions/_@CLI@
+ln -sfn "$app/Contents/Resources/completions/@CLI@.bash" /usr/local/share/bash-completion/completions/@CLI@
 
 # Opens the app in the user's session.
 if [ -n "$user" ] && [ "$user" != root ] && [ "$user" != loginwindow ]; then

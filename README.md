@@ -54,13 +54,15 @@ published on the GitHub Releases page:
 (earlier versions are under [all releases](https://github.com/GarageDeveloper/omnitun/releases)).
 
 The package (`Omnitun-<version>.pkg`) installs the app, the service and
-`omnitunctl`; the app then offers updates (Sparkle) and the user decides.
+`omnitunctl` with its bash and zsh completions; the app then offers updates (Sparkle) and the user decides.
 macOS 14 or later.
 
 ### From source
 
 Rust (stable) is needed; on Linux, also `pkg-config` and the D-Bus headers
-(`libdbus-1-dev` on Debian and Ubuntu). The macOS app also needs Xcode 16.
+(`libdbus-1-dev` on Debian and Ubuntu). At run time on Linux, `omnitunctl`
+needs the D-Bus library (`libdbus-1-3` on Debian and Ubuntu, installed with
+`libdbus-1-dev`) for the Secret Service keyring. The macOS app also needs Xcode 16.
 See [apple/README.md](apple/README.md) for the app and the package.
 
 ```sh
@@ -102,6 +104,22 @@ omnitunctl log paris --since 2h -f         # the service log (administrators)
 omnitunctl diagnose -o report.txt          # a report to share, without secrets or addresses
 omnitunctl disconnect --all
 omnitunctl duplicate paris --name paris-test  # a copy to try other settings
+```
+
+### Shell completions
+
+`omnitunctl completions bash|zsh` prints a script that completes the
+subcommands, the options, the files, and the profile names (read from the
+profiles file, the one given with `--config` included). The macOS package
+installs both: zsh finds `/usr/local/share/zsh/site-functions/_omnitunctl`
+once `compinit` runs in `.zshrc`, and bash-completion 2 (Homebrew's
+`bash-completion@2`) loads `/usr/local/share/bash-completion/completions/omnitunctl`.
+From source, or on Linux:
+
+```sh
+omnitunctl completions zsh > "${fpath[1]}/_omnitunctl"   # a folder of your fpath you can write to
+mkdir -p ~/.local/share/bash-completion/completions
+omnitunctl completions bash > ~/.local/share/bash-completion/completions/omnitunctl
 ```
 
 ## Architecture
