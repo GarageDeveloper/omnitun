@@ -3,9 +3,12 @@
 //! gateway has closed it.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use anyhow::{Context, bail};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::time::timeout;
+use vpn_core::{FailureKind, failure};
 
 use crate::tls::{Endpoint, Stream};
 
@@ -86,18 +89,22 @@ impl Client {
         }
 
         // A kept-alive connection may have been closed by the gateway in the
-        // meantime: retry once on a fresh one.
+        // meantime: retry once on a fresh one. Not a POST the gateway may
+        // have processed: a one-time code would be refused the second time.
+        let context = || format!("{method} {}: no valid HTTP response", no_query(path));
         let resp = match self.conn.take() {
             Some(mut stream) => match exchange(&mut stream, &req).await {
                 Ok(resp) => Some((resp, stream)),
-                Err(e) => {
+                Err(e) if e.replayable || body.is_none() => {
                     tracing::debug!(
                         method,
                         path = no_query(path),
-                        "kept-alive connection failed ({e:#}), reconnecting"
+                        "kept-alive connection failed ({:#}), reconnecting",
+                        e.error
                     );
                     None
                 }
+                Err(e) => return Err(e.error.context(context())),
             },
             None => None,
         };
@@ -105,9 +112,7 @@ impl Client {
             Some(done) => done,
             None => {
                 let mut stream = self.endpoint.connect().await?;
-                let resp = exchange(&mut stream, &req)
-                    .await
-                    .with_context(|| format!("{method} {}: invalid HTTP response", no_query(path)))?;
+                let resp = exchange(&mut stream, &req).await.map_err(|e| e.error).with_context(context)?;
                 (resp, stream)
             }
         };
@@ -138,10 +143,32 @@ impl Client {
     }
 }
 
-async fn exchange(stream: &mut Stream, req: &str) -> anyhow::Result<Response> {
-    stream.write_all(req.as_bytes()).await?;
-    stream.flush().await?;
-    read_response(stream).await
+/// How long the gateway may take to answer: a push approval waits for the
+/// user's phone.
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
+
+struct ExchangeError {
+    /// The connection failed before any byte of response: the gateway did
+    /// not process the request, which can be sent again.
+    replayable: bool,
+    error: anyhow::Error,
+}
+
+async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, req: &str) -> Result<Response, ExchangeError> {
+    let unanswered = |error: anyhow::Error| ExchangeError { replayable: true, error };
+    let answered = |error: anyhow::Error| ExchangeError { replayable: false, error };
+    // No answer in time: the gateway may still be working on it.
+    let timed_out = || answered(failure(FailureKind::Timeout, "the gateway did not answer in time"));
+    stream.write_all(req.as_bytes()).await.map_err(|e| unanswered(e.into()))?;
+    stream.flush().await.map_err(|e| unanswered(e.into()))?;
+    let mut first = [0u8; 4096];
+    let n =
+        timeout(RESPONSE_TIMEOUT, read_some(stream, &mut first)).await.map_err(|_| timed_out())?.map_err(unanswered)?;
+    if n == 0 {
+        return Err(unanswered(anyhow::anyhow!("connection closed before any response")));
+    }
+    let mut rest = (&first[..n]).chain(stream);
+    timeout(RESPONSE_TIMEOUT, read_response(&mut rest)).await.map_err(|_| timed_out())?.map_err(answered)
 }
 
 /// A path or URL without its query, which may carry a SAML session id or a
@@ -385,6 +412,32 @@ mod tests {
     async fn connection_close_disables_reuse() {
         let raw = b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok";
         assert!(!read_response(&mut &raw[..]).await.unwrap().keep_alive);
+    }
+
+    #[tokio::test]
+    async fn only_unanswered_requests_are_replayable() {
+        // A kept-alive connection the gateway had closed: nothing came back.
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        server.shutdown().await.unwrap();
+        assert!(exchange(&mut client, "POST / HTTP/1.1\r\n\r\n").await.unwrap_err().replayable);
+
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        server.write_all(b"HTTP/1.1 200 OK\r\nContent-Le").await.unwrap();
+        server.shutdown().await.unwrap();
+        let error = exchange(&mut client, "POST / HTTP/1.1\r\n\r\n").await.unwrap_err();
+        assert!(!error.replayable, "the gateway started to answer");
+
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        server.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").await.unwrap();
+        assert_eq!(exchange(&mut client, "GET / HTTP/1.1\r\n\r\n").await.ok().unwrap().status, 204);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_gateway_times_out() {
+        let (mut client, _server) = tokio::io::duplex(4096);
+        let error = exchange(&mut client, "POST / HTTP/1.1\r\n\r\n").await.unwrap_err();
+        assert!(!error.replayable, "it may still be processed");
+        assert_eq!(vpn_core::failure::kind_of(&error.error), FailureKind::Timeout);
     }
 
     fn test_profile() -> vpn_core::FortiSslProfile {

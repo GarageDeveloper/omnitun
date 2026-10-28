@@ -594,7 +594,7 @@ async fn handle_info(transport: &Transport, sa: &mut IsakmpSa, inc: Incoming) ->
                 send_informational(transport, sa, ack).await?;
             }
             Info::Error(e) => bail!("gateway reported {e}"),
-            Info::DeleteIsakmp => bail!("gateway deleted the IKE SA during setup"),
+            Info::DeleteIsakmp(_) => bail!("gateway deleted the IKE SA during setup"),
             _ => {}
         }
     }

@@ -513,4 +513,56 @@ mod tests {
         }
         assert!(!w.fresh(3) && !w.fresh(5) && w.fresh(69) && !w.fresh(0));
     }
+
+    /// Our wrap and the server's, from one static key.
+    fn wraps(crypt: bool) -> (Wrap, Wrap) {
+        let key: Key2 = std::array::from_fn(|i| i as u8);
+        if crypt {
+            let part = |index: usize| CryptKey {
+                cipher: Zeroizing::new(cipher_part(&key, index)[..32].try_into().unwrap()),
+                mac: ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &hmac_part(&key, index)[..32]),
+            };
+            let ids = PacketIds::default;
+            (
+                Wrap::Crypt { send: part(1), receive: part(0), ids: ids() },
+                Wrap::Crypt { send: part(0), receive: part(1), ids: ids() },
+            )
+        } else {
+            let mac = |index: usize| {
+                ring::hmac::Key::new(ring::hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, &hmac_part(&key, index)[..20])
+            };
+            let auth = |send, receive| Wrap::Auth {
+                send: mac(send),
+                receive: mac(receive),
+                len: 20,
+                ids: PacketIds::default(),
+            };
+            (auth(1, 0), auth(0, 1))
+        }
+    }
+
+    #[test]
+    fn control_wrap_round_trip() {
+        for crypt in [false, true] {
+            let (mut ours, mut theirs) = wraps(crypt);
+            let mut header = [3; HEADER_LEN];
+            header[0] = crate::wire::header_byte(crate::wire::CONTROL_V1, 0);
+            let packet = ours.seal(&header, b"body");
+            let (body, pid) = theirs.open(&packet).unwrap();
+            assert_eq!(body, b"body", "crypt: {crypt}");
+            theirs.accept(pid);
+            assert!(theirs.open(&packet).is_err(), "replay, crypt: {crypt}");
+
+            let packet = ours.seal(&header, b"body");
+            let mut tampered = packet.clone();
+            *tampered.last_mut().unwrap() ^= 1;
+            assert!(theirs.open(&tampered).is_err(), "tampered body, crypt: {crypt}");
+            let mut tampered = packet.clone();
+            tampered[1] ^= 1;
+            assert!(theirs.open(&tampered).is_err(), "tampered header, crypt: {crypt}");
+            // Not accepted: an unauthenticated packet does not move the window.
+            assert!(theirs.open(&packet).is_ok(), "crypt: {crypt}");
+            assert!(ours.open(&packet).is_err(), "our own packet, crypt: {crypt}");
+        }
+    }
 }

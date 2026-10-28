@@ -138,6 +138,8 @@ impl Session {
     /// Handles a packet from the IPsec SA; returns an IP packet for the
     /// tunnel interface.
     fn received(&mut self, packet: &[u8], now: Instant) -> anyhow::Result<Option<Vec<u8>>> {
+        // A 20-byte IPv4 header: vpn-ipsec builds it, once it has checked
+        // the UDP ports.
         let Some(datagram) = packet.get(28..) else { return Ok(None) };
         self.recorder.record(Direction::In, datagram);
         match self.tunnel.receive(datagram, now)? {
@@ -227,6 +229,9 @@ impl Engine for L2tpEngine {
             recorder: Recorder::new(),
         };
         let deadline = tokio::time::Instant::now() + SETUP_TIMEOUT;
+        // Created once: a sleep made anew at each turn would never end
+        // while the server sends faster than the tick.
+        let mut tick = tokio::time::interval(TICK);
         let result: anyhow::Result<()> = async {
             loop {
                 session.flush().await?;
@@ -247,7 +252,7 @@ impl Engine for L2tpEngine {
                     None if ctx.cancel.is_cancelled() => return Ok(()),
                     None => return Err(session.ipsec_ended().await),
                     },
-                    _ = tokio::time::sleep(TICK) => session.tick(Instant::now())?,
+                    _ = tick.tick() => session.tick(Instant::now())?,
                     _ = tokio::time::sleep_until(deadline) => {
                         return Err(failure(FailureKind::Timeout, "the L2TP server did not set up the session in time"));
                     }

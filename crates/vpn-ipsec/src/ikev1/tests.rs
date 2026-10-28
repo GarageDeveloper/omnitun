@@ -612,6 +612,13 @@ async fn aggressive_xauth_modecfg_quick_mode_esp_dpd_and_delete() {
     let last = forged.len() - 1;
     forged[last] ^= 0xff;
     send_ike(&gw.sock, gw.client, &forged).await;
+    // An authentic Delete of another ISAKMP SA (an earlier one, after a
+    // re-authentication) leaves this one alone.
+    let other = Payload::Delete { protocol: protocol::ISAKMP, spi_size: 16, spis: vec![vec![7; 16]] };
+    let bytes = gw.sa.seal(exchange::INFORMATIONAL, random_msg_id(), &[], &[other]);
+    send_ike(&gw.sock, gw.client, &bytes).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!runner.is_finished(), "the Delete names another SA");
     let mid = random_msg_id();
     let delete = Payload::Delete {
         protocol: protocol::ISAKMP,

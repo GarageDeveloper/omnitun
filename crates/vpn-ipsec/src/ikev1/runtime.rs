@@ -237,7 +237,12 @@ impl Runner<'_> {
                 }
             },
         };
-        self.transport.send_esp(&esp).await?;
+        // Transient errors are already ignored; any other only loses this
+        // packet, as in IKEv2: dead peer detection decides about the tunnel.
+        if let Err(e) = self.transport.send_esp(&esp).await {
+            debug!("ESP send failed: {e:#}");
+            return Ok(());
+        }
         self.last_tx = Instant::now();
         self.ctx.stats.record_tx(packet.len());
         Ok(())
@@ -419,7 +424,19 @@ impl Runner<'_> {
                     self.alive();
                 }
             }
-            Info::DeleteIsakmp => {
+            Info::DeleteIsakmp(spis) => {
+                // After a re-authentication, the gateway may delete the
+                // previous SA through the new one: only our current cookies
+                // (or a Delete that names none) end the session.
+                let named = |sa: &IsakmpSa| spis.contains(&[sa.cky_i.to_be_bytes(), sa.cky_r.to_be_bytes()].concat());
+                if !spis.is_empty() && !named(self.sa) && spis.iter().all(|s| s.len() == 16) {
+                    if self.previous.take_if(|p| named(p)).is_some() {
+                        info!("the gateway deleted the previous IKE SA");
+                    } else {
+                        info!("ignoring the deletion of an IKE SA that is not ours");
+                    }
+                    return Ok(());
+                }
                 *self.closed = true;
                 bail!("the gateway deleted the IKE SA");
             }
@@ -595,7 +612,7 @@ impl Runner<'_> {
                     send_informational(self.transport, &mut previous, ack).await?;
                     self.last_tx = Instant::now();
                 }
-                Info::DeleteIsakmp => keep = false,
+                Info::DeleteIsakmp(_) => keep = false,
                 Info::DeleteEsp(spis) => {
                     self.old.retain(|(c, _)| !spis.contains(&c.outbound.spi) && !spis.contains(&c.inbound.spi));
                     let current = spis.iter().any(|s| *s == self.child.outbound.spi || *s == self.child.inbound.spi);

@@ -782,6 +782,22 @@ async fn unknown_certificate_is_offered_before_any_secret() {
     engine.disconnect().await.unwrap();
 }
 
+/// A gateway that accepts the connection and never answers: the attempt
+/// ends with a timeout instead of staying in "connecting" forever.
+#[tokio::test]
+async fn silent_gateway_times_out() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gw = Gateway::start(TunnelMode::Ppp).await;
+    let profile = FortiSslProfile { port: listener.local_addr().unwrap().port(), ..gw.profile(Some("alice")) };
+    let ctx = context(script(&[("password", PASSWORD)]));
+    let attempt = tokio::spawn(async move { FortiSslEngine::new(profile).connect(&ctx).await });
+    let (_held, _) = listener.accept().await.unwrap();
+    // Connected: the paused clock now jumps to the engine's own deadline.
+    tokio::time::pause();
+    let err = attempt.await.unwrap().unwrap_err();
+    assert_eq!(kind_of(&err), FailureKind::Timeout, "{err:#}");
+}
+
 #[tokio::test]
 async fn tunnel_refused_by_gateway() {
     let gw = Gateway::start(TunnelMode::Refuse).await;

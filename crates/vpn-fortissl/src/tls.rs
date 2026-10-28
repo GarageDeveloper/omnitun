@@ -3,6 +3,7 @@
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, bail};
 use rustls::client::WebPkiServerVerifier;
@@ -19,6 +20,11 @@ use vpn_core::{CertificateInfo, FailureExt, FailureKind, FortiSslProfile, Prompt
 use vpn_tls::{RemoteCertificate, SignError};
 
 pub type Stream = TlsStream<TcpStream>;
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Long enough for the user to allow a Keychain signature with the client
+/// certificate.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Connection parameters shared by every HTTPS request and the tunnel.
 #[derive(Clone)]
@@ -60,12 +66,20 @@ impl Endpoint {
     }
 
     pub async fn connect(&self) -> anyhow::Result<Stream> {
-        let tcp = TcpStream::connect(self.addr)
+        let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(self.addr))
             .await
+            .unwrap_or_else(|_| Err(std::io::ErrorKind::TimedOut.into()))
             .kind(FailureKind::Unreachable)
             .with_context(|| format!("cannot reach gateway {}", self.addr))?;
         tcp.set_nodelay(true)?;
-        match self.connector.connect(self.server_name.clone(), tcp).await {
+        let handshake = tokio::time::timeout(HANDSHAKE_TIMEOUT, self.connector.connect(self.server_name.clone(), tcp));
+        let Ok(handshake) = handshake.await else {
+            return Err(failure(
+                FailureKind::Timeout,
+                format!("gateway {} accepted the connection but did not finish the TLS handshake", self.addr),
+            ));
+        };
+        match handshake {
             Ok(stream) => Ok(stream),
             Err(e) => {
                 if let Some(error) = self.sign_error.lock().unwrap().take() {
