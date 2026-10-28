@@ -131,6 +131,9 @@ pub struct Prompt {
     pub message: String,
     /// FortiToken push: an empty answer waits for approval on the phone.
     pub push: bool,
+    /// A code of exactly this many digits, sent once complete; 0 for any
+    /// other answer, sent as typed.
+    pub digits: u8,
 }
 
 impl From<&vpn_core::Prompt> for Prompt {
@@ -147,6 +150,7 @@ impl From<&vpn_core::Prompt> for Prompt {
             },
             message: vpn_client::printable(&p.message),
             push: p.push,
+            digits: p.digits,
         }
     }
 }

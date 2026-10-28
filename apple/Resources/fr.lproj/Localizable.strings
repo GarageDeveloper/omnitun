@@ -9,7 +9,6 @@
 "No VPN configured" = "Aucun VPN configuré";
 "Disconnect All" = "Tout déconnecter";
 "Manage VPNs…" = "Gérer les VPN…";
-"Import from FortiClient…" = "Importer depuis FortiClient…";
 "Settings…" = "Réglages…";
 "Quit %@" = "Quitter %@";
 "About %@" = "À propos de %@";
@@ -73,6 +72,7 @@
 "Continue" = "Continuer";
 "Waiting… %d:%02d" = "En attente… %d:%02d";
 "Verification code" = "Code de vérification";
+"Code" = "Code";
 "The code is never saved." = "Le code n'est jamais enregistré.";
 "Approve on my phone" = "Approuver sur mon téléphone";
 "Submit" = "Valider";
@@ -88,7 +88,6 @@
 "%@ no longer presents the certificate you approved for %@. This can be a normal renewal, or an attempt to intercept your connection. Do not go on without confirmation from your IT department." = "%@ ne présente plus le certificat que vous aviez approuvé pour %@. Cela peut être un renouvellement normal, ou une tentative d'interception de votre connexion. Ne continuez pas sans confirmation de votre service informatique.";
 "Approved" = "Approuvée";
 "Presented" = "Présentée";
-"Once your IT department has confirmed the new certificate, replace the fingerprint in the profile's trusted_cert field." = "Une fois le nouveau certificat confirmé par votre service informatique, remplacez l'empreinte dans le champ trusted_cert du profil.";
 "Copy the Fingerprints for Support" = "Copier les empreintes pour le support";
 "approved: %@" = "approuvée : %@";
 "presented: %@" = "présentée : %@";
@@ -110,7 +109,6 @@
 "Open %@ at login" = "Ouvrir %@ à l'ouverture de session";
 "You can change this later in Settings" = "Modifiable plus tard dans les Réglages";
 "General" = "Général";
-"VPN" = "VPN";
 "Service" = "Service";
 "Disconnect VPNs when I quit %@" = "Déconnecter les VPN quand je quitte %@";
 "Without the app, a code or a browser login cannot be asked again when a VPN reconnects." = "Sans l'app, un code ou une connexion par navigateur ne peut pas être redemandé lors d'une reconnexion.";
@@ -124,15 +122,7 @@
 "Name" = "Nom";
 "Type" = "Type";
 "Server" = "Serveur";
-"User" = "Utilisateur";
-"Forget Secrets" = "Oublier les secrets";
 "Delete…" = "Supprimer…";
-"Import…" = "Importer…";
-"Open the File" = "Ouvrir le fichier";
-"Editing profiles in the app comes with the editor; until then, the file opens in your text editor. Secrets stay in the Keychain." = "La modification des profils depuis l'app arrive avec l'éditeur ; en attendant, le fichier s'ouvre dans votre éditeur de texte. Les secrets restent dans le Trousseau.";
-"No secret saved for %@" = "Aucun secret enregistré pour %@";
-"Secrets forgotten for %@" = "Secrets oubliés pour %@";
-"They will be asked at the next connection." = "Ils seront demandés à la prochaine connexion.";
 "Cannot delete the profile" = "Suppression impossible";
 "VPN Service" = "Service VPN";
 "Running · version %@ · %lld session(s)" = "Actif · version %@ · %lld session(s)";
@@ -302,12 +292,9 @@
 "Optional: asked at the first connection otherwise" = "Facultatif : sinon demandée à la première connexion";
 
 /* OpenVPN: editor and import */
-"OpenVPN File (.ovpn)…" = "Fichier OpenVPN (.ovpn)…";
-"Import OpenVPN File…" = "Importer un fichier OpenVPN…";
 "Import OpenVPN File" = "Importer un fichier OpenVPN";
 "This OpenVPN file cannot be imported" = "Ce fichier OpenVPN ne peut pas être importé";
 "Add a VPN from an OpenVPN file" = "Ajouter un VPN depuis un fichier OpenVPN";
-"Optional: asked at connection otherwise" = "Facultatif : sinon demandé à la connexion";
 "Passwords are never imported. The certificates and keys of the file are copied into the profile: the file is no longer needed." = "Les mots de passe ne sont jamais importés. Les certificats et les clés du fichier sont recopiés dans le profil : le fichier n’est plus nécessaire.";
 "User name and password" = "Identifiant et mot de passe";
 "The certificate imported with the OpenVPN file is used. A Keychain certificate would replace it." = "Le certificat importé avec le fichier OpenVPN est utilisé. Un certificat du Trousseau le remplacerait.";
@@ -348,15 +335,13 @@
 "Cannot be imported: %@" = "Import impossible : %@";
 "Viscosity's passwords stay in its own Keychain items. A password typed here is saved in the Keychain; otherwise it is asked at the first connection." = "Les mots de passe de Viscosity restent dans ses propres éléments du Trousseau. Un mot de passe saisi ici est enregistré dans le Trousseau ; sinon il vous sera demandé à la première connexion.";
 "Import from Viscosity" = "Importer depuis Viscosity";
-"Import from Viscosity…" = "Importer depuis Viscosity…";
 "From Viscosity…" = "Depuis Viscosity…";
-"Disconnect it before renaming it." = "Déconnectez-le avant de le renommer.";
 "Cannot rename “%@”" = "Impossible de renommer « %@ »";
 "Cannot duplicate “%@”" = "Impossible de dupliquer « %@ »";
 "The saved secrets of “%@” were not copied" = "Les secrets enregistrés de « %@ » n'ont pas été copiés";
 "Type them in the copy's editor. %@" = "Saisissez-les dans l'éditeur de la copie. %@";
 "Rename “%@”" = "Renommer « %@ »";
-"Letters, digits, “-” and “_”, 32 characters at most." = "Lettres, chiffres, « - » et « _ », 32 caractères au plus.";
+"Up to 64 characters, without “/”; unique in its folder." = "64 caractères au plus, sans « / » ; unique dans son dossier.";
 "Rename" = "Renommer";
 "Rename…" = "Renommer…";
 "Duplicate" = "Dupliquer";
@@ -365,7 +350,6 @@
 "No VPN in System Settings that can be imported." = "Aucun VPN des Réglages Système à importer.";
 "The shared secrets and passwords of System Settings stay in the System keychain. Those typed here are saved in your Keychain; the others are asked at the first connection." = "Les secrets partagés et mots de passe des Réglages Système restent dans le trousseau Système. Ceux saisis ici sont enregistrés dans votre Trousseau ; les autres vous seront demandés à la première connexion.";
 "Import from System Settings" = "Importer depuis les Réglages Système";
-"Import from System Settings…" = "Importer depuis les Réglages Système…";
 "From System Settings…" = "Depuis les Réglages Système…";
 "Pre-shared key (VPN)" = "Clé partagée (VPN)";
 "User password" = "Mot de passe de l'utilisateur";

@@ -319,10 +319,13 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin>(mut s: S, mode: TunnelMode, lo
                     let body = "ret=0,redir=/remote/login?&lang=en\n<!--sslvpnerrmsg=Invalid credentials-->";
                     respond(&mut s, "401 Unauthorized", &[], body).await
                 }
-                (true, "tokenuser") => {
+                (true, "tokenuser" | "radiususer") => {
                     // Empty cookie: must not be mistaken for a session.
-                    let body = "ret=2,reqid=9876,polid=1-1-3,grp=vpn,portal=full,peer=,magic=1-4c,tokeninfo=,chal_msg=Enter FortiToken code";
-                    respond(&mut s, "200 OK", &["Set-Cookie: SVPNCOOKIE=; path=/"], body).await
+                    let token = if user == "tokenuser" { "ftm" } else { "" };
+                    let body = format!(
+                        "ret=2,reqid=9876,polid=1-1-3,grp=vpn,portal=full,peer=,magic=1-4c,tokeninfo={token},chal_msg=Enter FortiToken code"
+                    );
+                    respond(&mut s, "200 OK", &["Set-Cookie: SVPNCOOKIE=; path=/"], &body).await
                 }
                 (true, _) => respond(&mut s, "200 OK", &[&session_cookie], "ret=1,redir=/remote/index\n").await,
             }
@@ -672,7 +675,24 @@ async fn fortitoken_challenge_round() {
     assert_eq!(asked.len(), 2);
     assert_eq!((asked[1].key.as_str(), asked[1].kind), ("otp", PromptKind::Otp));
     assert_eq!(asked[1].message, "Enter FortiToken code");
+    assert_eq!(asked[1].digits, 6, "a FortiToken code");
     assert!(gw.log().contains(&format!("code={PIN}")));
+    engine.disconnect().await.unwrap();
+    gw.wait_for("GET /remote/logout").await;
+}
+
+/// A RADIUS challenge may want a PIN and a token code, or letters: the
+/// client sends what the user typed.
+#[tokio::test]
+async fn radius_challenge_is_free_text() {
+    let gw = Gateway::start(TunnelMode::Ppp).await;
+    let prompts = script(&[("password", PASSWORD), ("otp", PIN)]);
+    let ctx = context(prompts.clone());
+    let mut engine = FortiSslEngine::new(gw.profile(Some("radiususer")));
+
+    connect(&mut engine, &ctx).await.unwrap();
+    let asked = prompts.asked.lock().unwrap().clone();
+    assert_eq!((asked[1].kind, asked[1].digits), (PromptKind::Otp, 0));
     engine.disconnect().await.unwrap();
     gw.wait_for("GET /remote/logout").await;
 }

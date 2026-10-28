@@ -18,9 +18,11 @@ let added = try client.addProfiles(toml: """
     host = "vpn.example.com"
     port = 4443
     """)
-precondition(added == ["paris"])
+// Ids are new UUIDs, not names.
+precondition(added.count == 1)
 let listed = try client.profiles()
 let paris = listed[0]
+precondition(paris.id == added[0] && paris.name == "paris")
 precondition(paris.host == "vpn.example.com" && paris.port == 4443 && paris.auth == .password)
 print("profiles ok: \(paris.name) \(paris.protocol) \(paris.host):\(paris.port)")
 
@@ -63,7 +65,7 @@ final class Delegate: ConnectionDelegate, @unchecked Sendable {
     func finished(error: ClientError?) { self.error = error; done.signal() }
 }
 let delegate = Delegate()
-let connection = client.connect(id: "paris", direct: false, delegate: delegate)
+let connection = client.connect(id: paris.id, direct: false, split: false, delegate: delegate)
 precondition(delegate.done.wait(timeout: .now() + 5) == .success, "finished was not called")
 guard case .Failed(let failure, _) = delegate.error, failure.code == .serviceUnavailable else {
     fatalError("connect without daemon: \(String(describing: delegate.error))")

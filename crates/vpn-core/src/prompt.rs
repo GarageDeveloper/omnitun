@@ -147,6 +147,11 @@ pub struct Prompt {
     /// FortiToken push: an empty answer approves on the phone.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub push: bool,
+    /// A code of exactly this many digits (FortiToken): a client may keep
+    /// only digits and send it once complete. 0 for any other answer (a PIN
+    /// and a token code, letters), which is sent as typed.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub digits: u8,
     /// What to sign (key `sign`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sign: Option<SignRequest>,
@@ -154,7 +159,7 @@ pub struct Prompt {
 
 impl Prompt {
     pub fn new(key: impl Into<String>, kind: PromptKind, message: impl Into<String>) -> Self {
-        Self { key: key.into(), kind, message: message.into(), certificate: None, push: false, sign: None }
+        Self { key: key.into(), kind, message: message.into(), certificate: None, push: false, digits: 0, sign: None }
     }
 
     /// Asks the client to sign with the key of its certificate.
@@ -171,6 +176,10 @@ impl Prompt {
         );
         Self { certificate: Some(certificate), ..Self::new(TRUST_CERTIFICATE, PromptKind::Confirm, message) }
     }
+}
+
+fn is_zero(n: &u8) -> bool {
+    *n == 0
 }
 
 /// Prompt key for a certificate trust decision.
