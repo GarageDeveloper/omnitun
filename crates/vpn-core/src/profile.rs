@@ -219,8 +219,8 @@ pub struct IpsecProfile {
     /// How the gateway proves its identity (IKEv2).
     #[serde(default)]
     pub gateway_auth: GatewayAuth,
-    /// CA certificates (PEM) for the gateway certificate, besides the
-    /// system roots.
+    /// CA certificates (PEM) for the gateway certificate, in place of the
+    /// public roots (the Keychain's are still trusted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ca_pem: Option<String>,
     /// SHA-256 fingerprints of trusted gateway certificates: when set, the
