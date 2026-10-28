@@ -197,6 +197,10 @@ final class Windows {
     /// `profile`: the profile's id.
     func showCertificateChanged(model: AppModel, profile: String, failure: FailureInfo) {
         guard let presented = failure.certificate else { return }
+        if let open = named["certificate-\(profile)"], open.isVisible || open.isMiniaturized {
+            bringForward(open)
+            return
+        }
         let holder = WindowHolder()
         let name = model.displayName(profile)
         let panel = Panel(
