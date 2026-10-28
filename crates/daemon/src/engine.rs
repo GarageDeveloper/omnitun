@@ -368,8 +368,13 @@ fn spawn(
                     return Err(std::io::Error::last_os_error());
                 }
             }
+            // Close-on-exec ones go at exec anyway, among them the pipe
+            // through which the standard library reports a failed exec.
             for fd in 6..max {
-                libc::close(fd);
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags >= 0 && flags & libc::FD_CLOEXEC == 0 {
+                    libc::close(fd);
+                }
             }
             Ok(())
         });
@@ -378,4 +383,20 @@ fn spawn(
     // The engine has its copies now.
     drop(fds);
     Ok(child)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A missing engine (during an update, say) is an error of `spawn`,
+    /// not a process that exits at once.
+    #[tokio::test]
+    async fn a_missing_engine_fails_to_start() {
+        let fds = std::array::from_fn(|_| OwnedFd::from(std::fs::File::open("/dev/null").unwrap()));
+        let (uid, gid) = (nix::unistd::getuid().as_raw(), nix::unistd::getgid().as_raw());
+        let error = spawn(std::path::Path::new("/nonexistent/omnitun-engine"), uid, gid, false, uid, fds).unwrap_err();
+        let io = error.downcast_ref::<std::io::Error>().expect("the exec error");
+        assert_eq!(io.kind(), std::io::ErrorKind::NotFound, "{error:#}");
+    }
 }
