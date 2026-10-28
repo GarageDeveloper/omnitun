@@ -106,9 +106,14 @@ impl AppliedConfig {
         // The tunnels carry no IPv6: in a full tunnel it would leave in
         // clear through the uplink.
         if settings.full_tunnel && settings.gateway.is_ipv4() {
+            let ready = ipv6_capable(&self.interface).await;
             for net in ["::/1", "8000::/1"] {
                 let net: Ipv6Net = net.parse()?;
-                match block_ipv6(net, &self.interface).await {
+                let blocked = match &ready {
+                    Ok(()) => block_ipv6(net, &self.interface).await,
+                    Err(e) => Err(anyhow::anyhow!("{e:#}")),
+                };
+                match blocked {
                     Ok(()) => self.undo.push(Undo::Ipv6Block(net)),
                     Err(e) => tracing::warn!(
                         session = self.session,
@@ -245,17 +250,43 @@ async fn os_delete_route(net: Ipv4Net, via: &Via) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// macOS refuses IPv6 routes to an interface without an IPv6 address: a
+/// link-local one, gone with the interface.
+#[cfg(target_os = "macos")]
+async fn ipv6_capable(interface: &str) -> anyhow::Result<()> {
+    let address = format!("fe80::1%{interface}");
+    cmd::run("/sbin/ifconfig", &[interface, "inet6", &address, "prefixlen", "64", "alias"]).await?;
+    Ok(())
+}
+
 /// A reject route: IPv6 connections fail at once, and applications fall
-/// back to IPv4, which the tunnel carries.
+/// back to IPv4, which the tunnel carries. `route` exits with 0 even when
+/// the kernel refused: only its confirmation counts.
 #[cfg(target_os = "macos")]
 async fn block_ipv6(net: Ipv6Net, interface: &str) -> anyhow::Result<()> {
-    cmd::run("/sbin/route", &["-n", "add", "-inet6", &net.to_string(), "-interface", interface, "-reject"]).await?;
+    let net = net.to_string();
+    let out = cmd::run("/sbin/route", &["-n", "add", "-inet6", &net, "-interface", interface, "-reject"]).await?;
+    if !route_added(&out, &net, interface) {
+        bail!("route refused it: {}", out.trim());
+    }
     Ok(())
+}
+
+/// Whether `route add`'s output confirms the route, which a refusal
+/// follows with its reason.
+#[cfg(any(target_os = "macos", test))]
+fn route_added(out: &str, net: &str, gateway: &str) -> bool {
+    out.lines().any(|l| l.trim() == format!("add net {net}: gateway {gateway}"))
 }
 
 #[cfg(target_os = "macos")]
 async fn unblock_ipv6(net: Ipv6Net, interface: &str) -> anyhow::Result<()> {
     cmd::run("/sbin/route", &["-n", "delete", "-inet6", &net.to_string(), "-interface", interface]).await?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+async fn ipv6_capable(_interface: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
@@ -441,3 +472,14 @@ async fn cleanup_stale_dns() {
 
 #[cfg(target_os = "linux")]
 async fn cleanup_stale_dns() {}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn route_confirmation() {
+        assert!(super::route_added("add net ::/1: gateway utun6\n", "::/1", "utun6"));
+        let refused = "add net ::/1: gateway utun6: Network is unreachable\n";
+        assert!(!super::route_added(refused, "::/1", "utun6"));
+        assert!(!super::route_added("", "::/1", "utun6"));
+    }
+}
