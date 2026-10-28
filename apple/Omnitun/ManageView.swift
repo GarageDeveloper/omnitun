@@ -331,6 +331,24 @@ final class ProfileEditing: ObservableObject {
     /// Renames the profile `id`, asked in a dialog. Unsaved edits are
     /// asked about first. Only the name changes: the id, the secrets, a
     /// running session and the chains stay.
+    /// Copies `id`, with its saved secrets, and opens the copy.
+    func duplicate(_ id: String) {
+        leave {
+            let name = self.model.profile(id)?.name ?? id
+            do {
+                let copy = try self.model.client.duplicateProfile(id: id, name: String(localized: "\(name) copy"))
+                self.model.reloadProfiles()
+                self.select(copy.id)
+                if let reason = copy.secretsError {
+                    Windows.shared.alert(String(localized: "The saved secrets of “\(name)” were not copied"),
+                                         String(localized: "Type them in the copy's editor. \(reason)"))
+                }
+            } catch {
+                Windows.shared.alert(String(localized: "Cannot duplicate “\(name)”"), describe(error))
+            }
+        }
+    }
+
     func rename(_ id: String) {
         leave {
             self.select(id)
@@ -370,8 +388,9 @@ final class ProfileEditing: ObservableObject {
         return typed.isEmpty ? nil : typed
     }
 
-    func delete() {
-        guard let id = selection else { return }
+    /// Deletes the profile `id`, once confirmed; the one being edited is
+    /// replaced by the first profile.
+    func delete(_ id: String) {
         let name = model.displayName(id)
         if model.isOn(id) {
             Windows.shared.alert(String(localized: "“\(name)” is connected"),
@@ -390,8 +409,10 @@ final class ProfileEditing: ObservableObject {
             try model.client.removeProfile(id: id)
             model.reloadProfiles()
             model.forget(id)
-            form = nil
-            select(model.profiles.first?.id)
+            if id == selection {
+                form = nil
+                select(model.profiles.first?.id)
+            }
         } catch {
             Windows.shared.alert(String(localized: "Cannot delete the profile"), describe(error))
         }
@@ -419,6 +440,10 @@ struct ManageView: View {
                     Button("Rename Folder…") { editing.renameFolder(folder) }
                 } else if let id = ids.first {
                     Button("Rename…") { editing.rename(id) }
+                    Button("Duplicate") { editing.duplicate(id) }
+                    Divider()
+                    ConnectButtons(model: model, id: id)
+                    Divider()
                     Menu("Move to Folder") {
                         Button("None") { editing.move(id, to: nil) }
                         if !editing.folders.isEmpty {
@@ -434,6 +459,8 @@ struct ManageView: View {
                             }
                         }
                     }
+                    Divider()
+                    Button("Delete…") { editing.delete(id) }
                 }
             } primaryAction: { ids in
                 if let id = ids.first {
@@ -457,7 +484,7 @@ struct ManageView: View {
                     .fixedSize()
                     .help("New VPN")
                     Button {
-                        editing.delete()
+                        if let id = editing.selection { editing.delete(id) }
                     } label: {
                         Image(systemName: "minus")
                     }
@@ -558,6 +585,31 @@ private struct FolderContents: View {
             .dropDestination(for: String.self) { ids, _ in
                 editing.drop(ids, folder: profile.folder, before: profile.id)
                 return true
+            }
+        }
+    }
+}
+
+/// Connects or disconnects the VPN `id`, as the menu bar does: also in
+/// split mode, or without the VPNs it goes through, when it has them.
+private struct ConnectButtons: View {
+    @ObservedObject var model: AppModel
+    let id: String
+
+    var body: some View {
+        if model.isOn(id) {
+            Button("Disconnect") { model.toggle(id, on: false) }
+        } else {
+            Button("Connect") { model.connect(id) }
+            if let profile = model.profile(id) {
+                if !profile.splitRoutes.isEmpty {
+                    Button("Connect in Split Mode") { model.connect(id, split: true) }
+                }
+                if !profile.via.isEmpty {
+                    Button("Connect Directly, Without \(profile.via.map(model.displayName).joined(separator: " / "))") {
+                        model.connect(id, direct: true)
+                    }
+                }
             }
         }
     }
@@ -668,7 +720,16 @@ struct ProfileEditor: View {
             }
             Spacer()
             if let original {
+                // The saved profile connects: edits are asked about first.
+                Toggle("", isOn: Binding(get: { model.isOn(original) },
+                                         set: { on in
+                                             if on { editing.leave { model.connect(original) } } else { model.toggle(original, on: false) }
+                                         }))
+                    .toggleStyle(.switch).labelsHidden()
+                    .help(model.isOn(original) ? String(localized: "Disconnect") : String(localized: "Connect"))
                 Menu {
+                    ConnectButtons(model: model, id: original)
+                    Divider()
                     Button("Export as a Profile File…") { export(original) }
                 } label: {
                     Image(systemName: "ellipsis.circle")

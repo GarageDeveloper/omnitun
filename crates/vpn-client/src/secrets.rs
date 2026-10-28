@@ -89,6 +89,19 @@ pub fn set(profile: &Profile, key: &str, value: &str) -> anyhow::Result<()> {
     Ok(entry(profile, key)?.set_password(value)?)
 }
 
+/// Copies the secrets of `from` to `to` (a duplicate); returns the keys
+/// copied.
+pub fn copy(from: &Profile, to: &Profile) -> anyhow::Result<Vec<&'static str>> {
+    let mut copied = Vec::new();
+    for key in KEYS {
+        if let Some(value) = get(from, key)? {
+            set(to, key, &value)?;
+            copied.push(key);
+        }
+    }
+    Ok(copied)
+}
+
 /// Forgets the secret, including copies earlier versions saved under the
 /// profile's name. Returns whether anything was deleted.
 pub fn delete(profile: &Profile, key: &str) -> anyhow::Result<bool> {
