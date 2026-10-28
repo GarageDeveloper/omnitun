@@ -68,6 +68,7 @@
 "Remember in the Keychain" = "Mémoriser dans le Trousseau";
 "Cancel" = "Annuler";
 "Connect" = "Se connecter";
+"Disconnect" = "Se déconnecter";
 "Continue" = "Continuer";
 "Waiting… %d:%02d" = "En attente… %d:%02d";
 "Verification code" = "Code de vérification";
