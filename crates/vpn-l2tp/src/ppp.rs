@@ -659,6 +659,32 @@ mod tests {
         assert!(!ppp.take_output().iter().any(|(p, _)| *p == IPCP), "success without a challenge");
     }
 
+    /// A server that negotiates MS-CHAPv2, never sends its challenge and
+    /// pushes IPCP instead must not bring the link up.
+    #[test]
+    fn ipcp_without_authentication() {
+        let now = Instant::now();
+        let mut ppp = Ppp::new("alice".into(), Zeroizing::new("secret".into()), vec![PppAuth::MsChapV2]);
+        ppp.start(now);
+        let request = ppp.take_output().remove(0).1;
+        ppp.input(LCP, &packet(CONF_ACK, request[1], &request[4..]), now).unwrap();
+        let mschap = options(&[(LCP_AUTH, vec![0xc2, 0x23, CHAP_MSCHAPV2])]);
+        ppp.input(LCP, &packet(CONF_REQ, 1, &mschap), now).unwrap();
+        ppp.take_output();
+        // A Nak for a request we never sent, then an Ack of the request it
+        // provokes, then the server's own request.
+        let nak = options(&[(IPCP_ADDRESS, vec![10, 66, 0, 2]), (IPCP_DNS1, vec![10, 66, 0, 1])]);
+        ppp.input(IPCP, &packet(CONF_NAK, 0, &nak), now).unwrap();
+        for (protocol, frame) in ppp.take_output() {
+            if protocol == IPCP && frame[0] == CONF_REQ {
+                ppp.input(IPCP, &packet(CONF_ACK, frame[1], &frame[4..]), now).unwrap();
+            }
+        }
+        ppp.input(IPCP, &packet(CONF_REQ, 3, &options(&[(IPCP_ADDRESS, vec![10, 66, 0, 1])])), now).unwrap();
+        assert_eq!(ppp.up, None, "IPCP before authentication");
+        assert!(!ppp.take_output().iter().any(|(p, _)| *p == IPCP), "no IPCP before authentication");
+    }
+
     #[test]
     fn refused_password() {
         let now = Instant::now();
