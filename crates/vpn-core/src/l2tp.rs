@@ -38,7 +38,8 @@ pub struct L2tpProfile {
     pub phase2_lifetime: u32,
     #[serde(default = "yes")]
     pub dpd: bool,
-    /// PPP authentications accepted, in the order we prefer them.
+    /// PPP authentications accepted, in the order we prefer them. PAP only
+    /// when asked for: it does not authenticate the server.
     #[serde(default = "default_ppp_auth")]
     pub ppp_auth: Vec<PppAuth>,
     /// DNS servers used when the server assigns none.
@@ -49,7 +50,8 @@ pub struct L2tpProfile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PppAuth {
-    /// The password in clear, inside the IPsec SA (Meraki).
+    /// The password in clear, inside the IPsec SA (Meraki). The server
+    /// proves nothing: anyone with the pre-shared key could pose as it.
     Pap,
     /// CHAP with MD5.
     Chap,
@@ -150,7 +152,7 @@ fn default_phase2_lifetime() -> u32 {
 }
 
 fn default_ppp_auth() -> Vec<PppAuth> {
-    vec![PppAuth::MsChapV2, PppAuth::Chap, PppAuth::Pap]
+    vec![PppAuth::MsChapV2, PppAuth::Chap]
 }
 
 #[cfg(test)]
@@ -164,7 +166,7 @@ mod tests {
         let p = parse("");
         p.validate().unwrap();
         let ProtocolConfig::L2tp(l) = &p.protocol else { panic!() };
-        assert_eq!(l.ppp_auth.len(), 3);
+        assert_eq!(l.ppp_auth, [crate::PppAuth::MsChapV2, crate::PppAuth::Chap], "no PAP unless asked");
         assert_eq!(l.ipsec().exchange_mode, crate::ExchangeMode::Main);
         assert!(parse("ike = [\"3des-sha1-modp1024\"]").validate().is_err(), "legacy needs the option");
         parse("ike = [\"3des-sha1-modp1024\"]\nlegacy_algorithms = true").validate().unwrap();

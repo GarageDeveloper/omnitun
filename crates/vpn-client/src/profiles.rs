@@ -291,6 +291,21 @@ impl ProfileStore {
         })
     }
 
+    /// Leaves only MS-CHAPv2 in an L2TP profile's `ppp_auth`: its server
+    /// proved it knows the password.
+    pub fn require_mschapv2(&self, id: &str) -> anyhow::Result<()> {
+        self.load()?;
+        self.edit(|doc| {
+            let table = profile_table(doc, id).with_context(|| format!("no profile {id}"))?;
+            anyhow::ensure!(
+                table.get("protocol").and_then(Item::as_str) == Some("l2tp"),
+                "{id} is not an L2TP profile"
+            );
+            table.insert("ppp_auth", toml_edit::value(toml_edit::Array::from_iter(["ms-chap-v2"])));
+            Ok(())
+        })
+    }
+
     fn read_text(&self) -> anyhow::Result<String> {
         match std::fs::read_to_string(&self.path) {
             Ok(text) => Ok(text),
@@ -512,6 +527,19 @@ mod tests {
     fn ssl(profile: &Profile) -> &vpn_core::FortiSslProfile {
         let vpn_core::ProtocolConfig::FortiSsl(p) = &profile.protocol else { panic!() };
         p
+    }
+
+    #[test]
+    fn proved_l2tp_servers_need_mschapv2() {
+        let (store, dir) = store("mschapv2");
+        let l2tp = "\n[[profile]]\nname = \"meraki\"\nprotocol = \"l2tp\"\ngateway = \"vpn.example.com\"\nppp_auth = [\"pap\", \"ms-chap-v2\"]\n";
+        std::fs::write(store.path(), format!("{ORIGINAL}{l2tp}")).unwrap();
+        let meraki = store.find("meraki").unwrap().id;
+        store.require_mschapv2(&meraki).unwrap();
+        let vpn_core::ProtocolConfig::L2tp(p) = store.find("meraki").unwrap().protocol else { panic!() };
+        assert_eq!(p.ppp_auth, [vpn_core::PppAuth::MsChapV2]);
+        assert!(store.require_mschapv2(&store.find("paris").unwrap().id).is_err(), "not L2TP");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

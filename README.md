@@ -177,8 +177,10 @@ in Docker: strongSwan 5.9 (IKEv1, IKEv2), OpenVPN 2.6, strongSwan + xl2tpd
 - OpenVPN: no tls-crypt-v2, no browser login (WEB_AUTH), no CBC ciphers, no
   static key mode, no `dev tap`; compressed packets from the server are
   dropped (VORACLE).
-- L2TP: the group PSK authenticates the server; with PAP the password
-  travels in clear inside IPsec.
+- L2TP: the group PSK authenticates the server, and only MS-CHAPv2 proves
+  that it knows the password. PAP (off unless the profile asks for it, as
+  Meraki needs) sends the password in clear inside IPsec; once a server
+  has proved itself with MS-CHAPv2, its profile accepts nothing weaker.
 - A reconnection that needs a client certificate signature, a code or a
   browser login needs the app running.
 - Linux: command line only, and the engines are not sandboxed yet.

@@ -254,6 +254,14 @@ async fn handle_question(
             };
             socket.answer(id, value).await
         }
+        Event::Prompt { id, prompt } if prompt.key == vpn_core::prompt::L2TP_SERVER_PROVED => {
+            if let vpn_core::ProtocolConfig::L2tp(_) = &profile.protocol
+                && let Err(e) = store.require_mschapv2(&profile.id)
+            {
+                user.notice(Notice::Warning(format!("{e:#}")));
+            }
+            socket.answer(id, Some(String::new())).await
+        }
         Event::Prompt { id, prompt } => {
             let value = answer(profile, &prompt, user).await?;
             socket.answer(id, value.as_ref().map(|v| v.to_string())).await

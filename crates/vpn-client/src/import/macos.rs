@@ -11,7 +11,7 @@ use std::path::Path;
 
 use anyhow::{Context, bail};
 use plist::{Dictionary, Value};
-use vpn_core::{ExchangeMode, Profile, ProfileFile, ProtocolConfig, valid_domain};
+use vpn_core::{ExchangeMode, PppAuth, Profile, ProfileFile, ProtocolConfig, valid_domain};
 
 use super::{Found, Imported};
 
@@ -160,6 +160,32 @@ fn l2tp(service: &Dictionary, display: &str, existing: &[String]) -> anyhow::Res
     p.ike = IKE_PROPOSALS.map(String::from).to_vec();
     p.esp = ESP_PROPOSALS.map(String::from).to_vec();
     p.legacy_algorithms = true;
+    // What macOS accepts unless the service says otherwise, PAP included:
+    // Meraki asks for it.
+    let listed: Vec<String> = ppp
+        .get("AuthProtocol")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_string)
+        .map(str::to_owned)
+        .collect();
+    let listed = if listed.is_empty() { vec!["MSCHAP2".into(), "CHAP".into(), "PAP".into()] } else { listed };
+    p.ppp_auth = [("MSCHAP2", PppAuth::MsChapV2), ("CHAP", PppAuth::Chap), ("PAP", PppAuth::Pap)]
+        .into_iter()
+        .filter(|(name, _)| listed.iter().any(|l| l.eq_ignore_ascii_case(name)))
+        .map(|(_, auth)| auth)
+        .collect();
+    if p.ppp_auth.is_empty() {
+        bail!("none of the PPP authentications of this service is supported ({})", listed.join(", "));
+    }
+    if p.ppp_auth.contains(&PppAuth::Pap) {
+        notes.push(
+            "PAP is allowed, as macOS does (Meraki uses it): it does not authenticate the server; turn it off in \
+             the editor if the server accepts MS-CHAPv2"
+                .into(),
+        );
+    }
     let servers = strings("ServerAddresses");
     p.dns_servers = servers.iter().filter_map(|s| s.parse().ok()).take(4).collect();
     if p.dns_servers.len() < servers.len() || profile.dns_domains.len() < domains.len() {
@@ -304,7 +330,11 @@ mod tests {
         let mut services = Dictionary::new();
         services.insert("1".into(), l2tp_service("Meraki Lyon", &ipsec, &saved));
         // No group name, password asked each time.
-        let asked = [("AuthName", Value::from("bob")), ("AuthPasswordEncryption", "Prompt".into())];
+        let asked = [
+            ("AuthName", Value::from("bob")),
+            ("AuthPasswordEncryption", "Prompt".into()),
+            ("AuthProtocol", Value::Array(vec!["MSCHAP2".into()])),
+        ];
         services.insert("2".into(), l2tp_service("Office", &ipsec[3..], &asked));
         let cert = [("AuthenticationMethod", Value::from("Certificate"))];
         services.insert("3".into(), l2tp_service("With certificate", &cert, &[]));
@@ -331,6 +361,8 @@ mod tests {
         );
         assert_eq!(p.dns_servers, ["10.0.0.53".parse::<std::net::IpAddr>().unwrap(), "fd00::53".parse().unwrap()]);
         assert_eq!(p.ipsec().ike_version, 1);
+        assert_eq!(p.ppp_auth, [PppAuth::MsChapV2, PppAuth::Chap, PppAuth::Pap], "as macOS");
+        assert!(lyon.notes.iter().any(|n| n.contains("PAP")));
         assert!(lyon.notes.iter().any(|n| n.contains("compression")));
         assert!(lyon.notes.iter().any(|n| n.contains("idle")));
         assert!(lyon.notes.iter().any(|n| n.contains("left out")));
@@ -340,6 +372,7 @@ mod tests {
         let ProtocolConfig::L2tp(p) = &office.profiles[0].protocol else { panic!() };
         assert_eq!((p.username.as_deref(), p.local_id.as_deref()), (Some("bob"), None));
         assert_eq!(p.ipsec().exchange_mode, ExchangeMode::Main);
+        assert_eq!(p.ppp_auth, [PppAuth::MsChapV2], "the service's own list");
         let refused = found[2].result.as_ref().map(|_| ()).unwrap_err().to_string();
         assert!(refused.contains("certificate"));
     }

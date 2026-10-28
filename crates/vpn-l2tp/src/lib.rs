@@ -31,7 +31,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use vpn_core::{
-    DnsSettings, Engine, FailureKind, L2TP_PORT, L2tpProfile, PacketIo, Prompt, PromptKind, SessionContext,
+    DnsSettings, Engine, FailureKind, L2TP_PORT, L2tpProfile, PacketIo, PppAuth, Prompt, PromptKind, SessionContext,
     TunnelSettings, failure,
 };
 use vpn_ipsec::TransportChannel;
@@ -269,6 +269,22 @@ impl Engine for L2tpEngine {
             warn!("the L2TP server assigned no DNS server");
         }
         info!(address = %assigned.address, "L2TP over IPsec connected");
+        if session.ppp.server_proved() && self.profile.ppp_auth != [PppAuth::MsChapV2] {
+            // A server asking for less next time would not be this one.
+            info!("the L2TP server proved itself with MS-CHAPv2: PAP and CHAP are no longer accepted");
+            self.profile.ppp_auth = vec![PppAuth::MsChapV2];
+            let prompter = ctx.prompter.clone();
+            tokio::spawn(async move {
+                let notice = Prompt::new(
+                    vpn_core::prompt::L2TP_SERVER_PROVED,
+                    PromptKind::Confirm,
+                    "the L2TP server proved itself with MS-CHAPv2",
+                );
+                if let Err(e) = prompter.ask(notice).await {
+                    debug!("the profile keeps its PPP authentications: {e:#}");
+                }
+            });
+        }
         self.session = Some(session);
         Ok(TunnelSettings {
             address: assigned.address,

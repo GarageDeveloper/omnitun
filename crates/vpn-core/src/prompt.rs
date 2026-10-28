@@ -129,6 +129,11 @@ impl Prompt {
 /// Prompt key for a certificate trust decision.
 pub const TRUST_CERTIFICATE: &str = "trust_certificate";
 
+/// Not a question: the L2TP server proved it knows the password
+/// (MS-CHAPv2), so the profile no longer accepts weaker authentications,
+/// which would let anyone with the pre-shared key pose as it.
+pub const L2TP_SERVER_PROVED: &str = "l2tp_server_proved";
+
 /// Prompt key for a signature with the client certificate's key.
 pub const SIGN: &str = "sign";
 

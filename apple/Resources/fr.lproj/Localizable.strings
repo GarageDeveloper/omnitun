@@ -277,7 +277,7 @@
 "The IKE identity; with one, phase 1 uses aggressive mode, as macOS does." = "L'identité IKE ; avec un nom de groupe, la phase 1 utilise le mode agressif, comme macOS.";
 "PPP Authentication" = "Authentification PPP";
 "Choose at least one authentication." = "Choisissez au moins une authentification.";
-"PAP sends the password in clear inside IPsec: only the IPsec encryption protects it." = "PAP envoie le mot de passe en clair dans IPsec : seul le chiffrement IPsec le protège.";
+"PAP sends the password in clear inside IPsec and does not authenticate the server: turn it on only if the server asks for it (Meraki)." = "PAP envoie le mot de passe en clair dans IPsec et n’authentifie pas le serveur : ne l’activez que si le serveur le demande (Meraki).";
 "DNS servers if the server assigns none (one per line, 4 at most)" = "Serveurs DNS si le serveur n'en attribue aucun (un par ligne, 4 au plus)";
 
 /* Gateway certificate (IPsec IKEv2) */
