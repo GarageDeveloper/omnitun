@@ -756,7 +756,8 @@ impl From<&Profile> for ProfileForm {
             extra_routes: Vec::new(),
             ppp_mschapv2: true,
             ppp_chap: true,
-            ppp_pap: true,
+            // It does not authenticate the server: only when asked for.
+            ppp_pap: false,
             dns_servers: Vec::new(),
             peer_public_key: String::new(),
             addresses: Vec::new(),
@@ -1206,7 +1207,7 @@ mod tests {
     fn l2tp_profiles() {
         let mut form = ProfileForm::new(VpnKind::L2tp);
         assert_eq!((form.kind, form.port, form.ike_version), (VpnKind::L2tp, 500, 1));
-        assert!(!form.custom_proposals && form.ppp_mschapv2 && form.ppp_chap && form.ppp_pap);
+        assert!(!form.custom_proposals && form.ppp_mschapv2 && form.ppp_chap && !form.ppp_pap);
         form.name = "meraki".into();
         form.host = " vpn.example.com ".into();
         form.username = Some("alice".into());
@@ -1218,7 +1219,7 @@ mod tests {
         assert_eq!(p.ipsec().exchange_mode, ExchangeMode::Aggressive);
         assert_eq!((p.ike.len(), p.ike[0].as_str()), (6, "aes256-sha256-modp2048"));
         assert_eq!(p.esp, ["aes256-sha256", "aes256-sha1", "aes128-sha1"]);
-        assert_eq!(p.ppp_auth, [PppAuth::MsChapV2, PppAuth::Chap, PppAuth::Pap]);
+        assert_eq!(p.ppp_auth, [PppAuth::MsChapV2, PppAuth::Chap], "no PAP unless asked");
         assert_eq!(p.dns_servers.len(), 1);
 
         // Back to the form: the same choices.

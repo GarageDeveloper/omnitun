@@ -45,9 +45,10 @@ pub struct GatewayTrust {
 }
 
 impl GatewayTrust {
+    /// `ca_pem`: the profile's CAs, which replace the public Web PKI ones.
     /// `keychain_pem`: the CAs the user's Keychain trusts; unlike the
     /// profile's, they are not named in CERTREQ, and unusable ones are
-    /// skipped.
+    /// skipped. Revocation is not checked.
     pub fn new(
         ca_pem: Option<&str>,
         keychain_pem: Option<&str>,
@@ -55,7 +56,11 @@ impl GatewayTrust {
         host: &str,
         port: u16,
     ) -> anyhow::Result<Self> {
-        let mut anchors: Vec<TrustAnchor<'static>> = webpki_roots::TLS_SERVER_ROOTS.to_vec();
+        // A company CA: a public certificate for the gateway's name, or
+        // a leaked one, must not do.
+        let own_ca = ca_pem.is_some_and(|pem| !pem.trim().is_empty());
+        let mut anchors: Vec<TrustAnchor<'static>> =
+            if own_ca { Vec::new() } else { webpki_roots::TLS_SERVER_ROOTS.to_vec() };
         for cert in CertificateDer::pem_slice_iter(keychain_pem.unwrap_or_default().as_bytes()).flatten() {
             match webpki::anchor_from_trusted_cert(&cert) {
                 Ok(anchor) => anchors.push(anchor.to_owned()),
@@ -406,6 +411,8 @@ mod tests {
     fn chain_and_identities() {
         let p = pki(ExtendedKeyUsagePurpose::ServerAuth, &rcgen::PKCS_ECDSA_P256_SHA256);
         let trust = GatewayTrust::new(Some(&p.ca_pem), None, &[], "gw.test", 500).unwrap();
+        assert_eq!(trust.anchors.len(), 1, "the profile's CA replaces the public ones");
+        assert!(GatewayTrust::new(None, None, &[], "gw.test", 500).unwrap().anchors.len() > 100);
         let chain = [p.leaf.clone()];
         trust.check(&chain, &fqdn("gw.test"), &fqdn("gw.test")).unwrap();
         trust.check(&chain, &fqdn("192.0.2.1"), &fqdn("gw@corp.test")).unwrap();

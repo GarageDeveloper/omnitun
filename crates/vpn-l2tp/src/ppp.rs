@@ -234,7 +234,10 @@ impl Ppp {
             }
             IP => {}
             LCP => self.lcp_input(data, now)?,
-            IPCP if self.lcp.opened() => self.ipcp_input(data, now)?,
+            // Before the server proved itself, IPCP would hand our traffic
+            // to whoever has the pre-shared key.
+            IPCP if self.lcp.opened() && self.authenticated => self.ipcp_input(data, now)?,
+            IPCP => debug!("IPCP before PPP authentication, ignored"),
             PAP => self.pap_input(data)?,
             CHAP => self.chap_input(data)?,
             other => {
@@ -401,7 +404,9 @@ impl Ppp {
     }
 
     fn answer(&mut self, protocol: u16, code: u8, id: u8, body: &[u8], now: Instant) -> anyhow::Result<()> {
-        if id != self.negotiation(protocol).id {
+        let n = self.negotiation(protocol);
+        // Only the answer to a request we sent.
+        if n.sent.is_none() || id != n.id {
             return Ok(());
         }
         let Some(opts) = parse_options(body) else { return Ok(()) };
@@ -534,8 +539,14 @@ impl Ppp {
         self.send_request(IPCP, Instant::now());
     }
 
+    /// Whether the server proved it knows the password: only MS-CHAPv2
+    /// authenticates it.
+    pub fn server_proved(&self) -> bool {
+        self.authenticated && self.auth == Some(Auth::MsChapV2)
+    }
+
     fn check_up(&mut self) {
-        if self.up.is_some() || !self.ipcp.opened() {
+        if self.up.is_some() || !self.authenticated || !self.ipcp.opened() {
             return;
         }
         let value = |kind: u8| {
@@ -617,6 +628,7 @@ mod tests {
         assert_eq!(&out[0].1[5..21], expected.finalize().as_slice());
         assert_eq!(&out[0].1[21..], b"alice");
         ppp.input(CHAP, &packet(3, 42, b""), now).unwrap();
+        assert!(!ppp.server_proved(), "CHAP-MD5 does not authenticate the server");
 
         let ipcp = ppp.take_output();
         assert_eq!(ipcp[0].0, IPCP);
@@ -657,6 +669,58 @@ mod tests {
         ppp.take_output();
         ppp.input(CHAP, &packet(3, 9, b""), now).unwrap();
         assert!(!ppp.take_output().iter().any(|(p, _)| *p == IPCP), "success without a challenge");
+    }
+
+    /// A server that negotiates MS-CHAPv2, never sends its challenge and
+    /// pushes IPCP instead must not bring the link up.
+    #[test]
+    fn ipcp_without_authentication() {
+        let now = Instant::now();
+        let mut ppp = Ppp::new("alice".into(), Zeroizing::new("secret".into()), vec![PppAuth::MsChapV2]);
+        ppp.start(now);
+        let request = ppp.take_output().remove(0).1;
+        ppp.input(LCP, &packet(CONF_ACK, request[1], &request[4..]), now).unwrap();
+        let mschap = options(&[(LCP_AUTH, vec![0xc2, 0x23, CHAP_MSCHAPV2])]);
+        ppp.input(LCP, &packet(CONF_REQ, 1, &mschap), now).unwrap();
+        ppp.take_output();
+        // A Nak for a request we never sent, then an Ack of the request it
+        // provokes, then the server's own request.
+        let nak = options(&[(IPCP_ADDRESS, vec![10, 66, 0, 2]), (IPCP_DNS1, vec![10, 66, 0, 1])]);
+        ppp.input(IPCP, &packet(CONF_NAK, 0, &nak), now).unwrap();
+        for (protocol, frame) in ppp.take_output() {
+            if protocol == IPCP && frame[0] == CONF_REQ {
+                ppp.input(IPCP, &packet(CONF_ACK, frame[1], &frame[4..]), now).unwrap();
+            }
+        }
+        ppp.input(IPCP, &packet(CONF_REQ, 3, &options(&[(IPCP_ADDRESS, vec![10, 66, 0, 1])])), now).unwrap();
+        assert_eq!(ppp.up, None, "IPCP before authentication");
+        assert!(!ppp.take_output().iter().any(|(p, _)| *p == IPCP), "no IPCP before authentication");
+    }
+
+    /// MS-CHAPv2: the server's success message proves it knows the password.
+    #[test]
+    fn mschapv2_proves_the_server() {
+        use vpn_ipsec::mschapv2::{authenticator_response, mschap_username, nt_password_hash};
+        let now = Instant::now();
+        let mut ppp = Ppp::new("alice".into(), Zeroizing::new("secret".into()), vec![PppAuth::MsChapV2]);
+        ppp.start(now);
+        let request = ppp.take_output().remove(0).1;
+        ppp.input(LCP, &packet(CONF_ACK, request[1], &request[4..]), now).unwrap();
+        let mschap = options(&[(LCP_AUTH, vec![0xc2, 0x23, CHAP_MSCHAPV2])]);
+        ppp.input(LCP, &packet(CONF_REQ, 1, &mschap), now).unwrap();
+        ppp.take_output();
+        let challenge = [7u8; 16];
+        ppp.input(CHAP, &packet(1, 5, &[[16u8].as_slice(), &challenge, b"server"].concat()), now).unwrap();
+        let response = ppp.take_output().remove(0).1;
+        let (peer, nt): ([u8; 16], [u8; 24]) =
+            (response[5..21].try_into().unwrap(), response[29..53].try_into().unwrap());
+        let wrong = format!("S={} M=ok", "0".repeat(40));
+        assert!(ppp.input(CHAP, &packet(3, 5, wrong.as_bytes()), now).is_err(), "a server that cannot prove it");
+        let hash = nt_password_hash(&Zeroizing::new("secret".to_owned()));
+        let proof = authenticator_response(&hash, &nt, &peer, &challenge, mschap_username("alice").as_bytes());
+        ppp.input(CHAP, &packet(3, 5, format!("{proof} M=ok").as_bytes()), now).unwrap();
+        assert!(ppp.server_proved());
+        assert!(ppp.take_output().iter().any(|(p, f)| *p == IPCP && f[0] == CONF_REQ), "IPCP once proved");
     }
 
     #[test]

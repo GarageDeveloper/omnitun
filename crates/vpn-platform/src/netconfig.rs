@@ -7,7 +7,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{LazyLock, Mutex};
 
 use anyhow::{Context, bail};
-use ipnet::Ipv4Net;
+use ipnet::{Ipv4Net, Ipv6Net};
 use vpn_core::TunnelSettings;
 
 use crate::{cmd, journal};
@@ -19,6 +19,8 @@ static GATEWAY_ROUTES: LazyLock<Mutex<HashMap<Ipv4Addr, (usize, Uplink)>>> = Laz
 #[derive(Debug)]
 enum Undo {
     Route(Ipv4Net, Via),
+    /// IPv6 refused on the tunnel interface: gone with it after a crash.
+    Ipv6Block(Ipv6Net),
     GatewayRoute(Ipv4Addr),
     Dns,
 }
@@ -101,6 +103,20 @@ impl AppliedConfig {
             add_route(route, &tun).await?;
             self.undo.push(Undo::Route(route, tun.clone()));
         }
+        // The tunnels carry no IPv6: in a full tunnel it would leave in
+        // clear through the uplink.
+        if settings.full_tunnel && settings.gateway.is_ipv4() {
+            for net in ["::/1", "8000::/1"] {
+                let net: Ipv6Net = net.parse()?;
+                match block_ipv6(net, &self.interface).await {
+                    Ok(()) => self.undo.push(Undo::Ipv6Block(net)),
+                    Err(e) => tracing::warn!(
+                        session = self.session,
+                        "IPv6 not blocked, it may leave outside the tunnel: {e:#}"
+                    ),
+                }
+            }
+        }
         for route in &settings.excluded_routes {
             let via = Via::Physical(uplink.clone());
             add_route(*route, &via).await?;
@@ -120,6 +136,7 @@ impl AppliedConfig {
         while let Some(step) = self.undo.pop() {
             let res = match &step {
                 Undo::Route(net, via) => delete_route(*net, via).await,
+                Undo::Ipv6Block(net) => unblock_ipv6(*net, &self.interface).await,
                 Undo::GatewayRoute(gateway) => {
                     let last = {
                         let mut routes = GATEWAY_ROUTES.lock().unwrap();
@@ -225,6 +242,33 @@ async fn os_delete_route(net: Ipv4Net, via: &Via) -> anyhow::Result<()> {
             cmd::run("/sbin/route", &["-n", "delete", kind, &dest, &gw.to_string()]).await?
         }
     };
+    Ok(())
+}
+
+/// A reject route: IPv6 connections fail at once, and applications fall
+/// back to IPv4, which the tunnel carries.
+#[cfg(target_os = "macos")]
+async fn block_ipv6(net: Ipv6Net, interface: &str) -> anyhow::Result<()> {
+    cmd::run("/sbin/route", &["-n", "add", "-inet6", &net.to_string(), "-interface", interface, "-reject"]).await?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+async fn unblock_ipv6(net: Ipv6Net, interface: &str) -> anyhow::Result<()> {
+    cmd::run("/sbin/route", &["-n", "delete", "-inet6", &net.to_string(), "-interface", interface]).await?;
+    Ok(())
+}
+
+/// Into the tunnel interface, whose engine drops all but IPv4.
+#[cfg(target_os = "linux")]
+async fn block_ipv6(net: Ipv6Net, interface: &str) -> anyhow::Result<()> {
+    cmd::run("ip", &["-6", "route", "add", &net.to_string(), "dev", interface]).await?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+async fn unblock_ipv6(net: Ipv6Net, interface: &str) -> anyhow::Result<()> {
+    cmd::run("ip", &["-6", "route", "del", &net.to_string(), "dev", interface]).await?;
     Ok(())
 }
 

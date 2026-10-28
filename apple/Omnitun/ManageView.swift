@@ -1708,7 +1708,7 @@ private struct L2tpAdvancedOptions: View {
             Label("Choose at least one authentication.", systemImage: "exclamationmark.triangle.fill")
                 .font(.caption).foregroundStyle(.orange)
         }
-        Text("PAP sends the password in clear inside IPsec: only the IPsec encryption protects it.")
+        Text("PAP sends the password in clear inside IPsec and does not authenticate the server: turn it on only if the server asks for it (Meraki).")
             .font(.caption).foregroundStyle(.secondary)
         VStack(alignment: .leading, spacing: 4) {
             Text("DNS servers if the server assigns none (one per line, 4 at most)")

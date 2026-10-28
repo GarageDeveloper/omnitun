@@ -254,6 +254,14 @@ async fn handle_question(
             };
             socket.answer(id, value).await
         }
+        Event::Prompt { id, prompt } if prompt.key == vpn_core::prompt::L2TP_SERVER_PROVED => {
+            if let vpn_core::ProtocolConfig::L2tp(_) = &profile.protocol
+                && let Err(e) = store.require_mschapv2(&profile.id)
+            {
+                user.notice(Notice::Warning(format!("{e:#}")));
+            }
+            socket.answer(id, Some(String::new())).await
+        }
         Event::Prompt { id, prompt } => {
             let value = answer(profile, &prompt, user).await?;
             socket.answer(id, value.as_ref().map(|v| v.to_string())).await
@@ -370,7 +378,11 @@ async fn keep_signing(mut socket: PromptSocket, profile: Profile, key: ClientKey
 }
 
 /// Signs with the profile's client certificate, and only what IKE or TLS
-/// signs: the engine is not trusted to use the key for anything else.
+/// signs: the engine is not trusted to use the key for anything else. A
+/// TLS 1.2 signature covers the ClientHello, whose server name must be the
+/// profile's server; a TLS 1.3 or IKEv2 one covers only hashes and nonces,
+/// so a compromised engine could still have the key sign a handshake with
+/// another server trusting the same certificate (within the budget).
 async fn sign(
     profile: &Profile,
     key: Option<&ClientKey>,
@@ -387,9 +399,8 @@ async fn sign(
     let data = hex::decode(&request.data).context("malformed signature request")?;
     let expected = match &profile.protocol {
         vpn_core::ProtocolConfig::Ipsec(_) => vpn_core::prompt::is_ike_auth_octets(&data),
-        vpn_core::ProtocolConfig::FortiSsl(_) | vpn_core::ProtocolConfig::OpenVpn(_) => {
-            vpn_core::prompt::is_tls_client_signature_octets(&data)
-        }
+        vpn_core::ProtocolConfig::FortiSsl(p) => tls_signature_for(&data, [p.host.as_str()]),
+        vpn_core::ProtocolConfig::OpenVpn(p) => tls_signature_for(&data, p.remotes.iter().map(|r| r.host.as_str())),
         // No certificate in L2TP and WireGuard profiles.
         vpn_core::ProtocolConfig::L2tp(_) | vpn_core::ProtocolConfig::WireGuard(_) => false,
     };
@@ -398,6 +409,25 @@ async fn sign(
     // The Keychain may wait for the user to allow the key's use.
     let signature = tokio::task::spawn_blocking(move || key.sign(algorithm, &data)).await??;
     Ok(hex::encode(signature))
+}
+
+/// TLS client signature octets, for one of `hosts` if TLS 1.2: TLS sends no
+/// server name for an IP address.
+fn tls_signature_for<'a>(data: &[u8], hosts: impl IntoIterator<Item = &'a str>) -> bool {
+    use vpn_core::prompt::{is_tls_client_signature_octets, tls12_server_name};
+    if !is_tls_client_signature_octets(data) {
+        return false;
+    }
+    if data.first() != Some(&1) {
+        return true; // TLS 1.3
+    }
+    let name = tls12_server_name(data);
+    hosts.into_iter().any(|host| match host.parse::<std::net::IpAddr>() {
+        Ok(_) => name.is_none(),
+        Err(_) => {
+            name.as_deref().is_some_and(|n| n.trim_end_matches('.').eq_ignore_ascii_case(host.trim_end_matches('.')))
+        }
+    })
 }
 
 /// Keychain first for secrets, then the user.
@@ -474,6 +504,32 @@ mod tests {
         let chained = Profile { via: vec!["lab".into()], ..company.clone() };
         assert!(exclusive_conflicts(&chained, &lab_up, &profiles, false).is_empty());
         assert_eq!(exclusive_conflicts(&chained, &lab_up, &profiles, true), ["lab"]);
+    }
+
+    /// A TLS 1.2 signature is for the hello's server name only.
+    #[test]
+    fn tls12_signatures_name_the_server() {
+        let hello = |sni: Option<&str>| {
+            let mut extensions = Vec::new();
+            if let Some(name) = sni {
+                let n = name.len() as u8;
+                extensions.extend_from_slice(&[0, 0, 0, n + 5, 0, n + 3, 0, 0, n]);
+                extensions.extend_from_slice(name.as_bytes());
+            }
+            let mut body = [&[3u8, 3][..], &[9; 32], &[0, 0, 2, 0x13, 0x01, 1, 0]].concat();
+            body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+            body.extend_from_slice(&extensions);
+            [&[1u8, 0][..], &(body.len() as u16).to_be_bytes(), &body, &[2, 0, 0, 0]].concat()
+        };
+        let ours = hello(Some("VPN.example.com"));
+        assert!(tls_signature_for(&ours, ["vpn.example.com"]));
+        assert!(!tls_signature_for(&hello(Some("bank.example")), ["vpn.example.com"]), "another server");
+        assert!(!tls_signature_for(&hello(None), ["vpn.example.com"]), "no name");
+        assert!(tls_signature_for(&hello(None), ["198.51.100.7"]), "no name for an address");
+        assert!(!tls_signature_for(&ours, ["198.51.100.7"]));
+        assert!(tls_signature_for(&ours, ["other.example", "vpn.example.com"]), "one of the remotes");
+        let tls13 = [&[b' '; 64][..], b"TLS 1.3, client CertificateVerify\0", &[7; 32]].concat();
+        assert!(tls_signature_for(&tls13, ["vpn.example.com"]), "binds no name");
     }
 
     #[test]

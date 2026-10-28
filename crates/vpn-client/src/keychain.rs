@@ -131,6 +131,7 @@ mod macos {
     use std::collections::HashMap;
 
     use anyhow::Context;
+    use security_framework::certificate::SecCertificate;
     use security_framework::identity::SecIdentity;
     use security_framework::item::{ItemClass, ItemSearchOptions, Limit, Reference, SearchResult};
     use security_framework::key::Algorithm;
@@ -210,7 +211,8 @@ mod macos {
     }
 
     /// User settings override admin ones, as in the system's evaluation.
-    /// A certificate with no setting for SSL is trusted as a root.
+    /// Empty settings trust a certificate as a root for every use; settings
+    /// for other uses only (S/MIME, code signing) say nothing about TLS.
     pub fn trusted_authorities() -> anyhow::Result<Vec<Vec<u8>>> {
         let mut decided: HashMap<Vec<u8>, TrustSettingsForCertificate> = HashMap::new();
         for domain in [Domain::User, Domain::Admin] {
@@ -220,7 +222,9 @@ mod macos {
             };
             for certificate in certificates {
                 let trust = match settings.tls_trust_settings_for_certificate(&certificate) {
-                    Ok(trust) => trust.unwrap_or(TrustSettingsForCertificate::TrustRoot),
+                    Ok(Some(trust)) => trust,
+                    Ok(None) if trusted_for_everything(&certificate, domain) => TrustSettingsForCertificate::TrustRoot,
+                    Ok(None) => continue,
                     Err(e) => {
                         tracing::debug!("{}: {e}", certificate.subject_summary());
                         continue;
@@ -236,6 +240,26 @@ mod macos {
             })
             .map(|(der, _)| der)
             .collect())
+    }
+
+    /// Whether the certificate's settings in `domain` are an empty list,
+    /// which trusts it as a root whatever the use.
+    fn trusted_for_everything(certificate: &SecCertificate, domain: Domain) -> bool {
+        use core_foundation::array::{CFArray, CFArrayRef};
+        use core_foundation::base::{CFType, TCFType};
+        use security_framework_sys::base::errSecSuccess;
+        use security_framework_sys::trust_settings::SecTrustSettingsCopyTrustSettings;
+
+        let mut array: CFArrayRef = std::ptr::null();
+        // SAFETY: a valid certificate and out pointer; the array returned
+        // follows the create rule.
+        let status =
+            unsafe { SecTrustSettingsCopyTrustSettings(certificate.as_concrete_TypeRef(), domain.into(), &mut array) };
+        if status != errSecSuccess || array.is_null() {
+            return false;
+        }
+        let array = unsafe { CFArray::<CFType>::wrap_under_create_rule(array) };
+        array.is_empty()
     }
 }
 

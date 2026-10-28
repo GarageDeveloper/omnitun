@@ -261,7 +261,10 @@ impl Session {
                 }
                 packet = io.from_tun.recv() => {
                     let Some(packet) = packet else { return Ok(()) };
-                    self.send_data(&packet, ctx).await?;
+                    // IPv4 only: IPv6 is blocked into the tunnel interface.
+                    if packet.first().is_some_and(|b| b >> 4 == 4) {
+                        self.send_data(&packet, ctx).await?;
+                    }
                 }
                 _ = tick.tick() => self.timers().await?,
                 _ = ctx.cancel.cancelled() => {

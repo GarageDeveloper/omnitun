@@ -147,6 +147,12 @@ final class AppModel: ObservableObject {
         // An interactive connection reports its own outcome.
         guard flows[change.id] == nil else { return }
         let name = displayName(change.id)
+        // A security alert, whatever the notification settings.
+        if change.state == .failed, let failure = change.failure, failure.code == .certificateChanged {
+            Notifier.shared.post(title: String(localized: "\(name) disconnected"), body: label(failure))
+            Windows.shared.showCertificateChanged(model: self, profile: change.id, failure: failure)
+            return
+        }
         switch change.state {
         case .connected where Settings.notifyConnected:
             Notifier.shared.post(title: String(localized: "\(name) connected"), body: change.detail ?? "")
