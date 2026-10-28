@@ -190,6 +190,33 @@ impl ProfileStore {
         })
     }
 
+    /// Copies profile `id` under a new id, listed just after it, as `name`
+    /// ("<name> copy" when None), or `name 2`, `name 3`… when its folder
+    /// already has that name. Secrets are not copied here (see
+    /// [`crate::secrets::copy`]); VPNs chained through the original keep
+    /// pointing at it.
+    pub fn duplicate(&self, id: &str, name: Option<&str>) -> anyhow::Result<Profile> {
+        let profiles = self.load()?;
+        let index = profiles.iter().position(|p| p.id == id).with_context(|| format!("no profile {id}"))?;
+        let mut copy = profiles[index].clone();
+        let base = name.map(str::trim).map_or_else(|| format!("{} copy", copy.name), str::to_owned);
+        let taken = |n: &str| profiles.iter().any(|p| p.name == n && p.folder == copy.folder);
+        copy.name = (1..)
+            .map(|i| {
+                let suffix = if i == 1 { String::new() } else { format!(" {i}") };
+                // Names are at most 64 characters.
+                let room = 64 - suffix.chars().count();
+                let base: String = base.chars().take(room).collect();
+                format!("{}{suffix}", base.trim_end())
+            })
+            .find(|n| !taken(n))
+            .expect("a free name");
+        copy.id = vpn_core::new_id();
+        self.save(&copy)?;
+        self.reorder(&copy.id, profiles.get(index + 1).map(|p| p.id.as_str()))?;
+        Ok(copy)
+    }
+
     /// Replaces the profile's trusted certificate fingerprints.
     pub fn set_trusted_certificates(&self, id: &str, fingerprints: &[String]) -> anyhow::Result<()> {
         let mut profile = self.find(id)?;
@@ -433,6 +460,41 @@ mod tests {
         assert_eq!(b.remotes[0].host, "b.example.com", "its servers moved with it");
         store.reorder(&id("b"), None).unwrap();
         assert_eq!(names(&store), ["c", "a", "b"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn duplicates_a_profile() {
+        let dir = std::env::temp_dir().join(format!("omnitun-duplicate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("profiles.toml");
+        let text = "[[profile]]\nname = \"a\"\nprotocol = \"forti-ssl\"\nhost = \"a.example.com\"\nfolder = \"Clients\"\n\
+                    dns_domains = [\"corp.example\"]\n\n\
+                    [[profile]]\nname = \"b\"\nprotocol = \"forti-ssl\"\nhost = \"b.example.com\"\n";
+        std::fs::write(&path, text).unwrap();
+        let store = ProfileStore::open(Some(path.clone())).unwrap();
+        let a = store.find("a").unwrap();
+        let mut b = store.find("b").unwrap();
+        b.via = vec![a.id.clone()];
+        store.save(&b).unwrap();
+
+        let copy = store.duplicate(&a.id, None).unwrap();
+        assert_ne!(copy.id, a.id);
+        assert_eq!((copy.name.as_str(), copy.folder.as_deref()), ("a copy", Some("Clients")));
+        assert_eq!(copy.dns_domains, a.dns_domains);
+        assert_eq!(copy.protocol.endpoint(), a.protocol.endpoint());
+        let again = store.duplicate(&a.id, None).unwrap();
+        assert_eq!(again.name, "a copy 2");
+        let named = store.duplicate(&a.id, Some("a")).unwrap();
+        assert_eq!(named.name, "a 2", "a taken name gets a number");
+        let long = store.duplicate(&a.id, Some(&"x".repeat(70))).unwrap();
+        assert_eq!(long.name.chars().count(), 64);
+
+        let order: Vec<String> = store.load().unwrap().into_iter().map(|p| p.name).collect();
+        assert_eq!(order[0], "a");
+        assert_eq!(order.last().unwrap(), "b", "copies are listed after the original");
+        assert_eq!(store.find("b").unwrap().via, vec![a.id.clone()], "chains keep the original");
+        assert!(store.duplicate("no-such-id", None).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

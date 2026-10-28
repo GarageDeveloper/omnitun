@@ -193,6 +193,16 @@ impl Client {
         Ok(self.store.reorder(&id, before.as_deref())?)
     }
 
+    /// Copies profile `id` with its saved secrets as `name` (a number is
+    /// added if its folder has it already), listed after it. Secrets that
+    /// cannot be copied leave the copy without them, to type in the editor.
+    pub fn duplicate_profile(&self, id: String, name: String) -> Result<DuplicatedProfile, ClientError> {
+        let original = self.store.find(&id)?;
+        let copy = self.store.duplicate(&id, Some(&name))?;
+        let secrets_error = vpn_client::secrets::copy(&original, &copy).err().map(|e| format!("{e:#}"));
+        Ok(DuplicatedProfile { id: copy.id, secrets_error })
+    }
+
     /// The profile as a `.vpnprofile` file: no secret, key or user name.
     pub fn export_profile(&self, id: String) -> Result<String, ClientError> {
         Ok(vpn_client::vpnprofile::export(&self.store.find(&id)?)?)

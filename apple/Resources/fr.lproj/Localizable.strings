@@ -69,6 +69,7 @@
 "Remember in the Keychain" = "Mémoriser dans le Trousseau";
 "Cancel" = "Annuler";
 "Connect" = "Se connecter";
+"Disconnect" = "Se déconnecter";
 "Continue" = "Continuer";
 "Waiting… %d:%02d" = "En attente… %d:%02d";
 "Verification code" = "Code de vérification";
@@ -351,10 +352,15 @@
 "From Viscosity…" = "Depuis Viscosity…";
 "Disconnect it before renaming it." = "Déconnectez-le avant de le renommer.";
 "Cannot rename “%@”" = "Impossible de renommer « %@ »";
+"Cannot duplicate “%@”" = "Impossible de dupliquer « %@ »";
+"The saved secrets of “%@” were not copied" = "Les secrets enregistrés de « %@ » n'ont pas été copiés";
+"Type them in the copy's editor. %@" = "Saisissez-les dans l'éditeur de la copie. %@";
 "Rename “%@”" = "Renommer « %@ »";
 "Letters, digits, “-” and “_”, 32 characters at most." = "Lettres, chiffres, « - » et « _ », 32 caractères au plus.";
 "Rename" = "Renommer";
 "Rename…" = "Renommer…";
+"Duplicate" = "Dupliquer";
+"%@ copy" = "%@ copie";
 "macOS VPNs Found" = "VPN de macOS trouvés";
 "No VPN in System Settings that can be imported." = "Aucun VPN des Réglages Système à importer.";
 "The shared secrets and passwords of System Settings stay in the System keychain. Those typed here are saved in your Keychain; the others are asked at the first connection." = "Les secrets partagés et mots de passe des Réglages Système restent dans le trousseau Système. Ceux saisis ici sont enregistrés dans votre Trousseau ; les autres vous seront demandés à la première connexion.";

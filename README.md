@@ -101,6 +101,7 @@ omnitunctl watch                           # follows state changes
 omnitunctl log paris --since 2h -f         # the service log (administrators)
 omnitunctl diagnose -o report.txt          # a report to share, without secrets or addresses
 omnitunctl disconnect --all
+omnitunctl duplicate paris --name paris-test  # a copy to try other settings
 ```
 
 ## Architecture
