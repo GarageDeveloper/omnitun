@@ -62,6 +62,8 @@ private final class CloseGuard: NSObject, NSWindowDelegate {
 final class Windows {
     static let shared = Windows()
     private var named: [String: NSWindow] = [:]
+    /// The settings window's tab, so that an open window can be switched.
+    private let settingsTab = SettingsView.Selection()
     private var guards: [String: CloseGuard] = [:]
 
     /// One window per kind (settings, welcome, import), brought forward if open.
@@ -91,8 +93,16 @@ final class Windows {
         show("welcome", title: String(localized: "Welcome to \(brand.product)")) { WelcomeView(model: model) }
     }
 
-    func showSettings(model: AppModel, tab: SettingsView.Tab = .general) {
-        show("settings", title: String(localized: "Settings")) { SettingsView(model: model, tab: tab) }
+    /// `tab`: the one to show; nil opens on General, or keeps the tab of a
+    /// window already open.
+    func showSettings(model: AppModel, tab: SettingsView.Tab? = nil) {
+        let open = named["settings"].map { $0.isVisible || $0.isMiniaturized } ?? false
+        if let tab {
+            settingsTab.tab = tab
+        } else if !open {
+            settingsTab.tab = .general
+        }
+        show("settings", title: String(localized: "Settings")) { SettingsView(model: model, selection: settingsTab) }
     }
 
     /// `profile`: shown in the editor, when the window opens.

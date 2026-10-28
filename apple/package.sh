@@ -113,8 +113,9 @@ if [ -n "${SIGN_ID:-}" ]; then
   codesign $sign "$SIGN_ID" "$app"
 else
   echo "   (ad hoc: set SIGN_ID to sign with Developer ID)"
-  # The hardened runtime all the same: no code injected into the app,
-  # which holds the Keychain's access and the prompt sockets.
+  # The hardened runtime all the same: no code injected into the app
+  # through the environment (DYLD_*), as it holds the Keychain's access and
+  # the prompt sockets. Library validation is lifted for the app below.
   sign="--force --options runtime --sign -"
   # shellcheck disable=SC2086
   codesign $sign --identifier "$RDNS.daemon" "$helpers/$DAEMON"
@@ -126,8 +127,23 @@ else
     # shellcheck disable=SC2086
     codesign $sign "$app/Contents/Frameworks/Sparkle.framework/$part"
   done
+  # Library validation only loads code of the app's Team ID, which an ad hoc
+  # signature has not: dyld would refuse Sparkle and the app die at launch.
+  # Only that check is lifted; DYLD_* variables stay ignored.
+  entitlements="$dist/adhoc.entitlements"
+  cat > "$entitlements" <<'EOP'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+</dict>
+</plist>
+EOP
   # shellcheck disable=SC2086
-  codesign $sign "$app"
+  codesign $sign --entitlements "$entitlements" "$app"
+  rm -f "$entitlements"
 fi
 codesign --verify --strict --deep "$app"
 codesign --verify --strict "$helpers/$DAEMON" "$helpers/$ENGINE"
