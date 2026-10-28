@@ -526,7 +526,8 @@ impl Runner {
         };
 
         match self.manager.reserve(&self.profile.id, claims(&self.profile, &settings, self.owner)) {
-            Ok(warnings) => {
+            Ok(mut warnings) => {
+                warnings.extend(unused_dns(&settings));
                 for message in warnings {
                     tracing::warn!(session = self.profile.name, "{message}");
                     self.client.notify(Event::Warning { message });
@@ -630,6 +631,19 @@ fn claims(profile: &Profile, settings: &TunnelSettings, owner: u32) -> Claims {
 }
 
 /// Applies the user's per-profile overrides on top of what the gateway pushed.
+/// A split tunnel whose DNS servers no name goes to: without domains (none
+/// pushed, none in the profile), its internal names do not resolve.
+fn unused_dns(settings: &TunnelSettings) -> Option<String> {
+    let dns = &settings.dns;
+    let unused = !settings.full_tunnel
+        && !dns.servers.is_empty()
+        && dns.match_domains.is_empty()
+        && dns.search_domains.is_empty();
+    unused.then(|| {
+        "no DNS domain goes to this VPN's DNS servers: add the domains to resolve through it (dns_domains)".to_owned()
+    })
+}
+
 fn apply_profile(profile: &Profile, mut settings: TunnelSettings) -> anyhow::Result<TunnelSettings> {
     if let Some(routes) = &profile.routes {
         settings.routes = routes.clone();
@@ -1131,6 +1145,33 @@ mod tests {
         // Gateway's choice kept when the profile says nothing.
         assert!(apply_profile(&profile(serde_json::json!({})), settings(&[], true, &[])).unwrap().full_tunnel);
         assert!(apply_profile(&profile(serde_json::json!({})), settings(&[], false, &[])).is_err());
+    }
+
+    #[test]
+    fn split_mode_overrides_a_full_tunnel() {
+        let p = profile(serde_json::json!({ "full_tunnel": true, "split_routes": ["10.1.0.0/16", "192.168.5.0/24"] }));
+        let split = p.clone().in_split_mode().unwrap();
+        // The gateway takes all traffic, or pushes its own networks: only
+        // the split-mode networks remain.
+        for pushed in [settings(&[], true, &[]), settings(&["10.0.0.0/8"], false, &[])] {
+            let s = apply_profile(&split, pushed).unwrap();
+            assert!(!s.full_tunnel);
+            assert!(s.routes.starts_with(&["10.1.0.0/16".parse().unwrap(), "192.168.5.0/24".parse().unwrap()]));
+            assert!(!s.routes.contains(&"10.0.0.0/8".parse().unwrap()));
+        }
+        assert!(apply_profile(&p, settings(&[], true, &[])).unwrap().full_tunnel, "normal connection unchanged");
+    }
+
+    #[test]
+    fn unused_dns_servers_are_reported() {
+        let split = apply_profile(&profile(serde_json::json!({})), settings(&["10.0.0.0/8"], false, &[])).unwrap();
+        assert!(!split.dns.servers.is_empty(), "{split:?}");
+        assert!(unused_dns(&split).is_some());
+        let named = profile(serde_json::json!({ "dns_domains": ["corp.example"] }));
+        assert!(unused_dns(&apply_profile(&named, settings(&["10.0.0.0/8"], false, &[])).unwrap()).is_none());
+        assert!(
+            unused_dns(&apply_profile(&profile(serde_json::json!({})), settings(&[], true, &[])).unwrap()).is_none()
+        );
     }
 
     #[test]

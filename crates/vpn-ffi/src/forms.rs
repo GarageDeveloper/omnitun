@@ -189,6 +189,8 @@ pub struct ProfileForm {
     /// `None`: the routes pushed by the gateway.
     pub routes: Option<Vec<String>>,
     pub tunnel_mode: TunnelMode,
+    /// The networks of a connection in split mode; empty for none.
+    pub split_routes: Vec<String>,
     pub dns_domains: Vec<String>,
     pub allow_route_overlap: bool,
     /// VPNs this one is chained through, preferred first.
@@ -308,15 +310,9 @@ impl ProfileForm {
         }
         profile.routes = match &self.routes {
             None => None,
-            Some(routes) => Some(
-                clean_list(routes)
-                    .iter()
-                    .map(|r| {
-                        r.parse::<Ipv4Net>().map_err(|_| anyhow::anyhow!("{r:?} is not a network (like 10.1.0.0/16)"))
-                    })
-                    .collect::<anyhow::Result<_>>()?,
-            ),
+            Some(routes) => Some(networks(routes)?),
         };
+        profile.split_routes = networks(&self.split_routes)?;
         profile.full_tunnel = match self.tunnel_mode {
             TunnelMode::Automatic => None,
             TunnelMode::Full => Some(true),
@@ -397,10 +393,7 @@ impl ProfileForm {
             OpenVpnCompression::StubV2 => Compression::StubV2,
         };
         p.reneg_sec = self.reneg_sec;
-        p.extra_routes = clean_list(&self.extra_routes)
-            .iter()
-            .map(|r| r.parse::<Ipv4Net>().map_err(|_| anyhow::anyhow!("{r:?} is not a network (like 10.1.0.0/16)")))
-            .collect::<anyhow::Result<_>>()?;
+        p.extra_routes = networks(&self.extra_routes)?;
         Ok(())
     }
 
@@ -702,6 +695,14 @@ fn clean_list(items: &[String]) -> Vec<String> {
     items.iter().map(|i| i.trim().to_owned()).filter(|i| !i.is_empty()).collect()
 }
 
+/// Networks typed one per entry, like 10.1.0.0/16.
+fn networks(items: &[String]) -> anyhow::Result<Vec<Ipv4Net>> {
+    clean_list(items)
+        .iter()
+        .map(|r| r.parse::<Ipv4Net>().map_err(|_| anyhow::anyhow!("{r:?} is not a network (like 10.1.0.0/16)")))
+        .collect()
+}
+
 impl From<&Profile> for ProfileForm {
     fn from(profile: &Profile) -> Self {
         let defaults: IpsecProfile = toml::from_str("gateway = \"\"").expect("defaults parse");
@@ -772,6 +773,7 @@ impl From<&Profile> for ProfileForm {
                 Some(true) => TunnelMode::Full,
                 Some(false) => TunnelMode::Split,
             },
+            split_routes: profile.split_routes.iter().map(ToString::to_string).collect(),
             dns_domains: profile.dns_domains.clone(),
             allow_route_overlap: profile.allow_route_overlap,
             via: profile.via.clone(),

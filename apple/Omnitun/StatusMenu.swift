@@ -214,6 +214,15 @@ final class StatusMenu: NSObject, NSMenuDelegate {
             direct.isEnabled = available && !model.isOn(id)
             target.addItem(direct)
         }
+        // Always listed too, for the same reason.
+        if let profile = model.profile(id), !profile.splitRoutes.isEmpty {
+            let split = action(String(localized: "Connect in Split Mode"), #selector(connectSplit(_:)))
+            split.toolTip = profile.splitRoutes.joined(separator: ", ")
+            split.representedObject = id
+            split.indentationLevel = 2
+            split.isEnabled = available && !model.isOn(id)
+            target.addItem(split)
+        }
     }
 
     private func action(_ title: String, _ selector: Selector, key: String = "") -> NSMenuItem {
@@ -224,6 +233,10 @@ final class StatusMenu: NSObject, NSMenuDelegate {
 
     @objc private func connectDirectly(_ sender: NSMenuItem) {
         if let id = sender.representedObject as? String { model.connect(id, direct: true) }
+    }
+
+    @objc private func connectSplit(_ sender: NSMenuItem) {
+        if let id = sender.representedObject as? String { model.connect(id, split: true) }
     }
 
     @objc private func disconnectAll() { Task { await model.disconnectAll() } }
@@ -317,6 +330,7 @@ final class VPNRow: NSView {
             case .connected:
                 var parts = [String]()
                 if let via = session.via { parts.append(String(localized: "via \(model.displayName(via))")) }
+                if model.isSplit(id) { parts.append(String(localized: "split mode")) }
                 if let address = session.address { parts.append(address) }
                 parts.append("↓ \(bytes(session.rxBytes)) ↑ \(bytes(session.txBytes))")
                 if let since = session.connectedSince { parts.append(duration(since: since)) }

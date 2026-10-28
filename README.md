@@ -25,6 +25,8 @@ Beyond connecting:
 
 - **VPN chaining**: a VPN can run through another one, which is connected
   first if needed;
+- **split mode on demand**: a VPN that takes all traffic can also be
+  connected with only a list of networks through it;
 - **several VPNs at once**, each with its own routes and DNS, with
   conflicts between them detected; a VPN can also be marked as a company
   VPN that never runs alongside another;

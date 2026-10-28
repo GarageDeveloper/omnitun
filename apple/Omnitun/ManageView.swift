@@ -708,7 +708,7 @@ struct ProfileEditor: View {
                             guard !editing.hasChanges || editing.save() else { return }
                             Task {
                                 try? await model.client.disconnect(id: original)
-                                model.connect(original)
+                                model.connectAgain(original)
                             }
                         }
                     }
@@ -1768,6 +1768,12 @@ private struct NetworkTab: View {
                     Text("Networks (one per line, like 10.1.0.0/16)")
                     TextEditor(text: lines(routes)).font(.system(.body, design: .monospaced)).frame(minHeight: 70)
                 }
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Networks in split mode (one per line)")
+                TextEditor(text: lines($form.splitRoutes)).font(.system(.body, design: .monospaced)).frame(minHeight: 50)
+                Text("The menu then also offers to connect this VPN in split mode: only these networks go through it, the rest of the traffic does not. Add the DNS domains below, or the VPN's DNS servers are not used.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             VStack(alignment: .leading, spacing: 4) {
                 Text("DNS domains resolved through this VPN (one per line)")

@@ -74,6 +74,7 @@ impl L2tpProfile {
             protocol: crate::ProtocolConfig::Ipsec(self.ipsec()),
             routes: None,
             full_tunnel: None,
+            split_routes: Vec::new(),
             dns_domains: Vec::new(),
             allow_route_overlap: false,
             via: Vec::new(),

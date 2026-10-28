@@ -195,6 +195,7 @@ fn convert(text: &str, base: &str, file: &str, existing: &[String]) -> anyhow::R
         protocol: ProtocolConfig::WireGuard(profile),
         routes: None,
         full_tunnel: None,
+        split_routes: Vec::new(),
         dns_domains: Vec::new(),
         allow_route_overlap: false,
         via: Vec::new(),

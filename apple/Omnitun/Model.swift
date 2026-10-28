@@ -25,6 +25,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var failures: [String: String] = [:]
     /// Latest reconnection attempt, by profile.
     @Published private(set) var retries: [String: Retry] = [:]
+    /// How each profile was last connected: tried again the same way.
+    private var lastOptions: [String: (direct: Bool, split: Bool)] = [:]
     /// Bumped when secrets change outside the editor (remembered at a
     /// connection, typed at an import, forgotten after a refusal).
     @Published private(set) var secretsChanged = 0
@@ -90,6 +92,13 @@ final class AppModel: ObservableObject {
     var hasProblem: Bool {
         if case .unavailable = service { return true }
         return !failures.isEmpty || sessions.values.contains { $0.state == .failed }
+    }
+
+    /// Connected in split mode: its split-mode networks, not all traffic.
+    func isSplit(_ id: String) -> Bool {
+        guard let session = sessions[id], !session.fullTunnel,
+              let networks = profile(id)?.splitRoutes, !networks.isEmpty else { return false }
+        return Set(session.routes).isSuperset(of: networks)
     }
 
     func isOn(_ id: String) -> Bool {
@@ -176,18 +185,27 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// `direct`: without the VPNs the profile is chained through.
-    func connect(_ id: String, direct: Bool = false) {
+    /// `direct`: without the VPNs the profile is chained through; `split`:
+    /// only its split-mode networks go through the VPN.
+    func connect(_ id: String, direct: Bool = false, split: Bool = false) {
         guard flows[id] == nil else { return }
         let others = exclusiveConflicts(id, direct: direct)
         guard others.isEmpty else {
-            askToRunAlone(id, direct: direct, others: others)
+            askToRunAlone(id, direct: direct, split: split, others: others)
             return
         }
         failures[id] = nil
-        let flow = ConnectionFlow(profile: id, direct: direct, model: self)
+        lastOptions[id] = (direct, split)
+        let flow = ConnectionFlow(profile: id, direct: direct, split: split, model: self)
         flows[id] = flow
         flow.start(client: client)
+    }
+
+    /// Connects `id` again the way it was last connected (directly, in
+    /// split mode).
+    func connectAgain(_ id: String) {
+        let options = lastOptions[id] ?? (false, false)
+        connect(id, direct: options.direct, split: options.split)
     }
 
     /// What keeps `id` from connecting: a company VPN (exclusive) is never
@@ -203,7 +221,7 @@ final class AppModel: ObservableObject {
 
     /// The option decided on 25/10/2026: ask, with a button that
     /// disconnects the others then connects `id`.
-    private func askToRunAlone(_ id: String, direct: Bool, others: [String]) {
+    private func askToRunAlone(_ id: String, direct: Bool, split: Bool, others: [String]) {
         let name = displayName(id)
         let list = others.map(displayName).formatted(.list(type: .and))
         let alert = NSAlert()
@@ -226,7 +244,7 @@ final class AppModel: ObservableObject {
             // The service's sessions follow by events: asking again now
             // could still see the others up.
             for other in others where sessions[other] != nil { sessions[other]?.state = .disconnected }
-            connect(id, direct: direct)
+            connect(id, direct: direct, split: split)
         }
     }
 
@@ -355,7 +373,7 @@ extension AppModel {
         case (.alertSecondButtonReturn, let otherId?):
             Task {
                 try? await client.disconnect(id: otherId)
-                connect(id)
+                connectAgain(id)
             }
         case (.alertSecondButtonReturn, nil), (.alertThirdButtonReturn, _):
             Windows.shared.showManage(model: self, profile: id)

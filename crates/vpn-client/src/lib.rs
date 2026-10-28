@@ -15,7 +15,7 @@ pub mod vpnprofile;
 
 pub use daemon::Daemon;
 pub use profiles::ProfileStore;
-pub use session::{Interaction, Notice, Trust, connect, connect_with};
+pub use session::{ConnectOptions, Interaction, Notice, Trust, connect, connect_with};
 
 /// Gateway-supplied text may carry terminal escape sequences, invisible
 /// or reordering characters, or pages of text.

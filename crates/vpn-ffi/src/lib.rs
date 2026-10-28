@@ -366,15 +366,23 @@ impl Client {
 
     /// Starts connecting `profile`. Prompts go to `delegate`, which answers
     /// through the returned `Connection`; `finished` is called once.
-    /// `direct`: without the VPNs the profile is chained through.
-    pub fn connect(&self, id: String, direct: bool, delegate: Arc<dyn ConnectionDelegate>) -> Arc<Connection> {
+    /// `direct`: without the VPNs the profile is chained through; `split`:
+    /// only the profile's split-mode networks go through the VPN.
+    pub fn connect(
+        &self,
+        id: String,
+        direct: bool,
+        split: bool,
+        delegate: Arc<dyn ConnectionDelegate>,
+    ) -> Arc<Connection> {
         let connection = Arc::new(Connection::default());
         let bridge = Bridge { connection: connection.clone(), delegate: delegate.clone() };
         let store = self.store.clone();
         let task = runtime().spawn(async move {
             let result = async {
                 let profile = store.find(&id)?;
-                vpn_client::connect_with(profile, &store, CLIENT, &bridge, direct).await
+                vpn_client::connect_with(profile, &store, CLIENT, &bridge, vpn_client::ConnectOptions { direct, split })
+                    .await
             }
             .await;
             delegate.finished(result.err().map(ClientError::from));
@@ -588,6 +596,7 @@ impl From<&vpn_core::Profile> for ProfileSummary {
             via: p.via.clone(),
             folder: p.folder.clone(),
             exclusive: p.exclusive,
+            split_routes: p.split_routes.iter().map(ToString::to_string).collect(),
         }
     }
 }

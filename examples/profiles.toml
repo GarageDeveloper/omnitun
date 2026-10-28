@@ -29,3 +29,16 @@ username = "bob"
 local_id = "fct-dialup"
 # Ignore the pushed traffic selectors and only route this network.
 routes = ["10.50.0.0/16"]
+
+# A gateway that takes all traffic, also offered in split mode: the menu's
+# "Connect in Split Mode" or `omnitunctl connect --split office` sends only
+# these networks through the VPN. dns_domains say which names its DNS
+# servers resolve then.
+[[profile]]
+name = "office"
+protocol = "l2tp"
+gateway = "vpn.example.com"
+username = "carol"
+full_tunnel = true
+split_routes = ["10.20.0.0/16", "192.168.30.0/24"]
+dns_domains = ["office.example"]

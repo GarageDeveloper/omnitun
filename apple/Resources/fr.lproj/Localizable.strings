@@ -186,6 +186,8 @@
 "Traffic" = "Trafic";
 "Trusted certificate fingerprints (SHA-256, one per line)" = "Empreintes de certificats de confiance (SHA-256, une par ligne)";
 "Use my own networks instead of the gateway's" = "Utiliser mes propres réseaux au lieu de ceux de la passerelle";
+"Networks in split mode (one per line)" = "Réseaux du mode split (un par ligne)";
+"The menu then also offers to connect this VPN in split mode: only these networks go through it, the rest of the traffic does not. Add the DNS domains below, or the VPN's DNS servers are not used." = "Le menu propose alors aussi de connecter ce VPN en mode split : seuls ces réseaux passent par lui, le reste du trafic non. Ajoutez les domaines DNS ci-dessous, sinon les serveurs DNS du VPN ne servent pas.";
 "User Name" = "Identifiant";
 "Without it, a VPN that would take traffic from another one is not connected." = "Sans cette option, un VPN qui prendrait le trafic d'un autre n'est pas connecté.";
 "Manage VPNs" = "Gérer les VPN";
@@ -366,6 +368,8 @@
 "Connected normally, this VPN goes through the first of these that is up, or brings up %@ first; its networks may overlap theirs. The menu also offers to connect it directly." = "Connecté normalement, ce VPN passe par le premier de ceux-ci qui est connecté, ou connecte d'abord %@ ; ses réseaux peuvent chevaucher les leurs. Le menu permet aussi de le connecter directement.";
 "Connect Directly, Without %@" = "Connecter directement, sans %@";
 "via %@" = "via %@";
+"Connect in Split Mode" = "Connecter en mode split";
+"split mode" = "mode split";
 "Move to Folder" = "Déplacer vers un dossier";
 "New Folder…" = "Nouveau dossier…";
 "New Folder" = "Nouveau dossier";
@@ -410,6 +414,7 @@
 "All traffic goes through this VPN" = "Tout le trafic passe par ce VPN";
 "Networks" = "Réseaux";
 "Name Resolution" = "Résolution de noms";
+"Split Mode" = "Mode split";
 "Names ending in .%@" = "Noms se terminant par .%@";
 
 /* Company VPN (exclusive) */
