@@ -67,6 +67,14 @@ enum Command {
         #[command(subcommand)]
         action: SecretAction,
     },
+    /// Copy a profile, with its saved secrets, under a new name ("<name>
+    /// copy" by default), listed after it.
+    Duplicate {
+        profile: String,
+        /// The copy's name; a number is added if its folder has it already.
+        #[arg(long)]
+        name: Option<String>,
+    },
     /// Write a profile as a .vpnprofile file to share (no secret, key or
     /// user name).
     Export {
@@ -270,6 +278,16 @@ async fn main() -> anyhow::Result<()> {
             profile.id = vpn_core::new_id();
             store.save(&profile)?;
             println!("{} added to {}", profile.name, store.path().display());
+        }
+        Command::Duplicate { profile, name } => {
+            let original = store.find(&profile)?;
+            let copy = store.duplicate(&original.id, name.as_deref())?;
+            println!("{}: copy of {}", vpn_client::profiles::path_of(&copy), vpn_client::profiles::path_of(&original));
+            match vpn_client::secrets::copy(&original, &copy) {
+                Ok(keys) if !keys.is_empty() => println!("  saved secrets copied: {}", keys.join(", ")),
+                Ok(_) => {}
+                Err(e) => eprintln!("  warning: the saved secrets were not copied: {e:#}"),
+            }
         }
         Command::Export { name, output } => {
             let text = vpn_client::vpnprofile::export(&store.find(&name)?)?;

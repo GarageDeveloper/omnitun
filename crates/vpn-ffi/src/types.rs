@@ -336,6 +336,14 @@ pub struct ProfileSummary {
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
+pub struct DuplicatedProfile {
+    /// The copy's id.
+    pub id: String,
+    /// Why its saved secrets were not copied, if they were not.
+    pub secrets_error: Option<String>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct ImportedProfile {
     pub name: String,
     /// Ready for `Client::add_profiles`.

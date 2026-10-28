@@ -331,6 +331,24 @@ final class ProfileEditing: ObservableObject {
     /// Renames the profile `id`, asked in a dialog. Unsaved edits are
     /// asked about first. Only the name changes: the id, the secrets, a
     /// running session and the chains stay.
+    /// Copies `id`, with its saved secrets, and opens the copy.
+    func duplicate(_ id: String) {
+        leave {
+            let name = self.model.profile(id)?.name ?? id
+            do {
+                let copy = try self.model.client.duplicateProfile(id: id, name: String(localized: "\(name) copy"))
+                self.model.reloadProfiles()
+                self.select(copy.id)
+                if let reason = copy.secretsError {
+                    Windows.shared.alert(String(localized: "The saved secrets of “\(name)” were not copied"),
+                                         String(localized: "Type them in the copy's editor. \(reason)"))
+                }
+            } catch {
+                Windows.shared.alert(String(localized: "Cannot duplicate “\(name)”"), describe(error))
+            }
+        }
+    }
+
     func rename(_ id: String) {
         leave {
             self.select(id)
@@ -419,6 +437,7 @@ struct ManageView: View {
                     Button("Rename Folder…") { editing.renameFolder(folder) }
                 } else if let id = ids.first {
                     Button("Rename…") { editing.rename(id) }
+                    Button("Duplicate") { editing.duplicate(id) }
                     Menu("Move to Folder") {
                         Button("None") { editing.move(id, to: nil) }
                         if !editing.folders.isEmpty {
