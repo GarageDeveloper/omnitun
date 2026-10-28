@@ -129,6 +129,9 @@ final class ConnectionFlow: ConnectionDelegate, @unchecked Sendable {
                 flow.current = id
                 flow.phase = .starting
                 flow.model?.flowReached(flow, profile: id)
+            case let .warning(message):
+                // Overlapping networks, DNS servers that no name goes to.
+                Notifier.shared.post(title: flow.currentName, body: message)
             case let .urlRefused(url):
                 Windows.shared.alert(
                     String(localized: "\(flow.currentName): login page refused"),
