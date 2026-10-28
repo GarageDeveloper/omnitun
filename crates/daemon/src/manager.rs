@@ -497,6 +497,9 @@ impl Runner {
         // Only the first attempt waits for the client that asked for it;
         // reconnections use remembered answers or an attached client.
         let attach_wait = if first && self.client.is_attached() { self.manager.attach_wait } else { Duration::ZERO };
+        // Resolved now, as the engine is about to: the answer may change
+        // before the check (a short TTL expiring during a login).
+        let resolved = resolve_servers(&self.profile).await.0;
         if let Err(e) = engine.start(&self.profile, attach_wait).await {
             return Outcome::Failed(e);
         }
@@ -509,7 +512,7 @@ impl Runner {
         };
         // The engine is untrusted: what it negotiated is checked here.
         let connected = match connected {
-            Ok(settings) => check_gateway(&self.profile, settings).await,
+            Ok(settings) => check_gateway(&self.profile, settings, &resolved).await,
             Err(e) => Err(e),
         };
         let settings = match connected.and_then(|s| apply_profile(&self.profile, s)) {
@@ -760,22 +763,44 @@ fn pushed_domain_acceptable(domain: &str) -> bool {
 }
 
 /// The gateway the engine reports gets a host route through the physical
-/// interface: it must be the profile's server, not any address the engine
-/// would like to take out of the tunnels.
-async fn check_gateway(profile: &Profile, settings: TunnelSettings) -> anyhow::Result<TunnelSettings> {
-    let (host, port) = profile.protocol.endpoint();
-    let addresses: Vec<IpAddr> = match host.parse::<IpAddr>() {
-        Ok(ip) => vec![ip],
-        Err(_) => tokio::net::lookup_host((host, port))
-            .await
-            .with_context(|| format!("cannot resolve {host} to check the gateway"))?
-            .map(|a| a.ip())
-            .collect(),
-    };
-    if !addresses.contains(&settings.gateway) {
-        bail!("the engine reported gateway {} which is not an address of {host}", settings.gateway);
+/// interface: it must be one of the profile's servers, not any address the
+/// engine would like to take out of the tunnels. `resolved`: the servers'
+/// addresses when the engine started; they are resolved again here, and
+/// either answer is accepted.
+async fn check_gateway(
+    profile: &Profile,
+    settings: TunnelSettings,
+    resolved: &[IpAddr],
+) -> anyhow::Result<TunnelSettings> {
+    if resolved.contains(&settings.gateway) {
+        return Ok(settings);
     }
-    Ok(settings)
+    let (addresses, error) = resolve_servers(profile).await;
+    if addresses.contains(&settings.gateway) {
+        return Ok(settings);
+    }
+    let hosts: Vec<&str> = profile.protocol.servers().into_iter().map(|(host, _)| host).collect();
+    match error {
+        Some(e) if addresses.is_empty() && resolved.is_empty() => {
+            Err(e.context(format!("cannot resolve {} to check the gateway", hosts.join(", "))))
+        }
+        _ => bail!("the engine reported gateway {} which is not an address of {}", settings.gateway, hosts.join(", ")),
+    }
+}
+
+/// The addresses of the profile's servers, and the last resolution error.
+async fn resolve_servers(profile: &Profile) -> (Vec<IpAddr>, Option<anyhow::Error>) {
+    let (mut addresses, mut error) = (Vec::new(), None);
+    for (host, port) in profile.protocol.servers() {
+        match host.parse::<IpAddr>() {
+            Ok(ip) => addresses.push(ip),
+            Err(_) => match tokio::net::lookup_host((host, port)).await {
+                Ok(found) => addresses.extend(found.map(|a| a.ip())),
+                Err(e) => error = Some(anyhow::Error::from(e).context(format!("cannot resolve {host}"))),
+            },
+        }
+    }
+    (addresses, error)
 }
 
 /// Creates (or checks) the directory of the prompt sockets: a real
@@ -1123,11 +1148,35 @@ mod tests {
     #[tokio::test]
     async fn the_gateway_must_be_the_profile_server() {
         let p = profile(serde_json::json!({ "host": "203.0.113.1" }));
-        assert!(check_gateway(&p, settings(&["10.0.0.0/8"], false, &[])).await.is_ok());
+        assert!(check_gateway(&p, settings(&["10.0.0.0/8"], false, &[]), &[]).await.is_ok());
         let mut s = settings(&["10.0.0.0/8"], false, &[]);
         s.gateway = IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3));
-        let err = check_gateway(&p, s).await.unwrap_err();
+        let err = check_gateway(&p, s.clone(), &[]).await.unwrap_err();
         assert!(err.to_string().contains("not an address of 203.0.113.1"), "{err}");
+
+        // What the servers resolved to when the engine started also counts
+        // (a DNS answer that changed during the login), nothing else.
+        let early = [IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3))];
+        assert!(check_gateway(&p, s.clone(), &early).await.is_ok());
+        let other = [IpAddr::V4(Ipv4Addr::new(10, 9, 9, 9))];
+        assert!(check_gateway(&p, s, &other).await.is_err());
+    }
+
+    /// An OpenVPN profile's engine moves to the next remote when one does
+    /// not answer: any of them is the gateway.
+    #[tokio::test]
+    async fn every_openvpn_remote_is_a_gateway() {
+        let p: Profile = serde_json::from_value(serde_json::json!({
+            "name": "ovpn",
+            "protocol": "openvpn",
+            "remotes": [{ "host": "198.51.100.1" }, { "host": "203.0.113.1" }],
+        }))
+        .unwrap();
+        assert!(check_gateway(&p, settings(&["10.0.0.0/8"], false, &[]), &[]).await.is_ok(), "second remote");
+        let mut s = settings(&["10.0.0.0/8"], false, &[]);
+        s.gateway = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let err = check_gateway(&p, s, &[]).await.unwrap_err();
+        assert!(err.to_string().contains("not an address of 198.51.100.1, 203.0.113.1"), "{err}");
     }
 
     #[test]
