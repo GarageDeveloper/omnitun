@@ -165,7 +165,10 @@ in Docker: strongSwan 5.9 (IKEv1, IKEv2), OpenVPN 2.6, strongSwan + xl2tpd
 
 ## Limitations
 
-- No IPv6 inside the tunnels.
+- No IPv6 inside the tunnels. A full tunnel blocks IPv6 (reject routes for
+  `::/1` and `8000::/1` on the tunnel interface), so applications fall back
+  to IPv4 instead of leaving outside the tunnel; a split tunnel leaves IPv6
+  on the local network.
 - IKEv1: pre-shared keys only (no certificates). Aggressive mode exposes
   the group PSK to an offline dictionary attack: it must be long and
   random.
