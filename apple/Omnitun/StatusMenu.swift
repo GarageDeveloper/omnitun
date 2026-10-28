@@ -11,6 +11,13 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
     private var rows: [String: VPNRow] = [:]
+    /// Folder submenus, with the VPNs they hold, to count them as they connect.
+    private var folders: [(item: NSMenuItem, name: String, ids: [String])] = []
+    /// The other ways to connect a VPN ("Connect Directly"…), and "Disconnect
+    /// All": enabled by the sessions, which change while the menu is open.
+    private var alternatives: [(item: NSMenuItem, id: String)] = []
+    private var disconnectAllItem: NSMenuItem?
+    private var unavailableItem: NSMenuItem?
     private var header: NSMenuItem?
     private var isOpen = false
     private var changes: AnyCancellable?
@@ -38,9 +45,33 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     private func refresh() {
         updateIcon()
         guard isOpen else { return }
-        for (id, row) in rows { row.update(from: model, id: id) }
+        for (id, row) in rows {
+            row.update(from: model, id: id)
+            row.setEnabled(serviceAvailable)
+        }
+        for (item, id) in alternatives { item.isEnabled = serviceAvailable && !model.isOn(id) }
+        disconnectAllItem?.isEnabled = canDisconnectAll
+        showServiceState()
+        for folder in folders { label(folder.item, name: folder.name, ids: folder.ids) }
         header?.attributedTitle = headerTitle()
     }
+
+    /// "VPN service unavailable…" shown, with the reason, only while it is.
+    private func showServiceState() {
+        guard let item = unavailableItem else { return }
+        if case let .unavailable(reason) = model.service {
+            item.isHidden = false
+            item.toolTip = reason
+        } else {
+            item.isHidden = true
+        }
+    }
+
+    private var serviceAvailable: Bool {
+        if case .unavailable = model.service { false } else { true }
+    }
+
+    private var canDisconnectAll: Bool { !model.sessions.isEmpty || !model.flows.isEmpty }
 
     private func updateIcon() {
         let count = model.connectedCount
@@ -124,6 +155,8 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     private func rebuild() {
         menu.removeAllItems()
         rows = [:]
+        folders = []
+        alternatives = []
 
         let header = NSMenuItem()
         header.attributedTitle = headerTitle()
@@ -131,12 +164,13 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         menu.addItem(header)
         self.header = header
 
-        if case let .unavailable(reason) = model.service {
-            let item = action(String(localized: "VPN service unavailable…"), #selector(openWelcome))
-            item.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: nil)
-            item.toolTip = reason
-            menu.addItem(item)
-        }
+        // Always there, hidden while the service runs: it can stop while the
+        // menu is open.
+        let unavailable = action(String(localized: "VPN service unavailable…"), #selector(openWelcome),
+                                 symbol: "exclamationmark.triangle.fill")
+        menu.addItem(unavailable)
+        unavailableItem = unavailable
+        showServiceState()
         if let error = model.profilesError {
             let item = NSMenuItem(title: String(localized: "Unreadable profiles: \(error)"), action: nil, keyEquivalent: "")
             item.isEnabled = false
@@ -149,24 +183,27 @@ final class StatusMenu: NSObject, NSMenuDelegate {
             let empty = NSMenuItem(title: String(localized: "No VPN configured"), action: nil, keyEquivalent: "")
             empty.isEnabled = false
             menu.addItem(empty)
-            menu.addItem(action(String(localized: "Add Your VPNs…"), #selector(openSetup)))
+            menu.addItem(action(String(localized: "Add Your VPNs…"), #selector(openSetup), symbol: "plus"))
         }
         fill(menu, folder: nil, ids: ids)
 
         menu.addItem(.separator())
-        let all = action(String(localized: "Disconnect All"), #selector(disconnectAll), key: "d")
+        let all = action(String(localized: "Disconnect All"), #selector(disconnectAll), key: "d", symbol: "xmark.circle")
         all.keyEquivalentModifierMask = [.command, .option]
-        all.isEnabled = !model.sessions.isEmpty || !model.flows.isEmpty
+        all.isEnabled = canDisconnectAll
         menu.addItem(all)
+        disconnectAllItem = all
 
         menu.addItem(.separator())
-        menu.addItem(action(String(localized: "Manage VPNs…"), #selector(openProfiles), key: ","))
-        menu.addItem(action(String(localized: "Settings…"), #selector(openSettings)))
+        menu.addItem(action(String(localized: "Manage VPNs…"), #selector(openProfiles), key: ",", symbol: "list.bullet"))
+        menu.addItem(action(String(localized: "Settings…"), #selector(openSettings), symbol: "gearshape"))
+        menu.addItem(action(String(localized: "About \(brand.product)"), #selector(openAbout), symbol: "info.circle"))
         if Updates.shared.available {
-            menu.addItem(action(String(localized: "Check for Updates…"), #selector(checkForUpdates)))
+            menu.addItem(action(String(localized: "Check for Updates…"), #selector(checkForUpdates),
+                                symbol: "arrow.triangle.2.circlepath"))
         }
         menu.addItem(.separator())
-        menu.addItem(action(String(localized: "Quit \(brand.product)"), #selector(quit), key: "q"))
+        menu.addItem(action(String(localized: "Quit \(brand.product)"), #selector(quit), key: "q", symbol: "power"))
     }
 
     /// The subfolders of `folder` as submenus, then its VPNs; VPNs without
@@ -179,10 +216,9 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         for sub in subfolders.sorted(by: { $0.localizedStandardCompare($1) == .orderedAscending }) {
             let path = prefix + sub
             let inside = ids.filter { folderOf($0).map { $0 == path || $0.hasPrefix(path + "/") } ?? false }
-            let up = inside.filter { model.sessions[$0]?.state == .connected }.count
-            let item = NSMenuItem(title: up == 0 ? sub : String(localized: "\(sub) · \(up) connected"),
-                                  action: nil, keyEquivalent: "")
-            item.image = NSImage(systemSymbolName: up == 0 ? "folder" : "folder.fill", accessibilityDescription: nil)
+            let item = NSMenuItem(title: sub, action: nil, keyEquivalent: "")
+            label(item, name: sub, ids: inside)
+            folders.append((item, sub, inside))
             let submenu = NSMenu()
             submenu.autoenablesItems = false
             fill(submenu, folder: path, ids: ids)
@@ -194,11 +230,17 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         }
     }
 
+    /// A folder's title and icon: how many of its VPNs are connected.
+    private func label(_ item: NSMenuItem, name: String, ids: [String]) {
+        let up = ids.filter { model.sessions[$0]?.state == .connected }.count
+        item.title = up == 0 ? name : String(localized: "\(name) · \(up) connected")
+        item.image = NSImage(systemSymbolName: up == 0 ? "folder" : "folder.fill", accessibilityDescription: nil)
+    }
+
     private func addRow(_ id: String, to target: NSMenu) {
-        let available: Bool = if case .unavailable = model.service { false } else { true }
         let row = VPNRow { [weak self] on in self?.model.toggle(id, on: on) }
         row.update(from: model, id: id)
-        row.setEnabled(available)
+        row.setEnabled(serviceAvailable)
         let item = NSMenuItem()
         item.view = row
         target.addItem(item)
@@ -208,26 +250,32 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         if let profile = model.profile(id), !profile.via.isEmpty {
             let through = profile.via.map(model.displayName).joined(separator: " / ")
             let direct = action(String(localized: "Connect Directly, Without \(through)"),
-                                #selector(connectDirectly(_:)))
+                                #selector(connectDirectly(_:)), symbol: "arrow.turn.down.right")
             direct.representedObject = id
             direct.indentationLevel = 2
-            direct.isEnabled = available && !model.isOn(id)
+            direct.isEnabled = serviceAvailable && !model.isOn(id)
             target.addItem(direct)
+            alternatives.append((direct, id))
         }
         // Always listed too, for the same reason.
         if let profile = model.profile(id), !profile.splitRoutes.isEmpty {
-            let split = action(String(localized: "Connect in Split Mode"), #selector(connectSplit(_:)))
+            let split = action(String(localized: "Connect in Split Mode"), #selector(connectSplit(_:)),
+                               symbol: "arrow.triangle.branch")
             split.toolTip = profile.splitRoutes.joined(separator: ", ")
             split.representedObject = id
             split.indentationLevel = 2
-            split.isEnabled = available && !model.isOn(id)
+            split.isEnabled = serviceAvailable && !model.isOn(id)
             target.addItem(split)
+            alternatives.append((split, id))
         }
     }
 
-    private func action(_ title: String, _ selector: Selector, key: String = "") -> NSMenuItem {
+    /// `symbol`: every action has an icon, so that the menu reads as one
+    /// column (macOS gives some standard entries an icon of its own).
+    private func action(_ title: String, _ selector: Selector, key: String = "", symbol: String) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: selector, keyEquivalent: key)
         item.target = self
+        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
         return item
     }
 
@@ -245,6 +293,7 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     @objc private func openProfiles() { afterMenu { Windows.shared.showManage(model: $0) } }
     @objc private func checkForUpdates() { afterMenu { _ in Updates.shared.checkNow() } }
     @objc private func openSettings() { afterMenu { Windows.shared.showSettings(model: $0) } }
+    @objc private func openAbout() { afterMenu { Windows.shared.showSettings(model: $0, tab: .about) } }
 
     /// Runs `open` once the menu has closed: a window shown while the menu
     /// still tracks the mouse may fail to activate the app.
@@ -262,7 +311,7 @@ final class VPNRow: NSView {
     private let dot = NSImageView()
     private let title = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
-    private let toggle = NSSwitch()
+    private let toggle = MenuSwitch()
     private let onToggle: (Bool) -> Void
 
     init(onToggle: @escaping (Bool) -> Void) {
@@ -272,9 +321,7 @@ final class VPNRow: NSView {
         detail.font = .menuFont(ofSize: NSFont.smallSystemFontSize)
         detail.textColor = .secondaryLabelColor
         detail.lineBreakMode = .byTruncatingTail
-        toggle.controlSize = .small
-        toggle.target = self
-        toggle.action = #selector(switched)
+        toggle.onPress = { [weak self] in self?.flip() }
         let text = NSStackView(views: [title, detail])
         text.orientation = .vertical
         text.alignment = .leading
@@ -298,13 +345,22 @@ final class VPNRow: NSView {
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    @objc private func switched() { onToggle(toggle.state == .on) }
-
-    /// Clicking anywhere on the row flips the switch.
-    override func mouseUp(with event: NSEvent) {
+    private func flip() {
         guard toggle.isEnabled else { return }
-        toggle.state = toggle.state == .on ? .off : .on
-        switched()
+        toggle.isOn.toggle()
+        onToggle(toggle.isOn)
+    }
+
+    /// Clicking anywhere on the row, the switch included, flips the switch;
+    /// so does releasing on it after a drag from the menu bar icon, as for
+    /// any menu entry.
+    override func mouseUp(with event: NSEvent) { flip() }
+
+    /// Clicks go to the row, but VoiceOver's pointer finds the switch.
+    override func accessibilityHitTest(_ point: NSPoint) -> Any? {
+        guard let window else { return super.accessibilityHitTest(point) }
+        let local = convert(window.convertPoint(fromScreen: point), from: nil)
+        return toggle.frame.contains(local) ? toggle : super.accessibilityHitTest(point)
     }
 
     func setEnabled(_ enabled: Bool) { toggle.isEnabled = enabled }
@@ -315,7 +371,8 @@ final class VPNRow: NSView {
         let name = model.displayName(id)
         title.stringValue = name
         detail.stringValue = text
-        toggle.state = model.isOn(id) ? .on : .off
+        toggle.isOn = model.isOn(id)
+        toggle.setAccessibilityLabel(name)
         dot.image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: 8, weight: .regular))
         dot.contentTintColor = color
@@ -359,6 +416,60 @@ final class VPNRow: NSView {
             return ("\(kind) · \(String(localized: "via \(through)"))", .tertiaryLabelColor)
         }
         return ("\(kind) · \(profile.host)", .tertiaryLabelColor)
+    }
+}
+
+/// The switch of a VPN row. An NSSwitch in the menu of an app that is not
+/// frontmost (always the case for a menu bar app) is drawn grey when on,
+/// in a shade that depends on how its state was last set, and blue only
+/// right after a click: this one draws itself, in the accent colour when on.
+/// It takes no clicks: the row flips it.
+final class MenuSwitch: NSView {
+    var isOn = false {
+        didSet {
+            guard isOn != oldValue else { return }
+            needsDisplay = true
+            NSAccessibility.post(element: self, notification: .valueChanged)
+        }
+    }
+    var isEnabled = true {
+        didSet { alphaValue = isEnabled ? 1 : 0.5 }
+    }
+    /// VoiceOver's press.
+    var onPress: (() -> Void)?
+
+    override var intrinsicContentSize: NSSize { NSSize(width: 28, height: 16) }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let track = NSBezierPath(roundedRect: bounds, xRadius: bounds.height / 2, yRadius: bounds.height / 2)
+        (isOn ? NSColor.controlAccentColor : NSColor.quaternaryLabelColor).setFill()
+        track.fill()
+        let inset: CGFloat = 1.5
+        let side = bounds.height - 2 * inset
+        let x = isOn ? bounds.maxX - inset - side : bounds.minX + inset
+        let knob = NSBezierPath(ovalIn: NSRect(x: x, y: bounds.minY + inset, width: side, height: side))
+        NSGraphicsContext.saveGraphicsState()
+        let shadow = NSShadow()
+        shadow.shadowColor = .black.withAlphaComponent(0.3)
+        shadow.shadowBlurRadius = 1
+        shadow.shadowOffset = NSSize(width: 0, height: -0.5)
+        shadow.set()
+        NSColor.white.setFill()
+        knob.fill()
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .checkBox }
+    override func accessibilitySubrole() -> NSAccessibility.Subrole? { .switch }
+    override func accessibilityValue() -> Any? { NSNumber(value: isOn) }
+    override func isAccessibilityEnabled() -> Bool { isEnabled }
+    override func accessibilityPerformPress() -> Bool {
+        guard isEnabled, let onPress else { return false }
+        onPress()
+        return true
     }
 }
 

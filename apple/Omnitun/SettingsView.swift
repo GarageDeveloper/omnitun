@@ -7,11 +7,16 @@ import VPNClientCore
 struct SettingsView: View {
     enum Tab: Hashable { case general, service, about }
 
+    /// The tab shown; set from outside to switch an open window to it.
+    final class Selection: ObservableObject {
+        @Published var tab: Tab = .general
+    }
+
     @ObservedObject var model: AppModel
-    @State var tab: Tab
+    @ObservedObject var selection: Selection
 
     var body: some View {
-        TabView(selection: $tab) {
+        TabView(selection: $selection.tab) {
             GeneralSettings().tabItem { Label("General", systemImage: "gearshape") }.tag(Tab.general)
             ServiceSettings(model: model).tabItem { Label("Service", systemImage: "server.rack") }.tag(Tab.service)
             AboutView().tabItem { Label("About", systemImage: "info.circle") }.tag(Tab.about)

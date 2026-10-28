@@ -12,6 +12,7 @@
 "Import from FortiClient…" = "Importer depuis FortiClient…";
 "Settings…" = "Réglages…";
 "Quit %@" = "Quitter %@";
+"About %@" = "À propos de %@";
 "Connecting…" = "Connexion…";
 "Reconnecting (attempt %u/%u)…" = "Reconnexion (essai %u/%u)…";
 "Reconnecting…" = "Reconnexion…";
