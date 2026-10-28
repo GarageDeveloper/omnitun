@@ -113,8 +113,9 @@ if [ -n "${SIGN_ID:-}" ]; then
   codesign $sign "$SIGN_ID" "$app"
 else
   echo "   (ad hoc: set SIGN_ID to sign with Developer ID)"
-  # The hardened runtime all the same: no code injected into the app,
-  # which holds the Keychain's access and the prompt sockets.
+  # The hardened runtime all the same: no code injected into the app
+  # through the environment (DYLD_*), as it holds the Keychain's access and
+  # the prompt sockets. Library validation is lifted for the app below.
   sign="--force --options runtime --sign -"
   # shellcheck disable=SC2086
   codesign $sign --identifier "$RDNS.daemon" "$helpers/$DAEMON"
