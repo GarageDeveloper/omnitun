@@ -31,6 +31,9 @@ swift build --package-path apple     # the app alone
 apple/package.sh                     # apple/dist/Omnitun.app and Omnitun-<version>.pkg
 ```
 
+Run `build-bindings.sh` again after any change to the public API of
+`vpn-ffi` or `vpn-client`: until then the Swift side does not see it.
+
 `package.sh` reads the names in `crates/vpn-core/src/brand.rs` and needs
 `cargo-about` for the third-party notices it puts in the app
 (`cargo install --locked cargo-about`). Signing: `SIGN_ID`, `INSTALLER_ID`
