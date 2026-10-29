@@ -13,7 +13,16 @@ it:
    (gnome-keyring), connects through the service, pings the server's
    tunnel address (10.9.0.1), checks the split DNS domain in
    systemd-resolved, and disconnects;
-4. checks that the server saw a handshake and that the service still runs.
+4. checks that the server saw a handshake;
+5. routes by domain (#37), with a resolver in place on this machine
+   (dnsmasq on 127.0.0.2, as the system's) and the tunnel's in the
+   server's namespace: a split tunnel including `*.saas.test` routes its
+   address through the tunnel only once resolved, reaches it, keeps the
+   tunnel's domain on its servers and gives the routed name no IPv6; with
+   the DNS proxy killed, the DNS is back as without it; a full tunnel
+   excluding `*.out.test` sends that address out through `eth0` once
+   resolved (journaled), the rest through the tunnel; every route by
+   domain is gone after disconnecting, and the service still runs.
 
 It tests the unit's hardening against a real connection: the engines run
 under the same restrictions as the daemon. `BINARIES=target/release

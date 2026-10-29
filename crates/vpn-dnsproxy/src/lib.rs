@@ -25,7 +25,7 @@ use hickory_proto::rr::{Name, RData, RecordType};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UdpSocket, UnixStream};
 use tokio::sync::{Semaphore, mpsc, oneshot};
-use vpn_core::dns_ipc::{FromProxy, MAX_ADDRESSES, MAX_LINE, ProxyConfig, ToProxy};
+use vpn_core::dns_ipc::{FromProxy, MAX_ADDRESSES, MAX_LINE, ProxyConfig, ToProxy, Upstream};
 
 /// How long one server may take to answer; the next one is tried then.
 const SERVER_TIMEOUT: Duration = Duration::from_secs(2);
@@ -98,9 +98,9 @@ impl<R: Router> Proxy<R> {
         Some(answer)
     }
 
-    /// The servers for `name`: those of the most specific domain it is
+    /// The resolvers for `name`: those of the most specific domain it is
     /// under, else those without domains.
-    fn servers_for(&self, name: &str) -> &[SocketAddr] {
+    fn upstream_for(&self, name: &str) -> Option<&Upstream> {
         let under = |domain: &String| vpn_core::destination::is_under(name, domain);
         let specific = self
             .config
@@ -109,14 +109,17 @@ impl<R: Router> Proxy<R> {
             .filter_map(|u| u.domains.iter().filter(|d| under(d)).map(|d| d.len()).max().map(|len| (len, u)))
             .max_by_key(|(len, _)| *len)
             .map(|(_, u)| u);
-        specific.or_else(|| self.config.upstreams.iter().find(|u| u.domains.is_empty())).map_or(&[], |u| &u.servers)
+        specific.or_else(|| self.config.upstreams.iter().find(|u| u.domains.is_empty()))
     }
 
     async fn forward(&self, query: &[u8], request: &Message, name: &str, tcp: bool) -> Option<(Vec<u8>, Message)> {
+        let upstream = self.upstream_for(name)?;
         let id: u16 = rand::random();
         let mut relayed = query.to_vec();
         relayed[..2].copy_from_slice(&id.to_be_bytes());
-        for &server in self.servers_for(name) {
+        // A negative answer of an independent server, while the others are asked.
+        let mut negative = None;
+        for &server in &upstream.servers {
             let exchange = async {
                 if tcp { exchange_tcp(server, &relayed).await } else { exchange_udp(server, &relayed, id).await }
             };
@@ -140,9 +143,14 @@ impl<R: Router> Proxy<R> {
                 continue;
             }
             answer[..2].copy_from_slice(&request.metadata.id.to_be_bytes());
-            return Some((answer, response));
+            let positive = response.metadata.response_code == ResponseCode::NoError
+                && (!response.answers.is_empty() || !upstream.independent);
+            if positive || !upstream.independent {
+                return Some((answer, response));
+            }
+            negative.get_or_insert((answer, response));
         }
-        None
+        negative
     }
 
     /// Has the daemon route the addresses `name` resolved to, following its

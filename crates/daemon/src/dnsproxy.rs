@@ -72,15 +72,19 @@ pub fn plan(profile: &Profile, settings: &TunnelSettings, previous: &[SocketAddr
     }
     let mut upstreams = Vec::new();
     if !tunnel_servers.is_empty() && !tunnel_domains.is_empty() {
-        upstreams.push(Upstream { domains: tunnel_domains, servers: tunnel_servers.clone() });
+        upstreams.push(Upstream { domains: tunnel_domains, servers: tunnel_servers.clone(), independent: false });
     }
     if !outside.is_empty() {
-        upstreams.push(Upstream { domains: outside, servers: previous.to_vec() });
+        upstreams.push(Upstream { domains: outside, servers: previous.to_vec(), independent: true });
     }
     // The rest: what a full tunnel resolves through, else what was there.
-    let rest = if settings.full_tunnel && !tunnel_servers.is_empty() { tunnel_servers } else { previous.to_vec() };
-    if !rest.is_empty() {
-        upstreams.push(Upstream { domains: Vec::new(), servers: rest });
+    let rest = if settings.full_tunnel && !tunnel_servers.is_empty() {
+        Upstream { domains: Vec::new(), servers: tunnel_servers, independent: false }
+    } else {
+        Upstream { domains: Vec::new(), servers: previous.to_vec(), independent: true }
+    };
+    if !rest.servers.is_empty() {
+        upstreams.push(rest);
     }
     Ok(Some(Plan { config: ProxyConfig { routed, upstreams }, domains }))
 }
@@ -252,9 +256,13 @@ mod tests {
         assert_eq!(
             plan.config.upstreams,
             [
-                Upstream { domains: vec!["corp.example".into()], servers: vec![tunnel] },
-                Upstream { domains: vec!["crm.example".into(), "saas.example".into()], servers: previous() },
-                Upstream { domains: vec![], servers: previous() },
+                Upstream { domains: vec!["corp.example".into()], servers: vec![tunnel], independent: false },
+                Upstream {
+                    domains: vec!["crm.example".into(), "saas.example".into()],
+                    servers: previous(),
+                    independent: true
+                },
+                Upstream { domains: vec![], servers: previous(), independent: true },
             ]
         );
         assert!(plan.routes("eu.saas.example") && plan.routes("crm.example"));
@@ -272,8 +280,12 @@ mod tests {
         assert_eq!(
             plan.config.upstreams,
             [
-                Upstream { domains: vec!["teams.microsoft.com".into(), "zoom.us".into()], servers: previous() },
-                Upstream { domains: vec![], servers: vec![tunnel] },
+                Upstream {
+                    domains: vec!["teams.microsoft.com".into(), "zoom.us".into()],
+                    servers: previous(),
+                    independent: true
+                },
+                Upstream { domains: vec![], servers: vec![tunnel], independent: false },
             ]
         );
         assert!(plan.routes("eu01.zoom.us") && !plan.routes("intranet.corp.example"));

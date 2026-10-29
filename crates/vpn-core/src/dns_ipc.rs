@@ -33,6 +33,12 @@ pub struct Upstream {
     pub domains: Vec<String>,
     /// Tried in order.
     pub servers: Vec<SocketAddr>,
+    /// The servers do not share their zones (the resolvers in place, of
+    /// several networks): a negative answer of one is not the last word,
+    /// the next ones are asked. Otherwise only a server that does not
+    /// answer is skipped.
+    #[serde(default)]
+    pub independent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

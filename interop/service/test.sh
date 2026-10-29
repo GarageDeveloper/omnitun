@@ -70,5 +70,89 @@ exec dbus-run-session -- sh -eu -c '
 '
 ALICE
 ip netns exec server wg show wg0 latest-handshakes | awk '$2 != 0 {print "handshake seen by the server"}' | grep .
+
+step "routes by domain (#37)"
+# Each check stops the test when it fails.
+expect() {
+    if sh -c "$2"; then echo "$1"; else echo "FAILED: $1"; exit 1; fi
+}
+# The resolver in place before the VPN, on this machine: it knows the
+# SaaS names and those to keep outside a full tunnel.
+dnsmasq --listen-address=127.0.0.2 --bind-interfaces --no-resolv --no-hosts --pid-file=/run/dnsmasq-before.pid \
+    --address=/saas.test/198.51.100.10 --address=/out.test/203.0.113.50 --address=/corp.test/192.0.2.99
+resolvectl dns eth0 127.0.0.2
+expect "resolver in place: app.saas.test" 'resolvectl query --cache=no app.saas.test | grep -q 198.51.100.10'
+# The tunnel's DNS server, in the server's namespace; the SaaS address
+# answers there only, so it is reached through the tunnel or not at all.
+ip -n server address add 10.9.0.53/32 dev lo
+ip -n server address add 198.51.100.10/32 dev lo
+ip netns exec server dnsmasq --listen-address=10.9.0.53 --bind-interfaces --no-resolv --no-hosts \
+    --pid-file=/run/dnsmasq-tunnel.pid --address=/corp.test/10.9.0.80
+cat >> /home/alice/.config/omnitun/profiles.toml <<TOML
+
+[[profile]]
+name = "wg-saas"
+protocol = "wireguard"
+endpoint = "$me"
+public_key = "$(echo "$server_key" | wg pubkey)"
+addresses = ["10.9.0.2/24"]
+allowed_ips = ["0.0.0.0/0"]
+dns_servers = ["10.9.0.53"]
+dns_search = ["corp.test"]
+routes = ["10.9.0.0/24", { domain = "*.saas.test", note = "SaaS" }]
+
+[[profile]]
+name = "wg-full"
+protocol = "wireguard"
+endpoint = "$me"
+public_key = "$(echo "$server_key" | wg pubkey)"
+addresses = ["10.9.0.2/24"]
+allowed_ips = ["0.0.0.0/0"]
+dns_servers = ["10.9.0.53"]
+full_tunnel = true
+excluded_domains = [{ domain = "*.out.test", note = "Video" }]
+TOML
+chown alice:alice /home/alice/.config/omnitun/profiles.toml
+# Commands as alice, her keyring unlocked; from a file, as sudo -i would
+# expand them once more.
+as_alice() {
+    printf '%s\n' "printf test | gnome-keyring-daemon --unlock --components=secrets >/dev/null" "$1" > /tmp/as-alice.sh
+    sudo -u alice -i env XDG_RUNTIME_DIR=/tmp/alice-runtime dbus-run-session -- sh -eu /tmp/as-alice.sh
+}
+tun_name() { ip -o link show type tun | awk -F': ' '{print $2}' | head -1; }
+as_alice 'for p in wg-saas wg-full; do script -qec "omnitunctl secret set $p --key private_key" /dev/null < client.key >/dev/null; done'
+
+echo "-- included through a split tunnel"
+expect "no route before connecting" '! ip route get 198.51.100.10 | grep -q tun'
+as_alice 'omnitunctl connect wg-saas'
+export tun=$(tun_name)
+expect "no route before resolving" '! ip route get 198.51.100.10 | grep -q "dev $tun"'
+resolvectl query --cache=no eu.app.saas.test | grep -q 198.51.100.10
+expect "routed through $tun once resolved" 'ip route get 198.51.100.10 | grep -q "dev $tun"'
+expect "reached through the tunnel" 'ping -c 2 -W 2 198.51.100.10 >/dev/null'
+as_alice 'omnitunctl status' | grep "by domain"
+expect "the tunnel's domain still on its servers" 'resolvectl query --cache=no intranet.corp.test | grep -q 10.9.0.80'
+expect "no IPv6 for a routed name" '! resolvectl query --cache=no -t AAAA app.saas.test 2>&1 | grep -q "2001:"'
+echo "-- the proxy fails: the DNS as without it"
+pkill -f -- "--dns-proxy"
+sleep 1
+expect "the tunnel's resolver back on $tun" 'resolvectl dns "$tun" | grep -q 10.9.0.53'
+expect "DNS works without the proxy" 'resolvectl query --cache=no intranet.corp.test | grep -q 10.9.0.80'
+as_alice 'omnitunctl disconnect --all'
+expect "route by domain removed at disconnection" '! ip route show | grep -q 198.51.100.10'
+
+echo "-- excluded from a full tunnel"
+as_alice 'omnitunctl connect wg-full'
+export tun=$(tun_name)
+expect "inside the full tunnel before resolving" 'ip route get 203.0.113.50 | grep -q "dev $tun"'
+resolvectl query --cache=no meet.out.test | grep -q 203.0.113.50
+expect "kept outside once resolved" 'ip route get 203.0.113.50 | grep -q "dev eth0"'
+expect "the rest still through the tunnel" 'ip route get 203.0.113.51 | grep -q "dev $tun"'
+expect "other names through the tunnel's DNS" 'resolvectl query --cache=no intranet.corp.test | grep -q 10.9.0.80'
+as_alice 'omnitunctl status' | grep "by domain"
+expect "the exclusion journaled" 'grep -q 203.0.113.50 /run/omnitund.routes'
+as_alice 'omnitunctl disconnect --all'
+expect "exclusion removed at disconnection" '! ip route show | grep -q 203.0.113.50'
+expect "route journal empty" '[ ! -s /run/omnitund.routes ]'
 systemctl is-active omnitund
 echo "PASSED"

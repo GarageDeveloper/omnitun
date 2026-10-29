@@ -6,7 +6,6 @@ use std::sync::atomic::AtomicUsize;
 use hickory_proto::op::Query;
 use hickory_proto::rr::Record;
 use hickory_proto::rr::rdata::{A, AAAA, CNAME};
-use vpn_core::dns_ipc::Upstream;
 
 use super::*;
 
@@ -19,6 +18,8 @@ enum Behaviour {
     Forging,
     /// Truncated over UDP, whole over TCP.
     Truncating,
+    /// No such name, for any name: a resolver of another network.
+    Unknown,
 }
 
 /// A resolver on loopback (UDP and TCP on one port): `*.saas.example` is a
@@ -72,7 +73,11 @@ async fn upstream(behaviour: Behaviour) -> Upstream1 {
             count.fetch_add(1, Ordering::SeqCst);
             let request = Message::from_vec(&buf[..len]).unwrap();
             let truncated = matches!(behaviour, Behaviour::Truncating);
-            let response = answer_for(&request, truncated);
+            let mut response = answer_for(&request, truncated);
+            if matches!(behaviour, Behaviour::Unknown) {
+                response.answers.clear();
+                response.metadata.response_code = ResponseCode::NXDomain;
+            }
             match behaviour {
                 Behaviour::Silent => continue,
                 Behaviour::Forging => {
@@ -123,7 +128,7 @@ impl Router for FakeRouter {
 fn config(servers: &[SocketAddr]) -> ProxyConfig {
     ProxyConfig {
         routed: vec!["*.saas.example".parse().unwrap()],
-        upstreams: vec![Upstream { domains: vec![], servers: servers.to_vec() }],
+        upstreams: vec![Upstream { domains: vec![], servers: servers.to_vec(), independent: false }],
     }
 }
 
@@ -192,9 +197,9 @@ async fn the_most_specific_resolver_answers() {
     let config = ProxyConfig {
         routed: vec![],
         upstreams: vec![
-            Upstream { domains: vec![], servers: vec![public.addr] },
-            Upstream { domains: vec!["example".into()], servers: vec![public.addr] },
-            Upstream { domains: vec!["corp.example.".into()], servers: vec![corp.addr] },
+            Upstream { domains: vec![], servers: vec![public.addr], independent: false },
+            Upstream { domains: vec!["example".into()], servers: vec![public.addr], independent: false },
+            Upstream { domains: vec!["corp.example.".into()], servers: vec![corp.addr], independent: false },
         ],
     };
     let proxy = Proxy::new(config, FakeRouter::default(), &[]).unwrap();
@@ -214,6 +219,32 @@ async fn a_silent_resolver_is_skipped() {
     let proxy = Proxy::new(config(&[silent.addr]), FakeRouter::default(), &[]).unwrap();
     let answer = parsed(proxy.answer(&query("www.example.org.", RecordType::A), false).await);
     assert_eq!(answer.metadata.response_code, ResponseCode::ServFail, "none answered");
+}
+
+/// The resolvers in place belong to several networks: one not knowing a
+/// name does not stop the others; replicas of one zone do.
+#[tokio::test]
+async fn independent_resolvers_are_all_asked() {
+    let (unknown, normal) = (upstream(Behaviour::Unknown).await, upstream(Behaviour::Normal).await);
+    let mut config = config(&[unknown.addr, normal.addr]);
+    let proxy = Proxy::new(config.clone(), FakeRouter::default(), &[]).unwrap();
+    let answer = parsed(proxy.answer(&query("www.example.org.", RecordType::A), false).await);
+    assert_eq!(answer.metadata.response_code, ResponseCode::NXDomain, "replicas: the first answer");
+    config.upstreams[0].independent = true;
+    let proxy = Proxy::new(config, FakeRouter::default(), &[]).unwrap();
+    let answer = parsed(proxy.answer(&query("www.example.org.", RecordType::A), false).await);
+    assert_eq!(answer.answers.len(), 1, "independent: the one that knows");
+    let proxy = Proxy::new(
+        ProxyConfig {
+            routed: vec![],
+            upstreams: vec![Upstream { domains: vec![], servers: vec![unknown.addr], independent: true }],
+        },
+        FakeRouter::default(),
+        &[],
+    )
+    .unwrap();
+    let answer = parsed(proxy.answer(&query("www.example.org.", RecordType::A), false).await);
+    assert_eq!(answer.metadata.response_code, ResponseCode::NXDomain, "none knows: no such name");
 }
 
 #[tokio::test]
@@ -260,7 +291,10 @@ async fn garbage_and_other_messages() {
 fn never_its_own_upstream() {
     let local: SocketAddr = "127.0.0.1:5353".parse().unwrap();
     assert!(Proxy::new(config(&[local]), FakeRouter::default(), &[local]).is_err());
-    let many = ProxyConfig { routed: vec![], upstreams: vec![Upstream { domains: vec![], servers: vec![local; 9] }] };
+    let many = ProxyConfig {
+        routed: vec![],
+        upstreams: vec![Upstream { domains: vec![], servers: vec![local; 9], independent: false }],
+    };
     assert!(Proxy::new(many, FakeRouter::default(), &[]).is_err());
 }
 

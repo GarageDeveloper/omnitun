@@ -697,29 +697,35 @@ fn default_resolvers_macos(text: &str) -> Vec<SocketAddr> {
         .collect()
 }
 
-/// `resolvectl dns`: the global servers, then those of the links (not the
-/// tunnels'); `1.1.1.1`, `1.1.1.1:5353`, `1.1.1.1#name` or `[::1]:53`.
+/// `resolvectl dns`: the servers of the links, then the global ones, a
+/// fallback in practice; never those of the tunnels in `ignore` (the
+/// global list may repeat them) nor resolved's own stubs. Servers are
+/// written `1.1.1.1`, `1.1.1.1:5353`, `1.1.1.1#name` or `[::1]:53`.
 #[cfg(any(target_os = "linux", test))]
 fn link_resolvers_linux(text: &str, ignore: &[String]) -> Vec<SocketAddr> {
+    let parse = |server: &str| {
+        let server = server.split('#').next().unwrap_or(server);
+        server.parse::<SocketAddr>().ok().or_else(|| server.parse::<IpAddr>().ok().map(|ip| SocketAddr::new(ip, 53)))
+    };
+    let link_of = |scope: &str| {
+        scope.strip_prefix("Link ").and_then(|l| l.split_once('(')).map(|(_, n)| n.trim_end_matches(')').to_owned())
+    };
+    let scopes: Vec<(&str, &str)> =
+        text.lines().filter_map(|l| l.split_once(':')).map(|(s, l)| (s.trim(), l)).collect();
+    let mut excluded: Vec<SocketAddr> = ["127.0.0.53:53", "127.0.0.54:53"].iter().map(|s| s.parse().unwrap()).collect();
+    for (scope, list) in &scopes {
+        if link_of(scope).is_some_and(|name| ignore.contains(&name)) {
+            excluded.extend(list.split_whitespace().filter_map(parse));
+        }
+    }
+    let (global, links): (Vec<_>, Vec<_>) = scopes.iter().partition(|(scope, _)| *scope == "Global");
     let mut servers = Vec::new();
-    for line in text.lines() {
-        let Some((scope, list)) = line.split_once(':') else { continue };
-        let scope = scope.trim();
-        let link = scope.strip_prefix("Link ").and_then(|l| l.split_once('(')).map(|(_, n)| n.trim_end_matches(')'));
-        if scope != "Global" && !link.is_some_and(|name| !ignore.iter().any(|i| i == name)) {
+    for (scope, list) in links.into_iter().chain(global) {
+        if scope != "Global" && link_of(scope).is_none() {
             continue;
         }
-        for server in list.split_whitespace() {
-            let server = server.split('#').next().unwrap_or(server);
-            let parsed = server
-                .parse::<SocketAddr>()
-                .ok()
-                .or_else(|| server.parse::<IpAddr>().ok().map(|ip| SocketAddr::new(ip, 53)));
-            // The stubs of systemd-resolved itself would send the names back.
-            let stub = |a: &SocketAddr| ["127.0.0.53", "127.0.0.54"].iter().any(|s| a.ip().to_string() == *s);
-            if let Some(addr) = parsed.filter(|a| !stub(a))
-                && !servers.contains(&addr)
-            {
+        for addr in list.split_whitespace().filter_map(parse) {
+            if !excluded.contains(&addr) && !servers.contains(&addr) {
                 servers.push(addr);
             }
         }
@@ -796,15 +802,17 @@ mod tests {
         assert_eq!(super::default_resolvers_macos(antivirus), ["127.0.0.1:5300".parse().unwrap()]);
         assert!(super::default_resolvers_macos("DNS configuration\n\nresolver #1\n  flags : x\n").is_empty());
 
-        let resolvectl = "Global: 1.1.1.1#cloudflare-dns.com 127.0.0.53\nLink 2 (eth0): 192.168.1.1 [2001:db8::53]:53\n\
-                          Link 5 (tun0): 10.0.0.53\nLink 3 (wlan0): 192.168.1.1:5353\n";
+        // The global list repeats the links' servers, a tunnel's included.
+        let resolvectl = "Global: 1.1.1.1#cloudflare-dns.com 127.0.0.53 127.0.0.1:40000\n\
+                          Link 2 (eth0): 192.168.1.1 [2001:db8::53]:53\n\
+                          Link 5 (tun0): 127.0.0.1:40000\nLink 3 (wlan0): 192.168.1.1:5353\n";
         assert_eq!(
             super::link_resolvers_linux(resolvectl, &["tun0".into()]),
             [
-                "1.1.1.1:53".parse().unwrap(),
                 "192.168.1.1:53".parse().unwrap(),
                 "[2001:db8::53]:53".parse().unwrap(),
-                "192.168.1.1:5353".parse().unwrap()
+                "192.168.1.1:5353".parse().unwrap(),
+                "1.1.1.1:53".parse().unwrap()
             ]
         );
     }
