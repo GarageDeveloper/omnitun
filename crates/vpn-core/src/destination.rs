@@ -31,15 +31,22 @@ impl DomainPattern {
     /// Whether `name` (any case, trailing dot or not) is covered.
     pub fn matches(&self, name: &str) -> bool {
         let name = name.strip_suffix('.').unwrap_or(name);
-        if name.eq_ignore_ascii_case(&self.base) {
-            return true;
-        }
-        self.wildcard
-            && name.len() > self.base.len()
-            && name.is_char_boundary(name.len() - self.base.len())
-            && name[name.len() - self.base.len()..].eq_ignore_ascii_case(&self.base)
-            && name.as_bytes()[name.len() - self.base.len() - 1] == b'.'
+        name.eq_ignore_ascii_case(&self.base) || (self.wildcard && is_under(name, &self.base))
     }
+}
+
+/// Whether `name` is `domain` or a name under it (any case, trailing dots
+/// or not).
+pub fn is_under(name: &str, domain: &str) -> bool {
+    let name = name.strip_suffix('.').unwrap_or(name);
+    let domain = domain.strip_suffix('.').unwrap_or(domain);
+    if name.eq_ignore_ascii_case(domain) {
+        return true;
+    }
+    name.len() > domain.len()
+        && name.is_char_boundary(name.len() - domain.len())
+        && name[name.len() - domain.len()..].eq_ignore_ascii_case(domain)
+        && name.as_bytes()[name.len() - domain.len() - 1] == b'.'
 }
 
 impl FromStr for DomainPattern {

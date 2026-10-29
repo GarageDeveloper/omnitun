@@ -117,8 +117,14 @@ impl RemoteEngine {
         let mut tasks = Vec::new();
         let child = match launcher {
             Launcher::Process { path, uid, gid, sandbox } => {
-                let mut child =
-                    spawn(path, *uid, *gid, *sandbox, owner, [control_theirs.into(), fds_theirs.into(), prompts])?;
+                let mut child = spawn(
+                    path,
+                    *uid,
+                    *gid,
+                    *sandbox,
+                    &["--owner".into(), owner.to_string()],
+                    [control_theirs.into(), fds_theirs.into(), prompts],
+                )?;
                 if let Some(stderr) = child.stderr.take() {
                     tasks.push(tokio::spawn(relay_log(name.to_owned(), stderr)));
                 }
@@ -275,9 +281,9 @@ impl RemoteEngine {
     }
 }
 
-/// Copies an engine's log into the daemon's, as an engine's: one line at a
+/// Copies a child's log into the daemon's, as an engine's: one line at a
 /// time, bounded in length and rate, control characters escaped.
-async fn relay_log(name: String, stderr: tokio::process::ChildStderr) {
+pub(crate) async fn relay_log(name: String, stderr: tokio::process::ChildStderr) {
     let mut lines = BufReader::new(stderr);
     let (mut window, mut count) = (tokio::time::Instant::now(), 0u32);
     loop {
@@ -312,15 +318,15 @@ fn ended(error: Option<EngineError>) -> anyhow::Error {
     }
 }
 
-/// Starts the engine as `uid`, with only its three sockets open (as 3, 4
-/// and 5): it must not inherit other sessions' tun interfaces or clients'
-/// sockets.
-fn spawn(
+/// Starts the engine binary as `uid` with `args`, with only its three
+/// sockets open (as 3, 4 and 5): it must not inherit other sessions' tun
+/// interfaces or clients' sockets.
+pub(crate) fn spawn(
     path: &std::path::Path,
     uid: u32,
     gid: u32,
     sandbox: bool,
-    owner: u32,
+    args: &[String],
     fds: [OwnedFd; 3],
 ) -> anyhow::Result<tokio::process::Child> {
     let mut command = if sandbox {
@@ -336,8 +342,7 @@ fn spawn(
         tokio::process::Command::new(path)
     };
     command
-        .arg("--owner")
-        .arg(owner.to_string())
+        .args(args)
         .env_clear()
         .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
         .stdin(std::process::Stdio::null())
@@ -395,7 +400,7 @@ mod tests {
     async fn a_missing_engine_fails_to_start() {
         let fds = std::array::from_fn(|_| OwnedFd::from(std::fs::File::open("/dev/null").unwrap()));
         let (uid, gid) = (nix::unistd::getuid().as_raw(), nix::unistd::getgid().as_raw());
-        let error = spawn(std::path::Path::new("/nonexistent/omnitun-engine"), uid, gid, false, uid, fds).unwrap_err();
+        let error = spawn(std::path::Path::new("/nonexistent/omnitun-engine"), uid, gid, false, &[], fds).unwrap_err();
         let io = error.downcast_ref::<std::io::Error>().expect("the exec error");
         assert_eq!(io.kind(), std::io::ErrorKind::NotFound, "{error:#}");
     }

@@ -101,14 +101,7 @@ impl<R: Router> Proxy<R> {
     /// The servers for `name`: those of the most specific domain it is
     /// under, else those without domains.
     fn servers_for(&self, name: &str) -> &[SocketAddr] {
-        let under = |domain: &str| {
-            let domain = domain.trim_end_matches('.');
-            name.eq_ignore_ascii_case(domain)
-                || (name.len() > domain.len()
-                    && name.is_char_boundary(name.len() - domain.len())
-                    && name[name.len() - domain.len()..].eq_ignore_ascii_case(domain)
-                    && name.as_bytes()[name.len() - domain.len() - 1] == b'.')
-        };
+        let under = |domain: &String| vpn_core::destination::is_under(name, domain);
         let specific = self
             .config
             .upstreams

@@ -23,4 +23,6 @@ libc = "0.2"
 
 [dev-dependencies]
 omnitun-engine.workspace = true
+vpn-dnsproxy.workspace = true
+toml.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
