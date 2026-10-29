@@ -19,7 +19,8 @@ const LOG_LINES: usize = 2000;
 
 /// The report, as text. `client`: who writes it ("Omnitun 0.1.0").
 pub async fn report(store: &ProfileStore, client: &str) -> String {
-    let profiles = store.load();
+    // Read only: a diagnosis changes nothing, not even old files' ids.
+    let profiles = store.load_read_only();
     let mut redact = Redactor::default();
     if let Ok(profiles) = &profiles {
         for p in profiles {
@@ -186,8 +187,11 @@ const IDENTIFYING: &[&str] = &[
     "client_chain_pem",
     "keychain_ca_pem",
     "client_certificate",
-    "tls_auth",
-    "tls_crypt",
+    "ca_file",
+    "client_cert",
+    "client_key",
+    "realm",
+    "static_key",
     "public_key",
     "local_public_key",
     "addresses",
@@ -245,8 +249,19 @@ impl Redactor {
     fn learn(&mut self, profile: &Profile) {
         let Ok(toml::Value::Table(table)) = toml::Value::try_from(&profile.protocol) else { return };
         let mut strings = Vec::new();
-        for key in ["host", "gateway", "endpoint", "remotes", "verify_x509_name"] {
+        for key in ["host", "gateway", "endpoint"] {
             collect(table.get(key), &mut strings);
+        }
+        // Their servers' and names' own fields: not "udp" or "name".
+        let field = |key: &str, field: &str| -> Vec<toml::Value> {
+            match table.get(key) {
+                Some(toml::Value::Array(items)) => items.iter().filter_map(|i| i.get(field).cloned()).collect(),
+                Some(table) => table.get(field).cloned().into_iter().collect(),
+                None => Vec::new(),
+            }
+        };
+        for value in field("remotes", "host").iter().chain(&field("verify_x509_name", "name")) {
+            collect(Some(value), &mut strings);
         }
         for host in strings {
             if !self.known.iter().any(|(k, _)| *k == host) {
@@ -389,5 +404,34 @@ mod tests {
         let line = describe(&profile);
         assert!(line.starts_with("paris: forti-ssl"), "{line}");
         assert!(!line.contains("example") && !line.contains("jdoe"), "{line}");
+    }
+
+    #[test]
+    fn file_paths_and_realms_are_left_out() {
+        let profile: Profile = toml::from_str(
+            "name = \"paris\"\nprotocol = \"forti-ssl\"\nhost = \"vpn.example.com\"\n\
+             client_key = \"/Users/jdoe/k.pem\"\nclient_cert = \"/Users/jdoe/c.pem\"\n\
+             ca_file = \"/Users/jdoe/ca.pem\"\nrealm = \"staff\"",
+        )
+        .unwrap();
+        let line = describe(&profile);
+        assert!(!line.contains("jdoe") && !line.contains("staff"), "{line}");
+    }
+
+    /// Only the servers' hosts and the certificate name are servers.
+    #[test]
+    fn openvpn_transports_are_kept() {
+        let profile: Profile = toml::from_str(
+            "name = \"lab\"\nprotocol = \"openvpn\"\nauth_user_pass = true\nca_pem = \"CA\"\n\
+             verify_x509_name = { name = \"vpn-cert\", kind = \"name\" }\n\
+             [[remotes]]\nhost = \"vpn.example.com\"\ntransport = \"udp\"",
+        )
+        .unwrap();
+        let mut redact = Redactor::default();
+        redact.learn(&profile);
+        assert_eq!(
+            redact.text("udp to vpn.example.com, certificate vpn-cert, name lab"),
+            "udp to <server-1>, certificate <server-2>, name lab"
+        );
     }
 }

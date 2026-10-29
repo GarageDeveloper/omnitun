@@ -100,7 +100,9 @@ fn cisco_ipsec(service: &Dictionary, display: &str, existing: &[String]) -> anyh
     let ProtocolConfig::Ipsec(p) = &mut profile.protocol else { unreachable!() };
     // macOS uses aggressive mode with the group name, main mode without.
     p.exchange_mode = if group.is_some() { ExchangeMode::Aggressive } else { ExchangeMode::Main };
-    p.local_id = group;
+    // macOS sends the group name as a KEY_ID identity: typed, or a dotted
+    // name would go out as a FQDN.
+    p.local_id = group.map(|group| format!("keyid:{group}"));
     p.xauth = xauth;
     p.username = get("XAuthName").filter(|_| xauth);
     p.ike = IKE_PROPOSALS.map(String::from).to_vec();
@@ -391,7 +393,7 @@ mod tests {
             ("XAuthPasswordEncryption", "Keychain".into()),
         ];
         let mut grouped = common.to_vec();
-        grouped.push(("LocalIdentifier", "staff".into()));
+        grouped.push(("LocalIdentifier", "staff.corp".into()));
         grouped.push(("LocalIdentifierType", "KeyID".into()));
         services.insert("1".into(), service("Bureau", "IPSec", None, &grouped));
         services.insert("2".into(), service("Forti HQ", "IPSec", None, &common));
@@ -411,7 +413,10 @@ mod tests {
         assert!(!bureau.toml.contains("ABCD-1234"), "keychain references are not imported");
         let file: ProfileFile = toml::from_str(&bureau.toml).unwrap();
         let ProtocolConfig::Ipsec(p) = &file.profiles[0].protocol else { panic!() };
-        assert_eq!((p.exchange_mode, p.local_id.as_deref(), p.xauth), (ExchangeMode::Aggressive, Some("staff"), true));
+        assert_eq!(
+            (p.exchange_mode, p.local_id.as_deref(), p.xauth),
+            (ExchangeMode::Aggressive, Some("keyid:staff.corp"), true)
+        );
         assert_eq!((p.username.as_deref(), p.ike_version), (Some("alice"), 1));
         file.profiles[0].validate().unwrap();
         let hq: ProfileFile = toml::from_str(&found[2].result.as_ref().unwrap().toml).unwrap();

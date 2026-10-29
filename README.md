@@ -144,8 +144,8 @@ Principles:
   knows nothing of tun interfaces or routes.
 - **Privilege separation.** Only `omnitund` runs as root, and it contains
   no protocol code: engines run unprivileged and sandboxed. Secrets stay in
-  the user's Keychain and reach an engine only when it asks; one-time codes
-  are never stored. The SAML browser opens in the user's session.
+  the user's Keychain (OpenVPN keys excepted, see Limitations) and reach an
+  engine only when it asks; one-time codes are never stored. The SAML browser opens in the user's session.
 - **Several VPNs at once.** Each session has its own tun interface, routes
   and DNS resolver (a dedicated `scutil` key on macOS, per-link DNS with
   `resolvectl` on Linux). The registry refuses what would divert another
@@ -181,7 +181,9 @@ in Docker: strongSwan 5.9 (IKEv1, IKEv2), OpenVPN 2.6, strongSwan + xl2tpd
 - Fortinet SSL VPN: no DTLS, no host check.
 - OpenVPN: no tls-crypt-v2, no browser login (WEB_AUTH), no CBC ciphers, no
   static key mode, no `dev tap`; compressed packets from the server are
-  dropped (VORACLE).
+  dropped (VORACLE). The client key and the tls-auth or tls-crypt key of a
+  profile are kept in `profiles.toml` (readable by the user only), as in
+  the `.ovpn` file it came from: do not sync or share that file.
 - L2TP: the group PSK authenticates the server, and only MS-CHAPv2 proves
   that it knows the password. PAP (off unless the profile asks for it, as
   Meraki needs) sends the password in clear inside IPsec; once a server

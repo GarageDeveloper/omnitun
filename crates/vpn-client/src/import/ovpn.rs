@@ -683,7 +683,8 @@ fn pem(label: &str, der: &[u8]) -> String {
 fn static_key(text: &str, option: &str) -> anyhow::Result<String> {
     parse_static_key(text).with_context(|| format!("{option}: invalid key"))?;
     let start = text.find("-----BEGIN OpenVPN Static key V1-----").expect("checked");
-    let end = text.find("-----END OpenVPN Static key V1-----").expect("checked");
+    // The END after the BEGIN: a comment before the block may name it.
+    let end = start + text[start..].find("-----END OpenVPN Static key V1-----").expect("checked");
     Ok(format!("{}-----END OpenVPN Static key V1-----\n", &text[start..end]))
 }
 
@@ -1001,5 +1002,13 @@ pub(super) mod tests {
         assert!(tokens("x \"open").is_err());
         assert_eq!(free_name("a", &["a".into(), "a 2".into()]), "a 3");
         assert_eq!(free_name(&"x".repeat(64), &["x".repeat(64)]).len(), 64);
+    }
+
+    #[test]
+    fn static_key_after_a_comment_naming_its_end() {
+        let text = format!("# -----END OpenVPN Static key V1-----\n{KEY}");
+        let key = static_key(&text, "tls-auth").unwrap();
+        assert!(key.starts_with("-----BEGIN OpenVPN Static key V1-----"), "{key}");
+        parse_static_key(&key).unwrap();
     }
 }

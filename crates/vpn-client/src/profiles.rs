@@ -1,6 +1,8 @@
 //! The user's profiles file. Every change goes through `toml_edit`, so
 //! comments, key order and the other profiles stay as the user wrote them,
-//! and the file is replaced atomically with owner-only permissions.
+//! and the file is replaced atomically with owner-only permissions. Changes
+//! hold a lock on a file next to it: the app, `omnitunctl` and their
+//! threads change it one after the other, each from what the last wrote.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -12,6 +14,15 @@ use vpn_core::{Profile, ProfileFile, brand};
 pub struct ProfileStore {
     path: PathBuf,
     legacy: bool,
+    /// The file is in our own config directory, which only the user may
+    /// list (not a folder given with `--config`).
+    own_dir: bool,
+}
+
+/// The profiles file's lock, held until dropped. Methods that need it
+/// take it as proof: it is not reentrant.
+struct Lock {
+    _file: std::fs::File,
 }
 
 impl ProfileStore {
@@ -19,7 +30,7 @@ impl ProfileStore {
     /// pre-rename location is used while the new one does not exist.
     pub fn open(path: Option<PathBuf>) -> anyhow::Result<Self> {
         if let Some(path) = path {
-            return Ok(Self { path, legacy: false });
+            return Ok(Self { path, legacy: false, own_dir: false });
         }
         let base = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
@@ -28,9 +39,9 @@ impl ProfileStore {
         let path = base.join(brand::ID).join("profiles.toml");
         let legacy = base.join(brand::legacy::CONFIG_DIR).join("profiles.toml");
         if !path.exists() && legacy.exists() {
-            return Ok(Self { path: legacy, legacy: true });
+            return Ok(Self { path: legacy, legacy: true, own_dir: true });
         }
-        Ok(Self { path, legacy: false })
+        Ok(Self { path, legacy: false, own_dir: true })
     }
 
     pub fn path(&self) -> &Path {
@@ -47,7 +58,24 @@ impl ProfileStore {
     pub fn load(&self) -> anyhow::Result<Vec<Profile>> {
         let file = self.read_file()?;
         if file.profiles.iter().any(|p| p.id.is_empty()) {
-            self.migrate()?;
+            let lock = self.lock()?;
+            return self.load_locked(&lock);
+        }
+        Ok(file.profiles)
+    }
+
+    /// The profiles as the file has them, never rewritten: a file of an
+    /// earlier version keeps its profiles without ids.
+    pub fn load_read_only(&self) -> anyhow::Result<Vec<Profile>> {
+        Ok(self.read_file()?.profiles)
+    }
+
+    /// `load`, under the lock: another process may have given the ids
+    /// since the file was read.
+    fn load_locked(&self, lock: &Lock) -> anyhow::Result<Vec<Profile>> {
+        let file = self.read_file()?;
+        if file.profiles.iter().any(|p| p.id.is_empty()) {
+            self.migrate(lock)?;
             return Ok(self.read_file()?.profiles);
         }
         Ok(file.profiles)
@@ -56,20 +84,7 @@ impl ProfileStore {
     /// The profile `key` names: its id, its name if no other profile has
     /// it, or its folder and name (`Clients/Acme/EU`).
     pub fn find(&self, key: &str) -> anyhow::Result<Profile> {
-        let profiles = self.load()?;
-        if let Some(p) = profiles.iter().find(|p| p.id == key) {
-            return Ok(p.clone());
-        }
-        let named: Vec<&Profile> = profiles.iter().filter(|p| p.name == key).collect();
-        match named.as_slice() {
-            [one] => return Ok((*one).clone()),
-            [] => {}
-            several => bail!(
-                "several VPNs are named {key}: name it with its folder ({})",
-                several.iter().map(|p| path_of(p)).collect::<Vec<_>>().join(", ")
-            ),
-        }
-        profiles.into_iter().find(|p| path_of(p) == key).with_context(|| format!("no VPN named {key}"))
+        find_in(self.load()?, key)
     }
 
     /// Appends profiles given as TOML (`[[profile]]` tables, as produced by
@@ -77,6 +92,10 @@ impl ProfileStore {
     /// already used in the same folder.
     pub fn append(&self, text: &str) -> anyhow::Result<Vec<String>> {
         let mut doc: DocumentMut = text.parse().context("the new profiles are not valid")?;
+        // Keys before the first table would join the file's last profile.
+        if let Some((key, _)) = doc.iter().find(|(key, _)| *key != "profile") {
+            bail!("the new profiles are not valid: {key:?} is not in a [[profile]] table");
+        }
         let mut ids = Vec::new();
         if let Some(list) = doc.get_mut("profile").and_then(Item::as_array_of_tables_mut) {
             for table in list.iter_mut() {
@@ -90,7 +109,8 @@ impl ProfileStore {
         }
         let text = doc.to_string();
         let added: ProfileFile = toml::from_str(&text).context("the new profiles are not valid")?;
-        let known = self.load()?;
+        let lock = self.lock()?;
+        let known = self.load_locked(&lock)?;
         for (i, p) in added.profiles.iter().enumerate() {
             let clash = |k: &Profile| k.name == p.name && k.folder == p.folder;
             if known.iter().any(clash) || added.profiles[..i].iter().any(clash) {
@@ -106,14 +126,29 @@ impl ProfileStore {
         } else {
             "\n\n"
         };
-        self.write(&format!("{existing}{sep}{text}"))?;
+        let updated = format!("{existing}{sep}{text}");
+        // The whole file reads back as the profiles it had, then the new
+        // ones, unchanged.
+        let file: ProfileFile = toml::from_str(&updated).context("the new profiles would make the file invalid")?;
+        let canonical = |p: &Profile| toml::to_string(p).ok();
+        ensure!(
+            file.profiles.len() == known.len() + added.profiles.len()
+                && file
+                    .profiles
+                    .iter()
+                    .zip(known.iter().chain(&added.profiles))
+                    .all(|(a, b)| canonical(a) == canonical(b)),
+            "the new profiles would change the ones in {}",
+            self.path.display()
+        );
+        self.write(&lock, &updated)?;
         Ok(ids)
     }
 
     /// Gives an id to the profiles of a file written before ids existed,
     /// and turns the names of their chains into ids. The file is copied to
     /// `profiles.toml.before-ids` first.
-    fn migrate(&self) -> anyhow::Result<()> {
+    fn migrate(&self, lock: &Lock) -> anyhow::Result<()> {
         let backup = self.path.with_extension("toml.before-ids");
         if !backup.exists() {
             use std::os::unix::fs::OpenOptionsExt;
@@ -125,7 +160,7 @@ impl ProfileStore {
                 .and_then(|mut f| f.write_all(self.read_text().unwrap_or_default().as_bytes()))
                 .with_context(|| format!("cannot back up {} before giving ids", self.path.display()))?;
         }
-        self.edit(|doc| {
+        self.edit(lock, |doc| {
             let list = profiles(doc)?;
             let mut ids = std::collections::HashMap::new();
             for table in list.iter_mut() {
@@ -167,9 +202,14 @@ impl ProfileStore {
     /// unchanged values keep their comments, and values left at their
     /// default are not written out.
     pub fn save(&self, profile: &Profile) -> anyhow::Result<()> {
+        let lock = self.lock()?;
+        self.save_locked(&lock, profile)
+    }
+
+    fn save_locked(&self, lock: &Lock, profile: &Profile) -> anyhow::Result<()> {
         ensure!(vpn_core::valid_id(&profile.id), "the profile has no id");
         profile.validate()?;
-        let others = self.load()?;
+        let others = self.load_locked(lock)?;
         if let Some(clash) =
             others.iter().find(|o| o.id != profile.id && o.name == profile.name && o.folder == profile.folder)
         {
@@ -177,13 +217,14 @@ impl ProfileStore {
         }
         let canonical = toml::to_string(profile)?;
         let previous = profile.id.as_str();
-        self.edit(|doc| {
+        self.edit(lock, |doc| {
             let existing = profile_table(doc, previous);
             let keep: Vec<String> = existing.iter().flat_map(|t| t.iter().map(|(k, _)| k.to_owned())).collect();
+            let unknown = existing.as_deref().map(unknown_keys).unwrap_or_default();
             let mut new = minimal(canonical.parse::<DocumentMut>()?.as_table().clone(), &canonical, &keep);
             unplace(&mut new);
             match profile_table(doc, previous) {
-                Some(table) => update_table(table, &new),
+                Some(table) => update_table(table, &new, &unknown),
                 None => profiles(doc)?.push(new),
             }
             Ok(())
@@ -196,7 +237,8 @@ impl ProfileStore {
     /// [`crate::secrets::copy`]); VPNs chained through the original keep
     /// pointing at it.
     pub fn duplicate(&self, id: &str, name: Option<&str>) -> anyhow::Result<Profile> {
-        let profiles = self.load()?;
+        let lock = self.lock()?;
+        let profiles = self.load_locked(&lock)?;
         let index = profiles.iter().position(|p| p.id == id).with_context(|| format!("no profile {id}"))?;
         let mut copy = profiles[index].clone();
         let base = name.map(str::trim).map_or_else(|| format!("{} copy", copy.name), str::to_owned);
@@ -212,14 +254,15 @@ impl ProfileStore {
             .find(|n| !taken(n))
             .expect("a free name");
         copy.id = vpn_core::new_id();
-        self.save(&copy)?;
-        self.reorder(&copy.id, profiles.get(index + 1).map(|p| p.id.as_str()))?;
+        self.save_locked(&lock, &copy)?;
+        self.reorder_locked(&lock, &copy.id, profiles.get(index + 1).map(|p| p.id.as_str()))?;
         Ok(copy)
     }
 
     /// Replaces the profile's trusted certificate fingerprints.
     pub fn set_trusted_certificates(&self, id: &str, fingerprints: &[String]) -> anyhow::Result<()> {
-        let mut profile = self.find(id)?;
+        let lock = self.lock()?;
+        let mut profile = find_in(self.load_locked(&lock)?, id)?;
         let name = profile.name.clone();
         match &mut profile.protocol {
             vpn_core::ProtocolConfig::FortiSsl(p) => p.trusted_cert = fingerprints.to_vec(),
@@ -233,17 +276,22 @@ impl ProfileStore {
             }
             vpn_core::ProtocolConfig::OpenVpn(p) => p.trusted_cert = fingerprints.to_vec(),
         }
-        self.save(&profile)
+        self.save_locked(&lock, &profile)
     }
 
     /// Moves `name` just before `before` in the file (the end if None):
     /// the order the VPNs are listed in.
     pub fn reorder(&self, id: &str, before: Option<&str>) -> anyhow::Result<()> {
+        let lock = self.lock()?;
+        self.reorder_locked(&lock, id, before)
+    }
+
+    fn reorder_locked(&self, lock: &Lock, id: &str, before: Option<&str>) -> anyhow::Result<()> {
         if before == Some(id) {
             return Ok(());
         }
-        self.load()?;
-        self.edit(|doc| {
+        self.load_locked(lock)?;
+        self.edit(lock, |doc| {
             let list = profiles(doc)?;
             let index_of = |list: &toml_edit::ArrayOfTables, n: &str| {
                 list.iter().position(|t| t.get("id").and_then(Item::as_str) == Some(n))
@@ -262,8 +310,9 @@ impl ProfileStore {
     }
 
     pub fn remove(&self, id: &str) -> anyhow::Result<()> {
-        self.load()?;
-        self.edit(|doc| {
+        let lock = self.lock()?;
+        self.load_locked(&lock)?;
+        self.edit(&lock, |doc| {
             let list = profiles(doc)?;
             let index = list
                 .iter()
@@ -276,15 +325,18 @@ impl ProfileStore {
 
     /// Adds `sha256` to the profile's `trusted_cert`.
     pub fn pin_certificate(&self, id: &str, sha256: &str) -> anyhow::Result<()> {
-        self.load()?;
-        self.edit(|doc| {
+        let lock = self.lock()?;
+        self.load_locked(&lock)?;
+        self.edit(&lock, |doc| {
             let table = profile_table(doc, id).with_context(|| format!("no profile {id}"))?;
             let pins = table
                 .entry("trusted_cert")
                 .or_insert(toml_edit::value(toml_edit::Array::new()))
                 .as_array_mut()
                 .context("trusted_cert is not a list")?;
-            if !pins.iter().any(|p| p.as_str().is_some_and(|p| p.eq_ignore_ascii_case(sha256))) {
+            // As the engines compare them: without colons, in any case.
+            let bare = |pin: &str| pin.replace(':', "").to_ascii_lowercase();
+            if !pins.iter().any(|p| p.as_str().is_some_and(|p| bare(p) == bare(sha256))) {
                 pins.push(sha256);
             }
             Ok(())
@@ -294,8 +346,9 @@ impl ProfileStore {
     /// Leaves only MS-CHAPv2 in an L2TP profile's `ppp_auth`: its server
     /// proved it knows the password.
     pub fn require_mschapv2(&self, id: &str) -> anyhow::Result<()> {
-        self.load()?;
-        self.edit(|doc| {
+        let lock = self.lock()?;
+        self.load_locked(&lock)?;
+        self.edit(&lock, |doc| {
             let table = profile_table(doc, id).with_context(|| format!("no profile {id}"))?;
             anyhow::ensure!(
                 table.get("protocol").and_then(Item::as_str) == Some("l2tp"),
@@ -318,37 +371,85 @@ impl ProfileStore {
         toml::from_str(&self.read_text()?).with_context(|| format!("invalid {}", self.path.display()))
     }
 
-    fn edit(&self, change: impl FnOnce(&mut DocumentMut) -> anyhow::Result<()>) -> anyhow::Result<()> {
+    /// Waits for the other writers, in this process or another one.
+    fn lock(&self) -> anyhow::Result<Lock> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let dir = self.dir()?;
+        let name = self.path.file_name().context("profiles file has no name")?.to_string_lossy();
+        let path = dir.join(format!(".{name}.lock"));
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&path)
+            .with_context(|| format!("cannot open {}", path.display()))?;
+        file.lock().with_context(|| format!("cannot lock {}", path.display()))?;
+        Ok(Lock { _file: file })
+    }
+
+    /// The file's directory, created if needed. Ours is made listable by
+    /// the user only, even if created by hand or by an earlier version.
+    fn dir(&self) -> anyhow::Result<&Path> {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let dir = self.path.parent().context("profiles file has no directory")?;
+        if !dir.exists() {
+            std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        }
+        if self.own_dir && std::fs::metadata(dir).is_ok_and(|m| m.permissions().mode() & 0o077 != 0) {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(dir)
+    }
+
+    fn edit(&self, lock: &Lock, change: impl FnOnce(&mut DocumentMut) -> anyhow::Result<()>) -> anyhow::Result<()> {
         let mut doc: DocumentMut =
             self.read_text()?.parse().with_context(|| format!("invalid {}", self.path.display()))?;
         change(&mut doc)?;
         let updated = doc.to_string();
         toml::from_str::<ProfileFile>(&updated).context("the updated profiles file would be invalid")?;
-        self.write(&updated)
+        self.write(lock, &updated)
     }
 
-    /// Replaces the file atomically with one only the user can read, in a
-    /// directory only the user can list.
-    fn write(&self, text: &str) -> anyhow::Result<()> {
-        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-        let dir = self.path.parent().context("profiles file has no directory")?;
-        if !dir.exists() {
-            std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
-            // Created by hand, or by an earlier version, it may be listable.
-            if std::fs::metadata(dir).is_ok_and(|m| m.permissions().mode() & 0o077 != 0) {
-                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-            }
-        }
-        let tmp = dir.join(format!(".{}.tmp-{}", brand::ID, std::process::id()));
+    /// Replaces the file atomically with one only the user can read. A
+    /// file that is a link (dotfiles) stays one: the file it points to is
+    /// replaced.
+    fn write(&self, _: &Lock, text: &str) -> anyhow::Result<()> {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        self.dir()?;
+        let target = match std::fs::canonicalize(&self.path) {
+            Ok(target) => target,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => self.path.clone(),
+            Err(e) => return Err(e).with_context(|| format!("cannot resolve {}", self.path.display())),
+        };
+        let dir = target.parent().context("profiles file has no directory")?;
+        let tmp = dir.join(format!(".{}.tmp-{}", brand::ID, vpn_core::new_id()));
         let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
         let written = file.write_all(text.as_bytes()).and_then(|()| file.sync_all());
-        if let Err(e) = written.and_then(|()| std::fs::rename(&tmp, &self.path)) {
+        if let Err(e) = written.and_then(|()| std::fs::rename(&tmp, &target)) {
             let _ = std::fs::remove_file(&tmp);
             return Err(e.into());
         }
-        std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))?;
         Ok(())
     }
+}
+
+/// The profile `key` names among `profiles` (see [`ProfileStore::find`]).
+fn find_in(profiles: Vec<Profile>, key: &str) -> anyhow::Result<Profile> {
+    if let Some(p) = profiles.iter().find(|p| p.id == key) {
+        return Ok(p.clone());
+    }
+    let named: Vec<&Profile> = profiles.iter().filter(|p| p.name == key).collect();
+    match named.as_slice() {
+        [one] => return Ok((*one).clone()),
+        [] => {}
+        several => bail!(
+            "several VPNs are named {key}: name it with its folder ({})",
+            several.iter().map(|p| path_of(p)).collect::<Vec<_>>().join(", ")
+        ),
+    }
+    profiles.into_iter().find(|p| path_of(p) == key).with_context(|| format!("no VPN named {key}"))
 }
 
 fn profiles(doc: &mut DocumentMut) -> anyhow::Result<&mut toml_edit::ArrayOfTables> {
@@ -390,14 +491,32 @@ fn minimal(mut table: Table, canonical: &str, keep: &[String]) -> Table {
     table
 }
 
+/// Keys of a profile's table that change nothing when removed: written
+/// by a later version or by hand, they are none of this version's.
+fn unknown_keys(table: &Table) -> Vec<String> {
+    let parse = |table: &Table| {
+        toml::from_str::<Profile>(&DocumentMut::from(table.clone()).to_string())
+            .ok()
+            .and_then(|p| toml::to_string(&p).ok())
+    };
+    let Some(whole) = parse(table) else { return Vec::new() };
+    let keys = table.iter().map(|(k, _)| k.to_owned());
+    keys.filter(|key| {
+        let mut trial = table.clone();
+        trial.remove(key);
+        parse(&trial).is_some_and(|t| t == whole)
+    })
+    .collect()
+}
+
 /// Rewrites only the values that changed; keys the profile no longer has
-/// are removed.
-fn update_table(table: &mut Table, new: &Table) {
-    table.retain(|key, _| new.contains_key(key));
+/// are removed, except those of `unknown`.
+fn update_table(table: &mut Table, new: &Table, unknown: &[String]) {
+    table.retain(|key, _| new.contains_key(key) || unknown.iter().any(|k| k == key));
     for (key, item) in new.iter() {
         match table.get_mut(key) {
             Some(old) if same(old, item) => {}
-            Some(Item::Table(old)) if item.is_table() => update_table(old, item.as_table().expect("checked")),
+            Some(Item::Table(old)) if item.is_table() => update_table(old, item.as_table().expect("checked"), &[]),
             Some(old) => {
                 // A changed value keeps the comments around it.
                 let decor = old.as_value().map(|v| v.decor().clone());
@@ -549,6 +668,18 @@ mod tests {
         let paris = store.find("paris").unwrap().id;
         store.pin_certificate(&paris, &fp).unwrap();
         store.pin_certificate(&paris, &fp).unwrap();
+        // The same fingerprint, as some tools write it.
+        store
+            .pin_certificate(
+                &paris,
+                &fp.to_uppercase()
+                    .as_bytes()
+                    .chunks(2)
+                    .map(|c| std::str::from_utf8(c).unwrap())
+                    .collect::<Vec<_>>()
+                    .join(":"),
+            )
+            .unwrap();
         let text = std::fs::read_to_string(store.path()).unwrap();
         assert!(text.contains("# my profiles") && text.contains("# main office"), "{text}");
         let profiles = store.load().unwrap();
@@ -694,6 +825,133 @@ mod tests {
         assert!(store.save(&lab).is_err(), "the new name is taken in that folder");
         lab.folder = Some("Elsewhere".into());
         store.save(&lab).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The app and `omnitunctl` (two stores), each with its own thread:
+    /// no write fails, none is lost.
+    #[test]
+    fn concurrent_writers_wait_for_each_other() {
+        let (store, dir) = store("concurrent");
+        let paris = store.find("paris").unwrap().id;
+        let path = store.path().to_owned();
+        let pins = std::thread::spawn({
+            let (path, paris) = (path.clone(), paris.clone());
+            move || {
+                let app = ProfileStore::open(Some(path)).unwrap();
+                for i in 0..30u8 {
+                    app.pin_certificate(&paris, &format!("{i:02x}").repeat(32)).unwrap();
+                }
+            }
+        });
+        let cli = ProfileStore::open(Some(path)).unwrap();
+        for i in 0..30 {
+            let mut lab = cli.find("lab").unwrap();
+            lab.description = Some(format!("edit {i}"));
+            cli.save(&lab).unwrap();
+        }
+        pins.join().unwrap();
+        assert_eq!(ssl(&store.find(&paris).unwrap()).trusted_cert.len(), 30);
+        assert_eq!(store.find("lab").unwrap().description.as_deref(), Some("edit 29"));
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter(|n| n.contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Two first launches of a new version: the ids are given once.
+    #[test]
+    fn ids_are_given_once_by_concurrent_loads() {
+        let (store, dir) = store("concurrent-ids");
+        let path = store.path().to_owned();
+        let loads: Vec<_> = (0..4)
+            .map(|_| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let store = ProfileStore::open(Some(path)).unwrap();
+                    store.load().unwrap().into_iter().map(|p| p.id).collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let ids: Vec<Vec<String>> = loads.into_iter().map(|t| t.join().unwrap()).collect();
+        assert!(ids.iter().all(|i| *i == ids[0]), "{ids:?}");
+        assert_eq!(store.load().unwrap().into_iter().map(|p| p.id).collect::<Vec<_>>(), ids[0]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reading_only_never_gives_ids() {
+        let (store, dir) = store("read-only");
+        let profiles = store.load_read_only().unwrap();
+        assert!(profiles.iter().all(|p| p.id.is_empty()));
+        assert_eq!(std::fs::read_to_string(store.path()).unwrap(), ORIGINAL);
+        assert!(!store.path().with_extension("toml.before-ids").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn appending_never_changes_the_other_profiles() {
+        let (store, dir) = store("append-invalid");
+        store.load().unwrap();
+        let before = std::fs::read_to_string(store.path()).unwrap();
+        let new = "[[profile]]\nname = \"new\"\nprotocol = \"forti-ssl\"\nhost = \"n.example.com\"\n";
+        // It would join "lab" (the file's last profile).
+        assert!(store.append(&format!("port = 4443\n{new}")).is_err());
+        assert!(store.append(&format!("folder = \"Elsewhere\"\n{new}")).is_err());
+        // Profiles that are not tables of the list.
+        assert!(store.append("[profile]\nname = \"x\"\nprotocol = \"forti-ssl\"\nhost = \"x.example.com\"\n").is_err());
+        assert_eq!(std::fs::read_to_string(store.path()).unwrap(), before);
+        assert_eq!(store.append(new).unwrap().len(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Keys of a later version, or typed by hand, survive an edit.
+    #[test]
+    fn saving_keeps_unknown_keys() {
+        let (store, dir) = store("unknown");
+        let text = ORIGINAL.replace("host = \"lab.example.com\"\n", "host = \"lab.example.com\"\nfuture_option = 3\n");
+        std::fs::write(store.path(), text).unwrap();
+        let mut lab = store.find("lab").unwrap();
+        lab.description = Some("changed".into());
+        lab.full_tunnel = Some(true);
+        store.save(&lab).unwrap();
+        lab.full_tunnel = None;
+        store.save(&lab).unwrap();
+        let text = std::fs::read_to_string(store.path()).unwrap();
+        assert!(text.contains("future_option = 3"), "{text}");
+        assert!(!text.contains("full_tunnel"), "known keys still go: {text}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A profiles file kept with dotfiles, through a link.
+    #[test]
+    fn a_linked_file_stays_linked() {
+        let (store, dir) = store("link");
+        let real = dir.join("dotfiles-profiles.toml");
+        std::fs::rename(store.path(), &real).unwrap();
+        std::os::unix::fs::symlink(&real, store.path()).unwrap();
+        store.pin_certificate(&store.find("paris").unwrap().id, &"cd".repeat(32)).unwrap();
+        assert!(std::fs::symlink_metadata(store.path()).unwrap().file_type().is_symlink());
+        assert!(std::fs::read_to_string(&real).unwrap().contains(&"cd".repeat(32)));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The config directory of an earlier version, listable by all.
+    #[test]
+    fn our_directory_is_made_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("vpn-client-private-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let own = dir.join(brand::ID);
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(own.join("profiles.toml"), ORIGINAL).unwrap();
+        let store = ProfileStore { path: own.join("profiles.toml"), legacy: false, own_dir: true };
+        store.pin_certificate(&store.find("paris").unwrap().id, &"ab".repeat(32)).unwrap();
+        assert_eq!(std::fs::metadata(&own).unwrap().permissions().mode() & 0o777, 0o700);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

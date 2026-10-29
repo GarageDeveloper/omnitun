@@ -67,9 +67,14 @@ fn ssl(p: &Dictionary, display: &str, name: String) -> Imported {
         Some((h, port)) if port.parse::<u16>().is_ok() => (h.to_owned(), port.parse().ok()),
         _ => (server.clone(), None),
     };
-    let port = if int(p, "EnableCustomPort") == Some(1) { int(p, "ServerPort").map(|v| v as u16) } else { None }
-        .or(inline_port)
-        .unwrap_or(443);
+    let custom = if int(p, "EnableCustomPort") == Some(1) { int(p, "ServerPort") } else { None };
+    let port = match custom {
+        Some(port) => u16::try_from(port).ok().filter(|p| *p != 0).unwrap_or_else(|| {
+            notes.push(format!("invalid port {port} in FortiClient: 443 used"));
+            443
+        }),
+        None => inline_port.unwrap_or(443),
+    };
 
     let mut t = header(display, "VPN SSL");
     line(&mut t, "name", &name);
@@ -108,7 +113,14 @@ fn ssl(p: &Dictionary, display: &str, name: String) -> Imported {
 
 fn ipsec(p: &Dictionary, display: &str, name: String) -> Imported {
     let mut notes = Vec::new();
-    let version = int(p, "IKEVersion").unwrap_or(1) as u8;
+    let version = match int(p, "IKEVersion").unwrap_or(1) {
+        2 => 2u8,
+        1 => 1,
+        other => {
+            notes.push(format!("unknown IKE version {other} in FortiClient: IKEv1 used"));
+            1
+        }
+    };
     let mut t = header(display, &format!("IPsec IKEv{version}"));
     line(&mut t, "name", &name);
     common(p, &mut t);
@@ -255,7 +267,11 @@ pub fn profile_name(display: &str) -> String {
 /// it), or `fallback` if nothing is left: no `/` (it separates folders),
 /// no control character, single spaces, 64 characters at most.
 fn name_or(display: &str, fallback: &str) -> String {
-    let cleaned: String = display.chars().map(|c| if c == '/' || c.is_control() { ' ' } else { c }).collect();
+    let cleaned: String = display
+        .chars()
+        .filter(|c| !vpn_core::is_invisible(*c))
+        .map(|c| if c == '/' || c.is_control() { ' ' } else { c })
+        .collect();
     let name: String = cleaned.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(64).collect();
     let name = name.trim_end().to_owned();
     if name.is_empty() { fallback.into() } else { name }
@@ -403,5 +419,27 @@ mod tests {
         assert_eq!(profile_name("HQ Paris"), "HQ Paris");
         assert_eq!(profile_name("  Paris / HQ  "), "Paris HQ");
         assert_eq!(profile_name(" / "), "forticlient");
+        let name = profile_name("Paris\u{200b} HQ\u{202e}");
+        assert_eq!(name, "Paris HQ");
+        assert!(vpn_core::profile::valid_name(&name));
+    }
+
+    /// Out-of-range numbers are not truncated into other valid ones.
+    #[test]
+    fn out_of_range_numbers() {
+        let odd = SAMPLE
+            .replace("<integer>4443</integer>", "<integer>70000</integer>")
+            .replace("<key>IKEVersion</key><integer>1</integer>", "<key>IKEVersion</key><integer>258</integer>");
+        let imported = import(&odd, "range");
+        let text: String = imported.iter().map(|i| i.toml.clone() + "\n").collect();
+        let file: ProfileFile = toml::from_str(&text).unwrap();
+        let ssl = file.profiles.iter().find(|p| p.name == "HQ SSL").unwrap();
+        assert_eq!(ssl.protocol.endpoint().1, 443, "not 70000 as 4464");
+        let ipsec = file.profiles.iter().find(|p| p.name == "Branch IPsec").unwrap();
+        let ProtocolConfig::Ipsec(i) = &ipsec.protocol else { panic!() };
+        assert_eq!(i.ike_version, 1, "not 258 as 2");
+        assert!(
+            imported.iter().all(|i| i.notes.iter().any(|n| n.contains("invalid port") || n.contains("IKE version")))
+        );
     }
 }

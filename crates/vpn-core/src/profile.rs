@@ -458,7 +458,14 @@ impl Profile {
                 anyhow::bail!("client_certificate must be the certificate's SHA-256");
             }
         }
+        if let ProtocolConfig::FortiSsl(p) = &self.protocol {
+            check_pins(&p.trusted_cert)?;
+        }
         if let ProtocolConfig::Ipsec(p) = &self.protocol {
+            if !matches!(p.ike_version, 1 | 2) {
+                anyhow::bail!("ike_version must be 1 or 2");
+            }
+            check_pins(&p.trusted_cert)?;
             let lifetimes = MIN_LIFETIME..=MAX_LIFETIME;
             if p.phase2_lifetime == 0 && p.phase2_lifetime_kb.is_none() {
                 anyhow::bail!("the phase 2 key needs a lifetime in seconds or in kilobytes");
@@ -520,7 +527,7 @@ impl Profile {
         if self.split_routes.iter().any(|net| net.prefix_len() == 0) {
             anyhow::bail!("split mode is for some networks: 0.0.0.0/0 would take all traffic");
         }
-        if self.description.as_ref().is_some_and(|d| d.len() > 256 || d.chars().any(char::is_control)) {
+        if self.description.as_ref().is_some_and(|d| d.chars().count() > 256 || d.chars().any(char::is_control)) {
             anyhow::bail!("the description must be one line of at most 256 characters");
         }
         Ok(())
@@ -538,6 +545,15 @@ impl Profile {
         self.full_tunnel = Some(false);
         Ok(self)
     }
+}
+
+/// Certificate fingerprints: SHA-256 in hexadecimal, with or without
+/// colons.
+fn check_pins(pins: &[String]) -> anyhow::Result<()> {
+    if let Some(pin) = pins.iter().find(|pin| !is_sha256_hex(&pin.replace(':', ""))) {
+        anyhow::bail!("trusted_cert {pin:?} is not a SHA-256 fingerprint (64 hexadecimal digits)");
+    }
+    Ok(())
 }
 
 pub(crate) fn is_sha256_hex(text: &str) -> bool {
@@ -632,6 +648,30 @@ mod tests {
         assert!(with(&sha).is_ok());
         assert!(with(&format!("{sha}client_cert = \"/c.pem\"")).is_err(), "Keychain or files");
         assert!(with("client_certificate = \"alice\"").is_err(), "a fingerprint");
+    }
+
+    #[test]
+    fn typos_are_refused_before_connecting() {
+        let ipsec = "name = \"c\"\nprotocol = \"ipsec\"\ngateway = \"192.0.2.1\"\n";
+        let with = |base: &str, extra: &str| toml::from_str::<Profile>(&format!("{base}{extra}")).unwrap().validate();
+        assert!(with(ipsec, "ike_version = 1").is_ok());
+        assert!(with(ipsec, "ike_version = 3").is_err());
+        let pin = "ab".repeat(32);
+        let colons = pin.as_bytes().chunks(2).map(|c| std::str::from_utf8(c).unwrap()).collect::<Vec<_>>().join(":");
+        let ssl = "name = \"s\"\nprotocol = \"forti-ssl\"\nhost = \"vpn.example.com\"\n";
+        for base in [ipsec, ssl] {
+            assert!(with(base, &format!("trusted_cert = [\"{pin}\", \"{colons}\"]")).is_ok());
+            assert!(with(base, "trusted_cert = [\"ab12\"]").is_err(), "{base}");
+        }
+    }
+
+    #[test]
+    fn descriptions_count_characters() {
+        let mut p = ssl("vpn.example.com", FortiSslAuth::Password);
+        p.description = Some("é".repeat(256));
+        assert!(p.validate().is_ok());
+        p.description = Some("é".repeat(257));
+        assert!(p.validate().is_err());
     }
 
     #[test]
