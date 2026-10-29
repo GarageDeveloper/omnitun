@@ -223,24 +223,48 @@ async fn main() -> anyhow::Result<()> {
             if names.is_empty() {
                 bail!("name at least one profile");
             }
+            let mut signing = Vec::new();
             for key in names {
                 // Its name, Folder/Name when several share it, or its id.
                 let profile = store.find(&key)?;
                 let name = profile.name.clone();
                 let terminal = Terminal { name: name.clone(), store: &store };
                 let options = vpn_client::ConnectOptions { direct, split };
-                if let Err(e) = vpn_client::connect_with(profile.clone(), &store, brand::CLI, &terminal, options).await
-                {
-                    if let FailureKind::CertificateChanged { certificate, pinned } = vpn_core::failure::kind_of(&e) {
-                        eprintln!(
-                            "{name}: the server certificate CHANGED. This can be a renewal or an interception.\n  \
-                             pinned:    {}\n  presented: {}\n\
-                             Confirm the new fingerprint with your IT department before editing trusted_cert.",
-                            pinned.join(", "),
-                            certificate.sha256
-                        );
+                match vpn_client::connect_with(profile.clone(), &store, brand::CLI, &terminal, options).await {
+                    Ok(connected) if connected.signs() => signing.push((name, connected)),
+                    Ok(_) => {}
+                    Err(e) => {
+                        if let FailureKind::CertificateChanged { certificate, pinned } = vpn_core::failure::kind_of(&e)
+                        {
+                            eprintln!(
+                                "{name}: the server certificate CHANGED. This can be a renewal or an interception.\n  \
+                                 pinned:    {}\n  presented: {}\n\
+                                 Confirm the new fingerprint with your IT department before editing trusted_cert.",
+                                pinned.join(", "),
+                                certificate.sha256
+                            );
+                        }
+                        return Err(e);
                     }
-                    return Err(e);
+                }
+            }
+            // The client certificate's key stays with this process, which
+            // signs each renegotiation and reconnection.
+            if !signing.is_empty() {
+                let names: Vec<&str> = signing.iter().map(|(name, _)| name.as_str()).collect();
+                println!(
+                    "{}: signing with the client certificate; keep this running (Ctrl-C stops signing, and the \
+                     VPN then drops at its next renegotiation, or use the app)",
+                    names.join(", ")
+                );
+                let all = async {
+                    for (_, connected) in signing {
+                        connected.signing().await;
+                    }
+                };
+                tokio::select! {
+                    _ = all => println!("no session needs signing any more"),
+                    _ = tokio::signal::ctrl_c() => println!("stopped signing; the VPNs stay up until they need it"),
                 }
             }
         }
@@ -294,10 +318,8 @@ async fn main() -> anyhow::Result<()> {
             let profile = vpn_client::vpnprofile::parse(&text)?;
             let (host, port) = profile.protocol.endpoint();
             println!("{}: {} at {host}:{port}", profile.name, profile.protocol.name());
-            if let vpn_core::ProtocolConfig::FortiSsl(p) = &profile.protocol {
-                for pin in &p.trusted_cert {
-                    println!("  trusted certificate SHA-256: {pin}");
-                }
+            for line in vpn_client::vpnprofile::trust_summary(&profile) {
+                println!("  {line}");
             }
             // What changes this Mac's routing and name resolution.
             match profile.full_tunnel {
@@ -339,16 +361,21 @@ async fn main() -> anyhow::Result<()> {
             match output {
                 // Its shared keys (tls-auth, tls-crypt) are for the other
                 // users of the VPN, not for everyone on this Mac.
+                // The mode is set before writing: an existing file keeps
+                // its own otherwise.
                 Some(path) => {
                     use std::io::Write;
-                    use std::os::unix::fs::OpenOptionsExt;
+                    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
                     std::fs::OpenOptions::new()
                         .write(true)
                         .create(true)
                         .truncate(true)
                         .mode(0o600)
                         .open(&path)
-                        .and_then(|mut f| f.write_all(text.as_bytes()))
+                        .and_then(|mut f| {
+                            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+                            f.write_all(text.as_bytes())
+                        })
                         .with_context(|| format!("cannot write {}", path.display()))?
                 }
                 None => print!("{text}"),
@@ -400,7 +427,7 @@ async fn main() -> anyhow::Result<()> {
             let existing: Vec<String> = store.load()?.into_iter().map(|p| p.name).collect();
             add_found(&store, import::macos_vpns(Some(&from), &existing)?, write, "macOS VPN")?;
         }
-        Command::Watch => watch().await?,
+        Command::Watch => watch(&store).await?,
         Command::Diagnose { output } => {
             let client = format!("{} {}", brand::CLI, vpn_core::version());
             let report = vpn_client::diagnostic::report(&store, &client).await;
@@ -465,7 +492,8 @@ struct Terminal<'a> {
 impl Interaction for Terminal<'_> {
     async fn ask(&self, prompt: &Prompt) -> anyhow::Result<Option<Zeroizing<String>>> {
         let label = format!("{}: {}: ", self.name, printable(&prompt.message));
-        let hidden = prompt.kind == PromptKind::Secret;
+        // Codes too: a server that wants them echoed asks for Text.
+        let hidden = matches!(prompt.kind, PromptKind::Secret | PromptKind::Otp);
         tokio::task::spawn_blocking(move || -> anyhow::Result<Option<Zeroizing<String>>> {
             if hidden {
                 return Ok(Some(Zeroizing::new(rpassword::prompt_password(label)?)));
@@ -534,17 +562,17 @@ async fn confirm(question: &'static str, default: bool) -> anyhow::Result<bool> 
 }
 
 /// A session's profile name, or its id if the profile is gone.
-fn store_name(id: &str) -> String {
-    ProfileStore::open(None).and_then(|s| s.find(id)).map_or(id.to_owned(), |p| p.name)
+fn store_name(store: &ProfileStore, id: &str) -> String {
+    store.find(id).map_or(id.to_owned(), |p| p.name)
 }
 
-async fn watch() -> anyhow::Result<()> {
+async fn watch(store: &ProfileStore) -> anyhow::Result<()> {
     let mut daemon = daemon().await?.watch().await?;
     loop {
         match daemon.next().await? {
             Event::Status { sessions } => print_status(&sessions),
             Event::State { id, state, detail, retry, .. } => {
-                let name = store_name(&id);
+                let name = store_name(store, &id);
                 let retry = retry.map(|r| format!(" (retry {}/{} in {}s)", r.attempt, r.max, r.delay_secs));
                 println!(
                     "{name}: {state:?}{}{}",

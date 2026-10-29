@@ -206,7 +206,10 @@ Each has a README.
   PSK, anyone holding the PSK can capture MSCHAPv2 answers: prefer the
   gateway's certificate.
 - Certificates: no revocation check (CRL, OCSP).
-- Fortinet SSL VPN: no DTLS, no host check.
+- Fortinet SSL VPN: no DTLS, no host check. During a browser (SAML)
+  login, up to 5 minutes, a web page open in the browser could send the
+  local listener a session of another account; finish the login without
+  browsing elsewhere.
 - OpenVPN: no tls-crypt-v2, no browser login (WEB_AUTH), no CBC ciphers, no
   static key mode, no `dev tap`; compressed packets from the server are
   dropped (VORACLE). The client key and the tls-auth or tls-crypt key of a
@@ -216,8 +219,10 @@ Each has a README.
   that it knows the password. PAP (off unless the profile asks for it, as
   Meraki needs) sends the password in clear inside IPsec; once a server
   has proved itself with MS-CHAPv2, its profile accepts nothing weaker.
-- A reconnection that needs a client certificate signature, a code or a
-  browser login needs the app running.
+- A reconnection that needs a code or a browser login needs the app
+  running. A client certificate signs each renegotiation and reconnection
+  from the app, or from `omnitunctl connect`, which then stays in the
+  foreground.
 - Linux: command line only, and the engines are not sandboxed yet.
 
 ## Security

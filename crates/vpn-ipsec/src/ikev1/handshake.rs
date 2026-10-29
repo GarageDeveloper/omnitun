@@ -717,7 +717,7 @@ async fn xauth_answers(
                 continue;
             }
             cfg::XAUTH_USER_NAME => match &profile.username {
-                Some(u) => u.clone(),
+                Some(u) => Zeroizing::new(u.clone()),
                 None => ask("username", PromptKind::Text, format!("XAuth username for {}", ctx.name)).await?,
             },
             cfg::XAUTH_USER_PASSWORD => {
@@ -730,7 +730,6 @@ async fn xauth_answers(
             }
             _ => continue,
         };
-        let value = Zeroizing::new(value);
         out.push(CfgAttr::var(a.kind, value.as_bytes()));
     }
     Ok(out)
@@ -926,7 +925,21 @@ impl QuickInit {
     /// Processes the (already accepted) answer: returns the new SAs, the
     /// gateway's selectors and HASH(3), to send.
     pub fn finish(self, sa: &mut IsakmpSa, inc: Incoming) -> anyhow::Result<(Phase2, Vec<TrafficSelector>, Vec<u8>)> {
-        sa.commit(self.msg_id, inc.next_iv);
+        let msg_id = self.msg_id;
+        sa.commit(msg_id, inc.next_iv.clone());
+        let finished = self.finish_committed(sa, &inc);
+        // A failed exchange leaves no IV behind for its message id.
+        if finished.is_err() {
+            sa.forget(msg_id);
+        }
+        finished
+    }
+
+    fn finish_committed(
+        self,
+        sa: &mut IsakmpSa,
+        inc: &Incoming,
+    ) -> anyhow::Result<(Phase2, Vec<TrafficSelector>, Vec<u8>)> {
         let msg = &inc.msg;
         let nr = msg.nonce().context("Quick Mode response has no nonce")?;
         ensure!((8..=256).contains(&nr.len()), "gateway nonce has an invalid length ({} bytes)", nr.len());

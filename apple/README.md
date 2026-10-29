@@ -17,6 +17,10 @@ override the system language.
 | `Omnitun/ImportView.swift` | Imports, and the first-launch assistant |
 | `Omnitun/SettingsView.swift` | Settings, diagnostic report, About |
 | `Omnitun/Updates.swift` | Sparkle updates |
+| `Omnitun/Windows.swift` | Small floating windows: one per question, the menu closing at the first click elsewhere |
+| `Omnitun/Notifier.swift` | User notifications (off when run outside the bundle) |
+| `Omnitun/ReceivedView.swift` | A `.vpnprofile` opened from the Finder or Mail: server and fingerprints shown before adding |
+| `Omnitun/HubIcon.swift` | The icon, drawn for the menu bar and the app icon |
 
 ## Build
 

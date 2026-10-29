@@ -128,13 +128,6 @@ impl Ppp {
         std::mem::take(&mut self.out)
     }
 
-    pub fn encap_ip(packet: &[u8]) -> Vec<u8> {
-        let mut frame = Vec::with_capacity(packet.len() + 2);
-        frame.extend_from_slice(&PROTO_IP.to_be_bytes());
-        frame.extend_from_slice(packet);
-        frame
-    }
-
     /// Retransmits unacknowledged Configure-Requests. Call every few
     /// seconds while negotiating.
     pub fn retransmit(&mut self) -> anyhow::Result<()> {
@@ -264,7 +257,12 @@ impl Ppp {
                 tracing::debug!("PPP: gateway rejected protocol {proto:?}");
             }
             CONF_ACK | CONF_NAK | CONF_REJ | TERM_ACK | CODE_REJ | DISCARD_REQ => {}
-            _ => self.send(PROTO_LCP, CODE_REJ, id, info),
+            // Within the peer's MRU, as for a protocol reject: an oversized
+            // frame would close the tunnel.
+            _ => {
+                let max = (self.peer_mru as usize).saturating_sub(4);
+                self.send(PROTO_LCP, CODE_REJ, id, &info[..info.len().min(max)]);
+            }
         }
         Ok(())
     }
@@ -514,5 +512,11 @@ mod tests {
         let out = ppp.drain();
         assert_eq!((header(&out[0]).0, header(&out[0]).1), (PROTO_LCP, PROTO_REJ));
         assert_eq!(&out[0][6..8], &[0x80, 0x57]);
+
+        // An unknown LCP code is rejected within the gateway's MRU.
+        ppp.input(&packet(PROTO_LCP, 0x7f, 9, &vec![0; 4000])).unwrap();
+        let out = ppp.drain();
+        assert_eq!((header(&out[0]).0, header(&out[0]).1), (PROTO_LCP, CODE_REJ));
+        assert_eq!(out[0].len() - 2, 1500, "LCP packet as long as the gateway's MRU (default)");
     }
 }

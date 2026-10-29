@@ -529,28 +529,33 @@ struct Script {
 
 #[async_trait]
 impl Prompter for Script {
-    async fn ask(&self, prompt: Prompt) -> anyhow::Result<String> {
-        self.asked.lock().unwrap().push(prompt.clone());
-        if let (Some(request), Some((sha256, key))) = (&prompt.sign, &self.client_key) {
-            anyhow::ensure!(&request.certificate == sha256, "another certificate");
-            let data = hex::decode(&request.data)?;
-            anyhow::ensure!(vpn_core::prompt::is_tls_client_signature_octets(&data), "not a TLS signature");
-            use rustls::SignatureScheme as S;
-            use vpn_core::SignAlgorithm as A;
-            let scheme = match request.algorithm {
-                A::RsaPssSha256 => S::RSA_PSS_SHA256,
-                A::RsaPkcs1Sha256 => S::RSA_PKCS1_SHA256,
-                A::EcdsaSha256 => S::ECDSA_NISTP256_SHA256,
-                A::EcdsaSha384 => S::ECDSA_NISTP384_SHA384,
-                other => anyhow::bail!("unexpected {other:?}"),
-            };
-            self.asked.lock().unwrap().last_mut().unwrap().message = format!("{:?}", request.algorithm);
-            return Ok(hex::encode(key.choose_scheme(&[scheme]).unwrap().sign(&data)?));
+    async fn ask(&self, prompt: Prompt) -> anyhow::Result<zeroize::Zeroizing<String>> {
+        // The test answers, erased like real ones.
+        let answer: anyhow::Result<String> = async {
+            self.asked.lock().unwrap().push(prompt.clone());
+            if let (Some(request), Some((sha256, key))) = (&prompt.sign, &self.client_key) {
+                anyhow::ensure!(&request.certificate == sha256, "another certificate");
+                let data = hex::decode(&request.data)?;
+                anyhow::ensure!(vpn_core::prompt::is_tls_client_signature_octets(&data), "not a TLS signature");
+                use rustls::SignatureScheme as S;
+                use vpn_core::SignAlgorithm as A;
+                let scheme = match request.algorithm {
+                    A::RsaPssSha256 => S::RSA_PSS_SHA256,
+                    A::RsaPkcs1Sha256 => S::RSA_PKCS1_SHA256,
+                    A::EcdsaSha256 => S::ECDSA_NISTP256_SHA256,
+                    A::EcdsaSha384 => S::ECDSA_NISTP384_SHA384,
+                    other => anyhow::bail!("unexpected {other:?}"),
+                };
+                self.asked.lock().unwrap().last_mut().unwrap().message = format!("{:?}", request.algorithm);
+                return Ok(hex::encode(key.choose_scheme(&[scheme]).unwrap().sign(&data)?));
+            }
+            match self.answers.get(prompt.key.as_str()) {
+                Some(v) => Ok(v.clone()),
+                None => anyhow::bail!("unexpected prompt {}", prompt.key),
+            }
         }
-        match self.answers.get(prompt.key.as_str()) {
-            Some(v) => Ok(v.clone()),
-            None => anyhow::bail!("unexpected prompt {}", prompt.key),
-        }
+        .await;
+        answer.map(zeroize::Zeroizing::new)
     }
 
     async fn open_url(&self, url: &str) -> anyhow::Result<()> {

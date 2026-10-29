@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+zeroize = "1"
 vpn-core.workspace = true
 vpn-tls.workspace = true
 anyhow.workspace = true

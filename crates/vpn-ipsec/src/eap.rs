@@ -7,7 +7,7 @@ use des::cipher::generic_array::GenericArray;
 use des::cipher::{BlockEncrypt, KeyInit};
 use md4::Md4;
 use sha1::{Digest, Sha1};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::crypto::random_bytes;
 
@@ -88,10 +88,10 @@ impl EapPeer {
                 let peer_challenge: [u8; 16] = random_bytes(16).try_into().unwrap();
                 let username = mschap_username(&self.identity);
                 let nt = nt_response(&auth_challenge, &peer_challenge, username.as_bytes(), &self.password);
-                let password_hash = Zeroizing::new(nt_password_hash(&self.password));
+                let password_hash = nt_password_hash(&self.password);
                 let expected =
                     authenticator_response(&password_hash, &nt, &peer_challenge, &auth_challenge, username.as_bytes());
-                self.pending = Some((expected, Zeroizing::new(msk(&password_hash, &nt))));
+                self.pending = Some((expected, msk(&password_hash, &nt)));
                 self.verified = false;
 
                 let mut body = vec![OP_RESPONSE, ms_id, 0, 0, 49];
@@ -145,9 +145,12 @@ pub fn mschap_username(identity: &str) -> &str {
     identity.rsplit_once('\\').map_or(identity, |(_, user)| user)
 }
 
-pub fn nt_password_hash(password: &str) -> [u8; 16] {
-    let utf16: Vec<u8> = password.encode_utf16().flat_map(u16::to_le_bytes).collect();
-    Md4::digest(utf16).into()
+/// The NT hash stands for the password: it and the password's UTF-16
+/// copy (sized up front, never reallocated) are erased after use.
+pub fn nt_password_hash(password: &str) -> Zeroizing<[u8; 16]> {
+    let mut utf16 = Zeroizing::new(Vec::with_capacity(2 * password.encode_utf16().count()));
+    utf16.extend(password.encode_utf16().flat_map(u16::to_le_bytes));
+    Zeroizing::new(Md4::digest(&*utf16).into())
 }
 
 fn challenge_hash(peer: &[u8; 16], auth: &[u8; 16], username: &[u8]) -> [u8; 8] {
@@ -166,6 +169,7 @@ fn des_encrypt(key7: &[u8], data: &[u8; 8]) -> [u8; 8] {
         *k <<= 1;
     }
     let cipher = Des::new_from_slice(&key).expect("8-byte DES key");
+    key.zeroize();
     let mut block = GenericArray::clone_from_slice(data);
     cipher.encrypt_block(&mut block);
     block.into()
@@ -173,8 +177,8 @@ fn des_encrypt(key7: &[u8], data: &[u8; 8]) -> [u8; 8] {
 
 pub fn nt_response(auth: &[u8; 16], peer: &[u8; 16], username: &[u8], password: &str) -> [u8; 24] {
     let challenge = challenge_hash(peer, auth, username);
-    let mut hash = [0u8; 21];
-    hash[..16].copy_from_slice(&nt_password_hash(password));
+    let mut hash = Zeroizing::new([0u8; 21]);
+    hash[..16].copy_from_slice(&*nt_password_hash(password));
     let mut out = [0u8; 24];
     for i in 0..3 {
         out[i * 8..(i + 1) * 8].copy_from_slice(&des_encrypt(&hash[i * 7..(i + 1) * 7], &challenge));
@@ -205,29 +209,30 @@ const MAGIC_CLIENT_SEND: &[u8] =
 const MAGIC_CLIENT_RECV: &[u8] =
     b"On the client side, this is the receive key; on the server side, it is the send key.";
 
-fn master_key(password_hash: &[u8; 16], nt: &[u8; 24]) -> [u8; 16] {
+fn master_key(password_hash: &[u8; 16], nt: &[u8; 24]) -> Zeroizing<[u8; 16]> {
     let hash_hash = Md4::digest(password_hash);
     let digest = Sha1::new().chain_update(hash_hash).chain_update(nt).chain_update(MAGIC_MASTER).finalize();
-    digest[..16].try_into().unwrap()
+    Zeroizing::new(digest[..16].try_into().unwrap())
 }
 
-fn asymmetric_start_key(master: &[u8; 16], magic: &[u8]) -> [u8; 16] {
+fn asymmetric_start_key(master: &[u8; 16], magic: &[u8]) -> Zeroizing<[u8; 16]> {
     let digest = Sha1::new()
         .chain_update(master)
         .chain_update([0u8; 40])
         .chain_update(magic)
         .chain_update([0xf2u8; 40])
         .finalize();
-    digest[..16].try_into().unwrap()
+    Zeroizing::new(digest[..16].try_into().unwrap())
 }
 
 /// MSK as used by IKEv2 with EAP-MSCHAPv2: the two RFC 3079 start keys,
 /// "client send" first, padded to 64 bytes. Both ends derive the same
 /// value whichever side they are on.
-fn msk(password_hash: &[u8; 16], nt: &[u8; 24]) -> Vec<u8> {
+fn msk(password_hash: &[u8; 16], nt: &[u8; 24]) -> Zeroizing<Vec<u8>> {
     let master = master_key(password_hash, nt);
-    let mut out = asymmetric_start_key(&master, MAGIC_CLIENT_SEND).to_vec();
-    out.extend_from_slice(&asymmetric_start_key(&master, MAGIC_CLIENT_RECV));
+    let mut out = Zeroizing::new(Vec::with_capacity(64));
+    out.extend_from_slice(&*asymmetric_start_key(&master, MAGIC_CLIENT_SEND));
+    out.extend_from_slice(&*asymmetric_start_key(&master, MAGIC_CLIENT_RECV));
     out.resize(64, 0);
     out
 }
@@ -246,10 +251,10 @@ mod tests {
     fn rfc2759_vectors() {
         assert_eq!(hex::encode(challenge_hash(&PEER_CHALLENGE, &AUTH_CHALLENGE, b"User")), "d02e4386bce91226");
         let hash = nt_password_hash("clientPass");
-        assert_eq!(hex::encode(hash), "44ebba8d5312b8d611474411f56989ae");
+        assert_eq!(hex::encode(*hash), "44ebba8d5312b8d611474411f56989ae");
         let nt = nt_response(&AUTH_CHALLENGE, &PEER_CHALLENGE, b"User", "clientPass");
         assert_eq!(hex::encode(nt), "82309ecd8d708b5ea08faa3981cd83544233114a3d85d6df");
-        assert_eq!(hex::encode(Md4::digest(hash)), "41c00c584bd2d91c4017a2a12fa59f3f");
+        assert_eq!(hex::encode(Md4::digest(*hash)), "41c00c584bd2d91c4017a2a12fa59f3f");
         assert_eq!(
             authenticator_response(&hash, &nt, &PEER_CHALLENGE, &AUTH_CHALLENGE, b"User"),
             "S=407A5589115FD0D6209F510FE9C04566932CDA56"
@@ -261,7 +266,7 @@ mod tests {
         let hash = nt_password_hash("clientPass");
         let nt = nt_response(&AUTH_CHALLENGE, &PEER_CHALLENGE, b"User", "clientPass");
         let master = master_key(&hash, &nt);
-        assert_eq!(hex::encode(master), "fdece3717a8c838cb388e527ae3cdd31");
+        assert_eq!(hex::encode(*master), "fdece3717a8c838cb388e527ae3cdd31");
         // RFC 3079 §3.5.3 shows the server's send key, i.e. the client's receive key.
         assert_eq!(hex::encode(asymmetric_start_key(&master, MAGIC_CLIENT_RECV)), "8b7cdc149b993a1ba118cb153f56dccb");
         assert_eq!(msk(&hash, &nt).len(), 64);

@@ -4,8 +4,9 @@
 <dict>
     <key>Label</key>
     <string>@LABEL@</string>
-    <!-- Copied out of the app by the installer: /Applications is writable by
-         administrators, /Library/PrivilegedHelperTools only by root. -->
+    <!-- Installed root-owned by the package itself, never copied from the
+         app: /Applications is writable by administrators,
+         /Library/PrivilegedHelperTools only by root. -->
     <key>ProgramArguments</key>
     <array>
         <string>/Library/PrivilegedHelperTools/@DAEMON@</string>

@@ -29,12 +29,17 @@ struct StaticPrompter;
 
 #[async_trait]
 impl Prompter for StaticPrompter {
-    async fn ask(&self, prompt: Prompt) -> anyhow::Result<String> {
-        Ok(match prompt.key.as_str() {
-            "psk" => PSK.into(),
-            "password" => "correct horse".into(),
-            other => anyhow::bail!("unexpected prompt {other}"),
-        })
+    async fn ask(&self, prompt: Prompt) -> anyhow::Result<zeroize::Zeroizing<String>> {
+        // The test answers, erased like real ones.
+        let answer: anyhow::Result<String> = async {
+            Ok(match prompt.key.as_str() {
+                "psk" => PSK.into(),
+                "password" => "correct horse".into(),
+                other => anyhow::bail!("unexpected prompt {other}"),
+            })
+        }
+        .await;
+        answer.map(zeroize::Zeroizing::new)
     }
 
     async fn open_url(&self, _: &str) -> anyhow::Result<()> {

@@ -30,19 +30,24 @@ struct EnvPrompter {
 
 #[async_trait]
 impl Prompter for EnvPrompter {
-    async fn ask(&self, prompt: Prompt) -> anyhow::Result<String> {
-        if let Some(request) = &prompt.sign {
-            return sign(request);
+    async fn ask(&self, prompt: Prompt) -> anyhow::Result<zeroize::Zeroizing<String>> {
+        // The test answers, erased like real ones.
+        let answer: anyhow::Result<String> = async {
+            if let Some(request) = &prompt.sign {
+                return sign(request);
+            }
+            if prompt.key == "psk" && self.wrong_psk {
+                return Ok("not-the-interop-psk".into());
+            }
+            let var = match prompt.key.as_str() {
+                "psk" => "INTEROP_PSK",
+                "password" => "INTEROP_PASSWORD",
+                other => bail!("unexpected question {other:?}: {}", prompt.message),
+            };
+            std::env::var(var).with_context(|| format!("{var} is not set"))
         }
-        if prompt.key == "psk" && self.wrong_psk {
-            return Ok("not-the-interop-psk".into());
-        }
-        let var = match prompt.key.as_str() {
-            "psk" => "INTEROP_PSK",
-            "password" => "INTEROP_PASSWORD",
-            other => bail!("unexpected question {other:?}: {}", prompt.message),
-        };
-        std::env::var(var).with_context(|| format!("{var} is not set"))
+        .await;
+        answer.map(zeroize::Zeroizing::new)
     }
 
     async fn open_url(&self, _: &str) -> anyhow::Result<()> {

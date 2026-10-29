@@ -10,7 +10,8 @@ pub enum PromptKind {
     Otp,
     /// Plain visible input.
     Text,
-    /// A yes/no decision; the answer must repeat `Prompt::confirm_with`.
+    /// A yes/no decision: accepting a certificate (`Prompt::trust`, the
+    /// answer is its SHA-256), or an acknowledgement (L2TP).
     Confirm,
     /// A signature with the client certificate's key, which stays in the
     /// user's Keychain; never remembered.
@@ -196,7 +197,8 @@ pub const SIGN: &str = "sign";
 /// Interactive channel back to the user who requested the connection.
 #[async_trait]
 pub trait Prompter: Send + Sync {
-    async fn ask(&self, prompt: Prompt) -> anyhow::Result<String>;
+    /// The answer is erased once dropped: it may be a password or a code.
+    async fn ask(&self, prompt: Prompt) -> anyhow::Result<zeroize::Zeroizing<String>>;
     /// Ask the user's session to open a URL in a browser (SAML).
     async fn open_url(&self, url: &str) -> anyhow::Result<()>;
 }

@@ -40,16 +40,18 @@ impl EspSa {
         self.bytes += payload.len() as u64;
         let align = self.cipher.block_len().max(4);
         let pad = (align - (payload.len() + 2) % align) % align;
-        let mut plain = Vec::with_capacity(payload.len() + pad + 2);
-        plain.extend_from_slice(payload);
-        plain.extend(1..=pad as u8);
-        plain.extend_from_slice(&[pad as u8, next_header]);
         let mut header = [0u8; 8];
         header[..4].copy_from_slice(&self.spi.to_be_bytes());
         header[4..].copy_from_slice(&(self.seq as u32).to_be_bytes());
         let iv = self.cipher.make_iv(self.seq);
-        let mut out = header.to_vec();
-        out.extend_from_slice(&self.cipher.seal(&iv, &header, &plain));
+        // Header, IV, payload and trailer in one buffer, encrypted in place.
+        let mut out = Vec::with_capacity(8 + iv.len() + payload.len() + pad + 2 + self.cipher.icv_len());
+        out.extend_from_slice(&header);
+        out.extend_from_slice(&iv);
+        out.extend_from_slice(payload);
+        out.extend(1..=pad as u8);
+        out.extend_from_slice(&[pad as u8, next_header]);
+        self.cipher.seal_in_place(&mut out, header.len(), &header);
         Ok(out)
     }
 

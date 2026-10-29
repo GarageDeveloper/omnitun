@@ -3148,6 +3148,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
+ "zeroize",
 ]
 
 [[package]]
@@ -3193,6 +3194,7 @@ dependencies = [
  "vpn-core",
  "vpn-tls",
  "webpki-roots",
+ "zeroize",
 ]
 
 [[package]]
