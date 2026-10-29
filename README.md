@@ -206,7 +206,10 @@ Each has a README.
   PSK, anyone holding the PSK can capture MSCHAPv2 answers: prefer the
   gateway's certificate.
 - Certificates: no revocation check (CRL, OCSP).
-- Fortinet SSL VPN: no DTLS, no host check.
+- Fortinet SSL VPN: no DTLS, no host check. During a browser (SAML)
+  login, up to 5 minutes, a web page open in the browser could send the
+  local listener a session of another account; finish the login without
+  browsing elsewhere.
 - OpenVPN: no tls-crypt-v2, no browser login (WEB_AUTH), no CBC ciphers, no
   static key mode, no `dev tap`; compressed packets from the server are
   dropped (VORACLE). The client key and the tls-auth or tls-crypt key of a

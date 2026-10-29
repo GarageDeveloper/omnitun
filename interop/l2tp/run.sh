@@ -56,8 +56,7 @@ server_number() {
 # client's proposals and pppd options, the PSK and password given, what
 # IPCP must give (INTEROP_EXPECT), the lines (regular expressions) the
 # server must log, how long to keep the tunnel up, and for reject-* the
-# error each client must report. The patterns for the omnitun client are
-# guesses until the engine exists: adjust them to its messages.
+# error each client must report.
 scenario() {
     server= ike=aes256-sha256-modp2048 esp=aes256-sha256 group= ppp= expect= duration=0
     psk=omnitun-interop-psk password=alice-password server_log= refused= stock_refused=

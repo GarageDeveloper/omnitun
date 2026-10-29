@@ -10,7 +10,8 @@ pub enum PromptKind {
     Otp,
     /// Plain visible input.
     Text,
-    /// A yes/no decision; the answer must repeat `Prompt::confirm_with`.
+    /// A yes/no decision: accepting a certificate (`Prompt::trust`, the
+    /// answer is its SHA-256), or an acknowledgement (L2TP).
     Confirm,
     /// A signature with the client certificate's key, which stays in the
     /// user's Keychain; never remembered.

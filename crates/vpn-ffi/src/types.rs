@@ -319,7 +319,7 @@ pub struct ProfileSummary {
     /// Stable: what sessions, secrets and chains refer to.
     pub id: String,
     pub name: String,
-    /// `forti-ssl`, `ipsec`, `openvpn` or `l2tp`.
+    /// `forti-ssl`, `ipsec`, `openvpn`, `l2tp` or `wireguard`.
     pub protocol: String,
     pub host: String,
     pub port: u16,

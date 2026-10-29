@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use vpn_core::ipc::{Event, Request, Retry, SessionInfo, SessionState};
-use vpn_core::{CertificateInfo, Profile, Prompt, PromptKind};
+use vpn_core::{CertificateInfo, FailureKind, Profile, Prompt, PromptKind};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::client_key::ClientKey;
@@ -115,8 +115,14 @@ pub async fn connect_with(
     // A company VPN still runs alone in split mode.
     let profile = if split { profile.in_split_mode()? } else { profile };
     let sessions = Daemon::open(client).await?.status().await?;
-    let others = exclusive_conflicts(&profile, &sessions, &store.load()?, direct);
-    ensure!(others.is_empty(), "{}", exclusive_refusal(&profile, &others));
+    let profiles = store.load()?;
+    let others = exclusive_sessions(&profile, &sessions, &profiles, direct);
+    if !others.is_empty() {
+        // One VPN in the way: the app offers to disconnect it.
+        let with = (others.len() == 1).then(|| others[0].id.clone());
+        let names: Vec<String> = others.iter().map(|s| s.name.clone()).collect();
+        return Err(vpn_core::failure(FailureKind::Conflict { with }, exclusive_refusal(&profile, &names)));
+    }
     let mut signers = Vec::new();
     let via = match direct || profile.via.is_empty() {
         true => None,
@@ -135,6 +141,15 @@ pub fn exclusive_conflicts(
     profiles: &[Profile],
     direct: bool,
 ) -> Vec<String> {
+    exclusive_sessions(profile, sessions, profiles, direct).into_iter().map(|s| s.name.clone()).collect()
+}
+
+fn exclusive_sessions<'a>(
+    profile: &Profile,
+    sessions: &'a [SessionInfo],
+    profiles: &[Profile],
+    direct: bool,
+) -> Vec<&'a SessionInfo> {
     let up = [SessionState::Connecting, SessionState::Connected, SessionState::Reconnecting];
     let exclusive = |id: &str| profiles.iter().any(|p| p.id == id && p.exclusive);
     sessions
@@ -142,7 +157,6 @@ pub fn exclusive_conflicts(
         .filter(|s| s.id != profile.id && up.contains(&s.state))
         .filter(|s| direct || !profile.via.contains(&s.id))
         .filter(|s| profile.exclusive || exclusive(&s.id))
-        .map(|s| s.name.clone())
         .collect()
 }
 

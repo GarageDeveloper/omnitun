@@ -247,13 +247,62 @@ enum CipherImpl {
 /// (HMAC, encrypt-then-MAC) or is the GCM tag with `aad` as AAD.
 /// The AES key schedules wipe themselves on drop (`zeroize` feature of
 /// `aes`/`aes-gcm`), as do the ChaCha20-Poly1305 and 3DES keys; salt and
-/// integrity key are wiped by `Drop` below.
+/// the keyed HMAC are wiped by `Drop` below.
 pub struct Cipher {
     encr: EncrAlg,
     integ: Option<IntegAlg>,
     imp: CipherImpl,
     salt: [u8; 4],
-    integ_key: Zeroizing<Vec<u8>>,
+    /// The HMAC keyed once: each packet clones it instead of hashing the
+    /// key again.
+    mac: Option<Box<KeyedMac>>,
+}
+
+/// An HMAC whose key is already absorbed (its inner and outer pads).
+#[derive(Clone)]
+enum KeyedMac {
+    Sha1(Hmac<Sha1>),
+    Sha256(Hmac<Sha256>),
+    Sha384(Hmac<Sha384>),
+    Sha512(Hmac<Sha512>),
+}
+
+impl Drop for KeyedMac {
+    fn drop(&mut self) {
+        // The pads stand for the integrity key; hmac 0.12 does not erase
+        // them. SAFETY: the HMAC states are plain arrays and integers, with
+        // no heap data and no Drop of their own, and are not used again.
+        unsafe { zeroize::zeroize_flat_type(self as *mut Self) }
+    }
+}
+
+impl KeyedMac {
+    fn new(prf: PrfAlg, key: &[u8]) -> Self {
+        const ANY: &str = "HMAC accepts keys of any length";
+        match prf {
+            PrfAlg::HmacSha1 => Self::Sha1(Mac::new_from_slice(key).expect(ANY)),
+            PrfAlg::HmacSha256 => Self::Sha256(Mac::new_from_slice(key).expect(ANY)),
+            PrfAlg::HmacSha384 => Self::Sha384(Mac::new_from_slice(key).expect(ANY)),
+            PrfAlg::HmacSha512 => Self::Sha512(Mac::new_from_slice(key).expect(ANY)),
+        }
+    }
+
+    /// The MAC of `parts`, truncated to `len` bytes, into `out`.
+    fn compute(&self, parts: &[&[u8]], out: &mut Vec<u8>) {
+        fn run<M: Mac + Clone>(mac: &M, parts: &[&[u8]], out: &mut Vec<u8>) {
+            let mut mac = mac.clone();
+            for part in parts {
+                mac.update(part);
+            }
+            out.extend_from_slice(&mac.finalize().into_bytes());
+        }
+        match self {
+            Self::Sha1(m) => run(m, parts, out),
+            Self::Sha256(m) => run(m, parts, out),
+            Self::Sha384(m) => run(m, parts, out),
+            Self::Sha512(m) => run(m, parts, out),
+        }
+    }
 }
 
 impl Drop for Cipher {
@@ -289,7 +338,8 @@ impl Cipher {
             EncrAlg::TripleDesCbc => CipherImpl::Des3(Box::new(TdesEde3::new_from_slice(enc_key)?)),
             EncrAlg::AesCbc { .. } => bail!("unsupported AES key size"),
         };
-        Ok(Self { encr, integ, imp, salt, integ_key: Zeroizing::new(integ_key.to_vec()) })
+        let mac = integ.map(|integ| Box::new(KeyedMac::new(integ.prf(), integ_key)));
+        Ok(Self { encr, integ, imp, salt, mac })
     }
 
     pub fn iv_len(&self) -> usize {
@@ -313,53 +363,53 @@ impl Cipher {
 
     /// Encrypts already padded `plain`, returning `IV || ciphertext || ICV`.
     pub fn seal(&self, iv: &[u8], aad: &[u8], plain: &[u8]) -> Vec<u8> {
-        assert_eq!(iv.len(), self.iv_len());
-        assert_eq!(plain.len() % self.block_len(), 0);
         let mut out = Vec::with_capacity(iv.len() + plain.len() + self.icv_len());
         out.extend_from_slice(iv);
-        let start = out.len();
         out.extend_from_slice(plain);
-        match &self.imp {
-            CipherImpl::Gcm128(c) => {
-                let tag = c
-                    .encrypt_in_place_detached(&self.nonce(iv), aad, &mut out[start..])
-                    .expect("GCM encryption cannot fail for IKE/ESP sizes");
-                out.extend_from_slice(&tag);
-            }
-            CipherImpl::Gcm256(c) => {
-                let tag = c
-                    .encrypt_in_place_detached(&self.nonce(iv), aad, &mut out[start..])
-                    .expect("GCM encryption cannot fail for IKE/ESP sizes");
-                out.extend_from_slice(&tag);
-            }
-            CipherImpl::ChaCha(c) => {
-                let tag = c
-                    .encrypt_in_place_detached(&self.nonce(iv), aad, &mut out[start..])
-                    .expect("ChaCha20-Poly1305 encryption cannot fail for IKE/ESP sizes");
-                out.extend_from_slice(&tag);
-            }
+        self.seal_in_place(&mut out, 0, aad);
+        out
+    }
+
+    /// Encrypts in place `IV || padded plaintext`, which starts at `start`
+    /// in `out` (what comes before, an ESP header, is left as is), and
+    /// appends the ICV: one buffer from the packet to the wire.
+    pub fn seal_in_place(&self, out: &mut Vec<u8>, start: usize, aad: &[u8]) {
+        let iv_len = self.iv_len();
+        assert!(out.len() >= start + iv_len);
+        assert_eq!((out.len() - start - iv_len) % self.block_len(), 0);
+        let (head, body) = out.split_at_mut(start + iv_len);
+        let iv = &head[start..];
+        let tag = match &self.imp {
+            CipherImpl::Gcm128(c) => c
+                .encrypt_in_place_detached(&self.nonce(iv), aad, body)
+                .expect("GCM encryption cannot fail for IKE/ESP sizes")
+                .to_vec(),
+            CipherImpl::Gcm256(c) => c
+                .encrypt_in_place_detached(&self.nonce(iv), aad, body)
+                .expect("GCM encryption cannot fail for IKE/ESP sizes")
+                .to_vec(),
+            CipherImpl::ChaCha(c) => c
+                .encrypt_in_place_detached(&self.nonce(iv), aad, body)
+                .expect("ChaCha20-Poly1305 encryption cannot fail for IKE/ESP sizes")
+                .to_vec(),
             CipherImpl::Des3(c) => {
-                cbc_encrypt(c.as_ref(), iv, &mut out[start..]);
-                let icv = self.mac(aad, &out);
-                out.extend_from_slice(&icv);
+                cbc_encrypt(c.as_ref(), iv, body);
+                self.mac(aad, &out[start..])
             }
             CipherImpl::Cbc128(c) => {
-                cbc_encrypt(c.as_ref(), iv, &mut out[start..]);
-                let icv = self.mac(aad, &out);
-                out.extend_from_slice(&icv);
+                cbc_encrypt(c.as_ref(), iv, body);
+                self.mac(aad, &out[start..])
             }
             CipherImpl::Cbc192(c) => {
-                cbc_encrypt(c.as_ref(), iv, &mut out[start..]);
-                let icv = self.mac(aad, &out);
-                out.extend_from_slice(&icv);
+                cbc_encrypt(c.as_ref(), iv, body);
+                self.mac(aad, &out[start..])
             }
             CipherImpl::Cbc256(c) => {
-                cbc_encrypt(c.as_ref(), iv, &mut out[start..]);
-                let icv = self.mac(aad, &out);
-                out.extend_from_slice(&icv);
+                cbc_encrypt(c.as_ref(), iv, body);
+                self.mac(aad, &out[start..])
             }
-        }
-        out
+        };
+        out.extend_from_slice(&tag);
     }
 
     /// Verifies and decrypts `IV || ciphertext || ICV`, returning the
@@ -409,8 +459,9 @@ impl Cipher {
     }
 
     fn mac(&self, aad: &[u8], body: &[u8]) -> Vec<u8> {
-        let integ = self.integ.expect("MAC only used with an integrity algorithm");
-        let mut full = integ.prf().compute(&self.integ_key, &[aad, body]);
+        let mac = self.mac.as_ref().expect("MAC only used with an integrity algorithm");
+        let mut full = Vec::with_capacity(PrfAlg::HmacSha512.output_len());
+        mac.compute(&[aad, body], &mut full);
         full.truncate(self.icv_len());
         full
     }
@@ -479,23 +530,28 @@ impl CbcCipher {
 
 /// CBC over the cipher's own block size (16 for AES, 8 for 3DES); `iv`
 /// is one block.
+/// Largest block of the CBC ciphers (AES).
+const MAX_BLOCK: usize = 16;
+
 fn cbc_encrypt<C: BlockEncrypt>(cipher: &C, iv: &[u8], buf: &mut [u8]) {
     let n = C::block_size();
-    let mut prev = iv.to_vec();
+    let mut prev = [0u8; MAX_BLOCK];
+    prev[..n].copy_from_slice(iv);
     for block in buf.chunks_exact_mut(n) {
         for (b, p) in block.iter_mut().zip(&prev) {
             *b ^= p;
         }
         cipher.encrypt_block(GenericArray::from_mut_slice(block));
-        prev.copy_from_slice(block);
+        prev[..n].copy_from_slice(block);
     }
 }
 
 fn cbc_decrypt<C: BlockDecrypt>(cipher: &C, iv: &[u8], buf: &mut [u8]) {
     let n = C::block_size();
-    let mut prev = iv.to_vec();
+    let (mut prev, mut current) = ([0u8; MAX_BLOCK], [0u8; MAX_BLOCK]);
+    prev[..n].copy_from_slice(iv);
     for block in buf.chunks_exact_mut(n) {
-        let current = block.to_vec();
+        current[..n].copy_from_slice(block);
         cipher.decrypt_block(GenericArray::from_mut_slice(block));
         for (b, p) in block.iter_mut().zip(&prev) {
             *b ^= p;

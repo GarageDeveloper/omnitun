@@ -101,7 +101,9 @@ impl Tunnel {
                     // IPv4 only: IPv6 is blocked into the tunnel interface.
                     if packet.first().is_some_and(|b| b >> 4 == 4) {
                         ctx.stats.record_tx(packet.len());
-                        self.write_frame(&Ppp::encap_ip(&packet)).await?;
+                        // The PPP header and the packet go into one frame.
+                        let frame = encode_frame_parts(&[&crate::ppp::PROTO_IP.to_be_bytes(), &packet])?;
+                        self.write_encoded(&frame).await?;
                     }
                 }
                 _ = keepalive.tick() => self.ppp.keepalive()?,
@@ -128,7 +130,11 @@ impl Tunnel {
     }
 
     async fn write_frame(&mut self, payload: &[u8]) -> anyhow::Result<()> {
-        self.writer.write_all(&encode_frame(payload)?).await.context("tunnel write failed")?;
+        self.write_encoded(&encode_frame(payload)?).await
+    }
+
+    async fn write_encoded(&mut self, frame: &[u8]) -> anyhow::Result<()> {
+        self.writer.write_all(frame).await.context("tunnel write failed")?;
         self.writer.flush().await?;
         Ok(())
     }
@@ -145,13 +151,21 @@ async fn read_loop(mut reader: ReadHalf<Stream>, tx: mpsc::Sender<anyhow::Result
 }
 
 pub fn encode_frame(payload: &[u8]) -> anyhow::Result<Vec<u8>> {
+    encode_frame_parts(&[payload])
+}
+
+/// A frame whose payload is `parts`, end to end, built in one buffer.
+pub fn encode_frame_parts(parts: &[&[u8]]) -> anyhow::Result<Vec<u8>> {
+    let payload_len: usize = parts.iter().map(|p| p.len()).sum();
     let len =
-        u16::try_from(payload.len()).ok().filter(|l| *l <= u16::MAX - HEADER_LEN as u16).context("frame too large")?;
-    let mut frame = Vec::with_capacity(payload.len() + HEADER_LEN);
+        u16::try_from(payload_len).ok().filter(|l| *l <= u16::MAX - HEADER_LEN as u16).context("frame too large")?;
+    let mut frame = Vec::with_capacity(payload_len + HEADER_LEN);
     frame.extend_from_slice(&(len + HEADER_LEN as u16).to_be_bytes());
     frame.extend_from_slice(&MAGIC);
     frame.extend_from_slice(&len.to_be_bytes());
-    frame.extend_from_slice(payload);
+    for part in parts {
+        frame.extend_from_slice(part);
+    }
     Ok(frame)
 }
 
@@ -181,6 +195,10 @@ mod tests {
         assert_eq!(&frame[..6], &[0, 12, 0x50, 0x50, 0, 6]);
         let decoded = read_frame(&mut &frame[..]).await.unwrap();
         assert_eq!(decoded, &[0xc0, 0x21, 1, 1, 0, 4]);
+        // An IP packet: the PPP header and the packet, end to end.
+        let parts = encode_frame_parts(&[&crate::ppp::PROTO_IP.to_be_bytes(), &[0x45, 0, 0, 20]]).unwrap();
+        assert_eq!(parts, encode_frame(&[0, 0x21, 0x45, 0, 0, 20]).unwrap());
+        assert!(encode_frame_parts(&[&[0; 65520], &[0; 10]]).is_err(), "too large");
     }
 
     #[tokio::test]

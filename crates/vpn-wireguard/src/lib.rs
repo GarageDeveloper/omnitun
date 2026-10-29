@@ -59,6 +59,20 @@ impl WireGuardEngine {
     }
 }
 
+/// Sends straight from boringtun's buffer: the datagram borrows it, so
+/// this takes the socket alone. A transient error is skipped once the
+/// session is established.
+async fn send_datagram(socket: &UdpSocket, established: bool, datagram: &[u8]) -> anyhow::Result<()> {
+    match socket.send(datagram).await {
+        Ok(_) => Ok(()),
+        Err(e) if established && vpn_core::net::transient(&e) => {
+            debug!("transient UDP send error: {e}");
+            Ok(())
+        }
+        Err(e) => Err(e).kind(FailureKind::Unreachable).context("cannot send to the WireGuard peer"),
+    }
+}
+
 struct Session {
     socket: UdpSocket,
     peer: IpAddr,
@@ -91,17 +105,6 @@ impl Session {
     /// Once the peer has answered, a transient network error (an ICMP
     /// unreachable while it restarts, roaming…) only loses the datagram:
     /// WireGuard's timers recover, or give up with `ConnectionExpired`.
-    async fn send_datagram(&self, datagram: &[u8]) -> anyhow::Result<()> {
-        match self.socket.send(datagram).await {
-            Ok(_) => Ok(()),
-            Err(e) if self.established() && vpn_core::net::transient(&e) => {
-                debug!("transient UDP send error: {e}");
-                Ok(())
-            }
-            Err(e) => Err(e).kind(FailureKind::Unreachable).context("cannot send to the WireGuard peer"),
-        }
-    }
-
     /// Feeds one datagram to boringtun; returns the IPv4 packets for the
     /// tun interface.
     async fn received(&mut self, datagram: &[u8]) -> anyhow::Result<Vec<Bytes>> {
@@ -110,8 +113,7 @@ impl Session {
         loop {
             match result {
                 TunnResult::WriteToNetwork(reply) => {
-                    let reply = reply.to_vec();
-                    self.send_datagram(&reply).await?;
+                    send_datagram(&self.socket, self.tunn.time_since_last_handshake().is_some(), reply).await?;
                     // Then the packets queued while there was no session.
                     result = self.tunn.decapsulate(None, &[], &mut self.send);
                     continue;
@@ -133,8 +135,7 @@ impl Session {
     async fn outgoing(&mut self, packet: &[u8]) -> anyhow::Result<()> {
         match self.tunn.encapsulate(packet, &mut self.send) {
             TunnResult::WriteToNetwork(datagram) => {
-                let datagram = datagram.to_vec();
-                self.send_datagram(&datagram).await
+                send_datagram(&self.socket, self.tunn.time_since_last_handshake().is_some(), datagram).await
             }
             TunnResult::Err(e) => {
                 debug!("cannot encapsulate: {e:?}");
@@ -147,8 +148,7 @@ impl Session {
     async fn tick(&mut self) -> anyhow::Result<()> {
         match self.tunn.update_timers(&mut self.send) {
             TunnResult::WriteToNetwork(datagram) => {
-                let datagram = datagram.to_vec();
-                self.send_datagram(&datagram).await
+                send_datagram(&self.socket, self.tunn.time_since_last_handshake().is_some(), datagram).await
             }
             TunnResult::Err(WireGuardError::ConnectionExpired) => {
                 Err(failure(FailureKind::Timeout, "the WireGuard peer stopped answering"))
@@ -170,8 +170,7 @@ impl Session {
         for attempt in 1..=HANDSHAKE_ATTEMPTS {
             match self.tunn.format_handshake_initiation(&mut self.send, true) {
                 TunnResult::WriteToNetwork(datagram) => {
-                    let datagram = datagram.to_vec();
-                    self.send_datagram(&datagram).await?;
+                    send_datagram(&self.socket, self.tunn.time_since_last_handshake().is_some(), datagram).await?;
                 }
                 TunnResult::Err(e) => bail!("cannot start the WireGuard handshake: {e:?}"),
                 _ => {}

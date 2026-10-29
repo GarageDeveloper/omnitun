@@ -36,12 +36,19 @@ pub async fn serve(control: UnixStream, fds: StdUnixStream, prompts: UnixListene
             }
         }
     });
+    let hub = Arc::new(PromptHub::default());
     let (messages_tx, mut messages) = mpsc::channel::<ToEngine>(16);
+    let stopper = hub.clone();
     let reader = tokio::spawn(async move {
         let mut lines = BufReader::new(read);
         loop {
             match next(&mut lines).await {
                 Ok(Some(message)) => {
+                    // Here, not in the attempt's loop: a signature asked from
+                    // inside a TLS handshake holds the attempt's thread.
+                    if matches!(message, ToEngine::Stop) {
+                        stopper.stop_questions();
+                    }
                     if messages_tx.send(message).await.is_err() {
                         break;
                     }
@@ -55,7 +62,6 @@ pub async fn serve(control: UnixStream, fds: StdUnixStream, prompts: UnixListene
         }
     });
 
-    let hub = Arc::new(PromptHub::default());
     let listener = tokio::spawn(hub.clone().listen(prompts, owner));
     let fds = Arc::new(fds);
     while let Some(message) = messages.recv().await {
