@@ -1,5 +1,5 @@
 [Unit]
-Description=Omnitun VPN daemon (Fortinet SSL VPN and IPsec)
+Description=Omnitun VPN daemon (Fortinet SSL VPN, IPsec, OpenVPN, L2TP, WireGuard)
 After=network-online.target systemd-resolved.service
 Wants=network-online.target
 
@@ -11,7 +11,9 @@ Restart=always
 TimeoutStopSec=30
 # Root is only needed for tun, routes and resolved, and to start the engines
 # under their own account (setuid, setgid, kill); keep the rest locked down.
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID CAP_KILL
+# The engines inherit all of this. CHOWN and FOWNER: the control and prompt
+# sockets are given to their users, then their mode is set.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_CHOWN CAP_FOWNER CAP_SETUID CAP_SETGID CAP_KILL
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
@@ -19,6 +21,26 @@ RuntimeDirectory=omnitund
 ReadWritePaths=/run
 NoNewPrivileges=yes
 LimitCORE=0
+# Unix sockets (control, prompts, D-Bus), netlink (ip), and the engines'
+# connections.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+MemoryDenyWriteExecute=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+PrivateIPC=yes
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target
