@@ -79,7 +79,7 @@ pub struct OpenVpnProfile {
     /// Networks routed through the tunnel besides those the server pushes
     /// (`route` lines of the configuration).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub extra_routes: Vec<ipnet::Ipv4Net>,
+    pub extra_routes: Vec<crate::Noted<ipnet::Ipv4Net>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,6 +239,7 @@ impl OpenVpnProfile {
             self.extra_routes.iter().all(|r| r.prefix_len() > 0),
             "an additional network cannot be the default route: choose a full tunnel instead"
         );
+        self.extra_routes.iter().try_for_each(crate::Noted::check_note)?;
         if let Some(challenge) = &self.static_challenge {
             ensure!(self.auth_user_pass, "static-challenge needs auth-user-pass");
             ensure!(challenge.text.len() <= 256, "the static challenge text is too long");

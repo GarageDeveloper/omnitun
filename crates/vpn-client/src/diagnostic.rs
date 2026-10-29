@@ -277,9 +277,9 @@ impl Redactor {
             self.known.push((account, "<account>".into()));
         }
         for domain in &profile.dns_domains {
-            if !self.known.iter().any(|(k, _)| k == domain) {
+            if !self.known.iter().any(|(k, _)| *k == domain.value) {
                 self.domains += 1;
-                self.known.push((domain.clone(), format!("<domain-{}>", self.domains)));
+                self.known.push((domain.value.clone(), format!("<domain-{}>", self.domains)));
             }
         }
         self.known.retain(|(k, _)| k.len() >= 3);

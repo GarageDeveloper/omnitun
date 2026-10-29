@@ -511,7 +511,7 @@ fn convert(config: &Config, text: &str, notes: &mut Vec<String>) -> anyhow::Resu
             }
         }
     }
-    let listed_routes = own_routes(config, notes);
+    let listed_routes: Vec<vpn_core::Noted<_>> = own_routes(config, notes).into_iter().map(Into::into).collect();
     let mut extra_routes = Vec::new();
     if config.has("route-nopull") {
         full_tunnel = full_tunnel.or(Some(false));
@@ -586,7 +586,7 @@ fn convert(config: &Config, text: &str, notes: &mut Vec<String>) -> anyhow::Resu
         routes,
         full_tunnel,
         split_routes: Vec::new(),
-        dns_domains,
+        dns_domains: dns_domains.into_iter().map(Into::into).collect(),
         allow_route_overlap: false,
         via: Vec::new(),
         exclusive: false,
@@ -870,7 +870,7 @@ pub(super) mod tests {
         assert!(p.client_cert_pem.is_none());
         assert_eq!(profile.full_tunnel, Some(false));
         assert_eq!(profile.routes, None, "route adds to the pushed routes");
-        assert_eq!(p.extra_routes, ["10.20.0.0/16".parse().unwrap()]);
+        assert_eq!(p.extra_routes, ["10.20.0.0/16".parse::<ipnet::Ipv4Net>().unwrap()]);
         assert_eq!(profile.dns_domains, ["corp.example"]);
         assert!(imported.notes.iter().any(|n| n.contains("password in the auth-user-pass file")));
         assert!(imported.notes.iter().any(|n| n.contains("\"alice\", read from pass.txt")), "{:?}", imported.notes);

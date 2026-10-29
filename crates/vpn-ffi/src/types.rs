@@ -336,7 +336,7 @@ pub struct ProfileSummary {
     /// A company VPN: never up at the same time as another VPN.
     pub exclusive: bool,
     /// The networks of a connection in split mode; empty: no split mode.
-    pub split_routes: Vec<String>,
+    pub split_routes: Vec<crate::ListEntry>,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]

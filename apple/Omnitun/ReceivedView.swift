@@ -64,22 +64,22 @@ struct ReceivedView: View {
                 if let routes = form.routes, !routes.isEmpty {
                     GridRow(alignment: .top) {
                         Text("Networks").foregroundStyle(.secondary)
-                        Text(verbatim: routes.joined(separator: ", ")).font(.caption).textSelection(.enabled)
+                        Text(verbatim: routes.map(\.described).joined(separator: ", ")).font(.caption).textSelection(.enabled)
                     }
                 }
                 if !form.splitRoutes.isEmpty {
                     GridRow(alignment: .top) {
                         Text("Split Mode").foregroundStyle(.secondary)
-                        Text(verbatim: form.splitRoutes.joined(separator: ", ")).font(.caption).textSelection(.enabled)
+                        Text(verbatim: form.splitRoutes.map(\.described).joined(separator: ", ")).font(.caption).textSelection(.enabled)
                     }
                 }
                 if !form.dnsDomains.isEmpty {
                     GridRow(alignment: .top) {
                         Text("Name Resolution").foregroundStyle(.secondary)
                         VStack(alignment: .leading) {
-                            ForEach(form.dnsDomains, id: \.self) { domain in
-                                Text("Names ending in .\(domain)").font(.caption)
-                                    .foregroundStyle(domain.contains(".") ? Color.primary : Color.orange)
+                            ForEach(form.dnsDomains, id: \.self) { entry in
+                                Text("Names ending in .\(entry.described)").font(.caption)
+                                    .foregroundStyle(entry.value.contains(".") ? Color.primary : Color.orange)
                             }
                         }
                     }

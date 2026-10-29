@@ -22,6 +22,7 @@ pub mod failure;
 pub mod ipc;
 pub mod l2tp;
 pub mod net;
+pub mod noted;
 pub mod openvpn;
 pub mod profile;
 pub mod prompt;
@@ -31,6 +32,7 @@ pub mod wireguard;
 pub use engine::{Engine, PacketIo, SessionContext, TunnelStats};
 pub use failure::{CertificateInfo, Failure, FailureExt, FailureKind, failure};
 pub use l2tp::{L2TP_PORT, L2tpProfile, PppAuth};
+pub use noted::Noted;
 pub use openvpn::{
     Compression, ControlChannel, OpenVpnProfile, OpenVpnRemote, StaticChallenge, Transport, X509NameCheck, X509NameKind,
 };

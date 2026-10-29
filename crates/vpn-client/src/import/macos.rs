@@ -155,7 +155,7 @@ fn l2tp(service: &Dictionary, display: &str, existing: &[String]) -> anyhow::Res
         list.into_iter().flatten().filter_map(Value::as_string).map(|s| s.trim().to_owned()).collect()
     };
     let domains = strings("SearchDomains");
-    profile.dns_domains = domains.iter().filter(|d| valid_domain(d)).cloned().collect();
+    profile.dns_domains = domains.iter().filter(|d| valid_domain(d)).cloned().map(Into::into).collect();
     let ProtocolConfig::L2tp(p) = &mut profile.protocol else { unreachable!() };
     p.username = get(ppp, "AuthName");
     p.local_id = get(ipsec, "LocalIdentifier");

@@ -7,8 +7,8 @@ use base64::Engine;
 use ipnet::Ipv4Net;
 use vpn_core::{
     Compression, ControlChannel, ExchangeMode, FortiSslAuth, FortiSslProfile, GatewayAuth, IpsecProfile, L2tpProfile,
-    OpenVpnProfile, OpenVpnRemote, PppAuth, Profile, ProtocolConfig, StaticChallenge, Transport, WireGuardProfile,
-    X509NameCheck, X509NameKind,
+    Noted, OpenVpnProfile, OpenVpnRemote, PppAuth, Profile, ProtocolConfig, StaticChallenge, Transport,
+    WireGuardProfile, X509NameCheck, X509NameKind,
 };
 use x509_parser::prelude::{FromDer, X509Certificate};
 
@@ -158,7 +158,7 @@ pub struct ProfileForm {
     /// Data channel rekeying interval in seconds, 0 for never.
     pub reneg_sec: u32,
     /// Networks added to those the server pushes.
-    pub extra_routes: Vec<String>,
+    pub extra_routes: Vec<ListEntry>,
     // L2TP: the PPP authentications accepted
     pub ppp_mschapv2: bool,
     pub ppp_chap: bool,
@@ -187,11 +187,11 @@ pub struct ProfileForm {
     /// IPsec (IKEv2), instead of the PSK or EAP.
     pub client_certificate: Option<String>,
     /// `None`: the routes pushed by the gateway.
-    pub routes: Option<Vec<String>>,
+    pub routes: Option<Vec<ListEntry>>,
     pub tunnel_mode: TunnelMode,
     /// The networks of a connection in split mode; empty for none.
-    pub split_routes: Vec<String>,
-    pub dns_domains: Vec<String>,
+    pub split_routes: Vec<ListEntry>,
+    pub dns_domains: Vec<ListEntry>,
     pub allow_route_overlap: bool,
     /// VPNs this one is chained through, preferred first.
     pub via: Vec<String>,
@@ -316,18 +316,15 @@ impl ProfileForm {
         }
         profile.routes = match &self.routes {
             None => None,
-            Some(routes) => Some(networks(routes)?),
+            Some(routes) => Some(noted_networks(routes)?),
         };
-        profile.split_routes = networks(&self.split_routes)?;
+        profile.split_routes = noted_networks(&self.split_routes)?;
         profile.full_tunnel = match self.tunnel_mode {
             TunnelMode::Automatic => None,
             TunnelMode::Full => Some(true),
             TunnelMode::Split => Some(false),
         };
-        profile.dns_domains = clean_list(&self.dns_domains);
-        if let Some(bad) = profile.dns_domains.iter().find(|d| !vpn_core::valid_domain(d)) {
-            anyhow::bail!("{bad:?} is not a DNS domain");
-        }
+        profile.dns_domains = noted_domains(&self.dns_domains)?;
         profile.allow_route_overlap = self.allow_route_overlap;
         profile.via = dedup(clean_list(&self.via));
         profile.exclusive = self.exclusive;
@@ -399,7 +396,7 @@ impl ProfileForm {
             OpenVpnCompression::StubV2 => Compression::StubV2,
         };
         p.reneg_sec = self.reneg_sec;
-        p.extra_routes = networks(&self.extra_routes)?;
+        p.extra_routes = noted_networks(&self.extra_routes)?;
         Ok(())
     }
 
@@ -701,11 +698,95 @@ fn clean_list(items: &[String]) -> Vec<String> {
     items.iter().map(|i| i.trim().to_owned()).filter(|i| !i.is_empty()).collect()
 }
 
-/// Networks typed one per entry, like 10.1.0.0/16.
-fn networks(items: &[String]) -> anyhow::Result<Vec<Ipv4Net>> {
-    clean_list(items)
+/// One line of a list in the editor: a network or a domain, and what it
+/// is for. Rows whose value is empty are dropped.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ListEntry {
+    pub value: String,
+    pub note: String,
+}
+
+/// An entry without a note.
+impl From<&str> for ListEntry {
+    fn from(value: &str) -> Self {
+        Self { value: value.to_owned(), note: String::new() }
+    }
+}
+
+fn note(text: &str) -> Option<String> {
+    Some(text.trim().to_owned()).filter(|n| !n.is_empty())
+}
+
+fn noted_networks(items: &[ListEntry]) -> anyhow::Result<Vec<Noted<Ipv4Net>>> {
+    items
         .iter()
-        .map(|r| r.parse::<Ipv4Net>().map_err(|_| anyhow::anyhow!("{r:?} is not a network (like 10.1.0.0/16)")))
+        .filter(|e| !e.value.trim().is_empty())
+        .map(|e| Ok(Noted::new(parse_network(&e.value)?, note(&e.note))))
+        .collect()
+}
+
+fn noted_domains(items: &[ListEntry]) -> anyhow::Result<Vec<Noted<String>>> {
+    items
+        .iter()
+        .filter(|e| !e.value.trim().is_empty())
+        .map(|e| Ok(Noted::new(parse_domain(&e.value)?, note(&e.note))))
+        .collect()
+}
+
+/// A network, or an address alone (a /32); `10.1.0.0` alone is most
+/// likely a network whose prefix was forgotten, so it is refused.
+fn parse_network(text: &str) -> anyhow::Result<Ipv4Net> {
+    let text = text.trim();
+    if let Ok(net) = text.parse::<Ipv4Net>() {
+        return Ok(net.trunc());
+    }
+    match text.parse::<std::net::Ipv4Addr>() {
+        Ok(address) if address.octets()[3] == 0 => {
+            anyhow::bail!(
+                "{text:?} looks like a network: add its prefix (like {text}/16), or /32 for this address alone"
+            )
+        }
+        Ok(address) => Ok(Ipv4Net::from(address)),
+        Err(_) => anyhow::bail!("{text:?} is not a network (like 10.1.0.0/16) or an address"),
+    }
+}
+
+fn parse_domain(text: &str) -> anyhow::Result<String> {
+    let domain = text.trim().trim_end_matches('.').to_ascii_lowercase();
+    anyhow::ensure!(vpn_core::valid_domain(&domain), "{text:?} is not a DNS domain");
+    Ok(domain)
+}
+
+fn entries<T: std::fmt::Display>(list: &[Noted<T>]) -> Vec<ListEntry> {
+    list.iter().map(|e| ListEntry { value: e.value.to_string(), note: e.note.clone().unwrap_or_default() }).collect()
+}
+
+/// What is wrong with a network typed in the editor, if anything (an
+/// address alone is a /32).
+#[uniffi::export]
+pub fn network_error(text: String) -> Option<String> {
+    parse_network(&text).err().map(|e| e.to_string())
+}
+
+/// What is wrong with a DNS domain typed in the editor, if anything.
+#[uniffi::export]
+pub fn domain_error(text: String) -> Option<String> {
+    parse_domain(&text).err().map(|e| e.to_string())
+}
+
+/// Lines pasted into a list: the first word is the network or domain, the
+/// rest of the line its note (`10.1.0.0/16  Intranet`, `10.1.0.0/16 #
+/// Intranet`, `10.1.0.0/16, Intranet`).
+#[uniffi::export]
+pub fn parse_list(text: String) -> Vec<ListEntry> {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let (value, rest) = line.split_once(|c: char| c.is_whitespace() || c == ',').unwrap_or((line, ""));
+            let note = rest.trim().trim_start_matches(['#', ',', '-']).trim();
+            (!value.is_empty())
+                .then(|| ListEntry { value: value.trim_end_matches(',').to_owned(), note: note.to_owned() })
+        })
         .collect()
 }
 
@@ -774,14 +855,14 @@ impl From<&Profile> for ProfileForm {
             mtu: None,
             local_public_key: None,
             client_certificate: None,
-            routes: profile.routes.as_ref().map(|r| r.iter().map(ToString::to_string).collect()),
+            routes: profile.routes.as_deref().map(entries),
             tunnel_mode: match profile.full_tunnel {
                 None => TunnelMode::Automatic,
                 Some(true) => TunnelMode::Full,
                 Some(false) => TunnelMode::Split,
             },
-            split_routes: profile.split_routes.iter().map(ToString::to_string).collect(),
-            dns_domains: profile.dns_domains.clone(),
+            split_routes: entries(&profile.split_routes),
+            dns_domains: entries(&profile.dns_domains),
             allow_route_overlap: profile.allow_route_overlap,
             via: profile.via.clone(),
             folder: profile.folder.clone(),
@@ -875,7 +956,7 @@ impl From<&Profile> for ProfileForm {
                     Compression::StubV2 => OpenVpnCompression::StubV2,
                 };
                 form.reneg_sec = p.reneg_sec;
-                form.extra_routes = p.extra_routes.iter().map(ToString::to_string).collect();
+                form.extra_routes = entries(&p.extra_routes);
             }
             ProtocolConfig::FortiSsl(FortiSslProfile {
                 host,
@@ -1284,12 +1365,52 @@ mod tests {
     }
 
     #[test]
+    fn notes_go_through_the_form() {
+        let base: Profile = toml::from_str(
+            "name = \"paris\"\nprotocol = \"forti-ssl\"\nhost = \"vpn.example.com\"\n\
+             split_routes = [\"10.0.0.0/8\", { net = \"10.20.0.5/32\", note = \"Jira\" }]\n\
+             dns_domains = [{ domain = \"corp.example\", note = \"Intranet\" }]",
+        )
+        .unwrap();
+        let form = ProfileForm::from(&base);
+        assert_eq!(form.split_routes[1], ListEntry { value: "10.20.0.5/32".into(), note: "Jira".into() });
+        assert_eq!(form.dns_domains[0].note, "Intranet");
+        let saved = form.to_profile(Some(&base)).unwrap();
+        assert_eq!((saved.split_routes.clone(), saved.dns_domains.clone()), (base.split_routes, base.dns_domains));
+    }
+
+    #[test]
+    fn pasted_lines_become_entries() {
+        let entries = parse_list(
+            "10.1.0.0/16  Intranet\n\n10.1.2.3 # Jira\n10.9.0.0/24, Lab, 2nd floor\n  corp.example\n".into(),
+        );
+        let pairs: Vec<(&str, &str)> = entries.iter().map(|e| (e.value.as_str(), e.note.as_str())).collect();
+        assert_eq!(
+            pairs,
+            [
+                ("10.1.0.0/16", "Intranet"),
+                ("10.1.2.3", "Jira"),
+                ("10.9.0.0/24", "Lab, 2nd floor"),
+                ("corp.example", "")
+            ]
+        );
+        assert!(network_error("10.1.0.0".into()).is_some() && network_error("10.1.2.3".into()).is_none());
+        assert!(domain_error("corp.example".into()).is_none() && domain_error("not a domain".into()).is_some());
+    }
+
+    #[test]
     fn bad_input_is_explained() {
         let mut form = ProfileForm::new(VpnKind::Ipsec);
         form.name = "branch".into();
         form.host = "203.0.113.10".into();
         assert!(form.to_profile(None).is_ok());
         form.routes = Some(vec!["10.1.0.0".into()]);
+        assert!(form.to_profile(None).unwrap_err().to_string().contains("add its prefix"));
+        form.routes =
+            Some(vec!["10.1.0.0/16".into(), "10.1.2.3".into(), ListEntry { value: "".into(), note: "x".into() }]);
+        let routes = form.to_profile(None).unwrap().routes.unwrap();
+        assert_eq!(routes.iter().map(ToString::to_string).collect::<Vec<_>>(), ["10.1.0.0/16", "10.1.2.3/32"]);
+        form.routes = Some(vec!["nope".into()]);
         assert!(form.to_profile(None).unwrap_err().to_string().contains("not a network"));
         form.routes = None;
         form.name = "bad/name".into();

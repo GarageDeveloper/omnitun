@@ -837,6 +837,76 @@ private func optional(_ binding: Binding<String?>) -> Binding<String> {
 }
 
 /// A list edited as one entry per line.
+extension ListEntry {
+    /// `10.20.0.5/32 (Jira)`, or the value alone.
+    var described: String { note.isEmpty ? value : "\(value) (\(note))" }
+}
+
+/// A list of networks or domains, each with a note to remember what it is
+/// for: one row per entry, checked as it is typed; several lines can be
+/// pasted at once (`10.1.0.0/16  Intranet`). Empty rows are dropped when
+/// the VPN is saved.
+private struct NotedList: View {
+    enum Kind {
+        case network, domain
+    }
+
+    let title: LocalizedStringKey
+    @Binding var entries: [ListEntry]
+    let kind: Kind
+
+    private var placeholder: String { kind == .network ? "10.1.0.0/16" : "corp.example" }
+
+    private func error(_ value: String) -> String? {
+        let value = value.trimmingCharacters(in: .whitespaces)
+        guard !value.isEmpty else { return nil }
+        return kind == .network ? networkError(text: value) : domainError(text: value)
+    }
+
+    /// Row `i`'s field, safe while rows are removed.
+    private func field(_ i: Int, _ path: WritableKeyPath<ListEntry, String>) -> Binding<String> {
+        Binding(get: { i < entries.count ? entries[i][keyPath: path] : "" },
+                set: { if i < entries.count { entries[i][keyPath: path] = $0 } })
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+            Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 4) {
+                ForEach(Array(entries.indices), id: \.self) { i in
+                    GridRow {
+                        // In a Form a title becomes a label: prompts only.
+                        TextField("", text: field(i, \.value), prompt: Text(verbatim: placeholder))
+                            .font(.system(.body, design: .monospaced)).frame(minWidth: 150, idealWidth: 170)
+                        TextField("", text: field(i, \.note), prompt: Text("Note"))
+                        if let error = error(entries[i].value) {
+                            Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.red).help(error)
+                        } else {
+                            Image(systemName: "exclamationmark.circle.fill").hidden()
+                        }
+                        Button { entries.remove(at: i) } label: { Image(systemName: "minus.circle") }
+                            .buttonStyle(.borderless).help(String(localized: "Remove"))
+                    }
+                }
+            }
+            .labelsHidden().textFieldStyle(.roundedBorder).multilineTextAlignment(.leading)
+            HStack(spacing: 12) {
+                Button { entries.append(ListEntry(value: "", note: "")) } label: { Label("Add", systemImage: "plus") }
+                Button { paste() } label: { Label("Paste Lines", systemImage: "doc.on.clipboard") }
+                    .help(String(localized: "One entry per line: the network or domain, then its note"))
+            }
+            .buttonStyle(.borderless).font(.callout)
+        }
+    }
+
+    private func paste() {
+        guard let text = NSPasteboard.general.string(forType: .string) else { return }
+        // A blank last row is replaced, not kept before the pasted ones.
+        if let last = entries.last, last.value.isEmpty, last.note.isEmpty { entries.removeLast() }
+        entries += parseList(text: text)
+    }
+}
+
 private func lines(_ binding: Binding<[String]>) -> Binding<String> {
     Binding(get: { binding.wrappedValue.joined(separator: "\n") },
             set: { binding.wrappedValue = $0.components(separatedBy: .newlines) })
@@ -1838,7 +1908,7 @@ private struct NetworkTab: View {
         Binding(get: { form.routes != nil }, set: { form.routes = $0 ? (form.routes ?? []) : nil })
     }
 
-    private var routes: Binding<[String]> {
+    private var routes: Binding<[ListEntry]> {
         Binding(get: { form.routes ?? [] }, set: { form.routes = $0 })
     }
 
@@ -1851,29 +1921,21 @@ private struct NetworkTab: View {
             }
             if form.kind == .openVpn {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Additional networks through the VPN (one per line)")
-                    TextEditor(text: lines($form.extraRoutes)).font(.system(.body, design: .monospaced)).frame(minHeight: 50)
+                    NotedList(title: "Additional networks through the VPN", entries: $form.extraRoutes, kind: .network)
                     Text("Added to the networks the server announces, like the route lines of an OpenVPN file.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
             Toggle("Use my own networks instead of the gateway's", isOn: ownRoutes)
             if form.routes != nil {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Networks (one per line, like 10.1.0.0/16)")
-                    TextEditor(text: lines(routes)).font(.system(.body, design: .monospaced)).frame(minHeight: 70)
-                }
+                NotedList(title: "Networks", entries: routes, kind: .network)
             }
             VStack(alignment: .leading, spacing: 4) {
-                Text("Networks in split mode (one per line)")
-                TextEditor(text: lines($form.splitRoutes)).font(.system(.body, design: .monospaced)).frame(minHeight: 50)
+                NotedList(title: "Networks in split mode", entries: $form.splitRoutes, kind: .network)
                 Text("The menu then also offers to connect this VPN in split mode: only these networks go through it, the rest of the traffic does not. Add the DNS domains below, or the VPN's DNS servers are not used.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
-            VStack(alignment: .leading, spacing: 4) {
-                Text("DNS domains resolved through this VPN (one per line)")
-                TextEditor(text: lines($form.dnsDomains)).font(.system(.body, design: .monospaced)).frame(minHeight: 50)
-            }
+            NotedList(title: "DNS domains resolved through this VPN", entries: $form.dnsDomains, kind: .domain)
             if !others.isEmpty {
                 Section("Connect Through") {
                     ForEach(others, id: \.0) { id, name in

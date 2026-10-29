@@ -328,14 +328,13 @@ async fn main() -> anyhow::Result<()> {
                 None => {}
             }
             if let Some(routes) = &profile.routes {
-                println!("  networks: {}", routes.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "));
+                println!("  networks: {}", described(routes));
             }
             if !profile.split_routes.is_empty() {
-                let networks = profile.split_routes.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
-                println!("  networks in split mode: {networks}");
+                println!("  networks in split mode: {}", described(&profile.split_routes));
             }
             for domain in &profile.dns_domains {
-                println!("  names ending in .{domain} are resolved by the VPN");
+                println!("  names ending in .{} are resolved by the VPN", described(std::slice::from_ref(domain)));
             }
             if !yes && !confirm("Check these with whoever sent the file. Add this VPN? [y/N] ", false).await? {
                 bail!("not added");
@@ -476,6 +475,15 @@ async fn main() -> anyhow::Result<()> {
         },
     }
     Ok(())
+}
+
+/// Entries and their notes, as received: `10.0.0.0/8, 10.20.0.5/32 (Jira)`.
+fn described<T: std::fmt::Display>(list: &[vpn_core::Noted<T>]) -> String {
+    let entry = |e: &vpn_core::Noted<T>| match &e.note {
+        Some(note) => format!("{} ({})", e.value, printable(note)),
+        None => e.value.to_string(),
+    };
+    list.iter().map(entry).collect::<Vec<_>>().join(", ")
 }
 
 async fn daemon() -> anyhow::Result<Daemon> {

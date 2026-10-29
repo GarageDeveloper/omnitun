@@ -222,6 +222,7 @@ impl ProfileStore {
             let keep: Vec<String> = existing.iter().flat_map(|t| t.iter().map(|(k, _)| k.to_owned())).collect();
             let unknown = existing.as_deref().map(unknown_keys).unwrap_or_default();
             let mut new = minimal(canonical.parse::<DocumentMut>()?.as_table().clone(), &canonical, &keep);
+            inline_lists(&mut new);
             unplace(&mut new);
             match profile_table(doc, previous) {
                 Some(table) => update_table(table, &new, &unknown),
@@ -530,6 +531,33 @@ fn update_table(table: &mut Table, new: &Table, unknown: &[String]) {
             }
         }
     }
+}
+
+/// Lists whose entries may carry a note (`vpn_core::Noted`).
+const NOTED_LISTS: [&str; 4] = ["routes", "split_routes", "extra_routes", "dns_domains"];
+
+/// Keeps a list of noted entries on one line, `[..., { net = ..., note =
+/// ... }]`: toml writes `[[profile.split_routes]]` tables when every entry
+/// has a note.
+pub(crate) fn inline_lists(table: &mut Table) {
+    for key in NOTED_LISTS {
+        if let Some(Item::ArrayOfTables(list)) = table.get(key) {
+            let mut array = toml_edit::Array::new();
+            for entry in list.iter() {
+                array.push(entry.clone().into_inline_table());
+            }
+            table.insert(key, Item::Value(toml_edit::Value::Array(array)));
+        }
+    }
+}
+
+/// The TOML of `file`, its noted lists in line.
+pub fn to_toml(file: &vpn_core::ProfileFile) -> anyhow::Result<String> {
+    let mut doc: DocumentMut = toml::to_string(file)?.parse()?;
+    if let Some(Item::ArrayOfTables(list)) = doc.get_mut("profile") {
+        list.iter_mut().for_each(inline_lists);
+    }
+    Ok(doc.to_string())
 }
 
 /// `item` without the places its tables had in the document they come
@@ -923,6 +951,24 @@ mod tests {
         let text = std::fs::read_to_string(store.path()).unwrap();
         assert!(text.contains("future_option = 3"), "{text}");
         assert!(!text.contains("full_tunnel"), "known keys still go: {text}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Notes stay next to their network or domain, on one line.
+    #[test]
+    fn noted_lists_stay_in_line() {
+        let (store, dir) = store("noted");
+        let mut lab = store.find("lab").unwrap();
+        lab.split_routes = vec![vpn_core::Noted::new("10.20.0.5/32".parse().unwrap(), Some("Jira".into()))];
+        lab.dns_domains = vec!["corp.example".to_owned().into()];
+        store.save(&lab).unwrap();
+        let text = std::fs::read_to_string(store.path()).unwrap();
+        assert!(text.contains(r#"split_routes = [{ net = "10.20.0.5/32", note = "Jira" }]"#), "{text}");
+        assert!(text.contains(r#"dns_domains = ["corp.example"]"#), "{text}");
+        assert_eq!(store.find("lab").unwrap().split_routes, lab.split_routes);
+        // A shared file too.
+        let shared = crate::vpnprofile::export(&lab).unwrap();
+        assert!(shared.contains(r#"{ net = "10.20.0.5/32", note = "Jira" }"#), "{shared}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

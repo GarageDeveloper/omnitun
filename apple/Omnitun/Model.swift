@@ -98,7 +98,7 @@ final class AppModel: ObservableObject {
     func isSplit(_ id: String) -> Bool {
         guard let session = sessions[id], !session.fullTunnel,
               let networks = profile(id)?.splitRoutes, !networks.isEmpty else { return false }
-        return Set(session.routes).isSuperset(of: networks)
+        return Set(session.routes).isSuperset(of: networks.map(\.value))
     }
 
     func isOn(_ id: String) -> Bool {

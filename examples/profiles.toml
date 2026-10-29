@@ -33,12 +33,13 @@ routes = ["10.50.0.0/16"]
 # A gateway that takes all traffic, also offered in split mode: the menu's
 # "Connect in Split Mode" or `omnitunctl connect --split office` sends only
 # these networks through the VPN. dns_domains say which names its DNS
-# servers resolve then.
+# servers resolve then. Any entry of routes, split_routes, extra_routes
+# and dns_domains can carry a note, to remember what it is for.
 [[profile]]
 name = "office"
 protocol = "l2tp"
 gateway = "vpn.example.com"
 username = "carol"
 full_tunnel = true
-split_routes = ["10.20.0.0/16", "192.168.30.0/24"]
-dns_domains = ["office.example"]
+split_routes = ["10.20.0.0/16", { net = "192.168.30.12/32", note = "Printers" }]
+dns_domains = [{ domain = "office.example", note = "Intranet" }]
