@@ -21,3 +21,4 @@ libc = "0.2"
 
 [dev-dependencies]
 toml.workspace = true
+serde_json.workspace = true

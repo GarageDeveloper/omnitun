@@ -604,13 +604,17 @@ impl From<&vpn_core::Profile> for ProfileSummary {
             port,
             username,
             auth,
-            dns_domains: p.dns_domains.clone(),
+            dns_domains: vpn_core::noted::values(&p.dns_domains),
             description: p.description.clone(),
             save_password: p.save_password,
             via: p.via.clone(),
             folder: p.folder.clone(),
             exclusive: p.exclusive,
-            split_routes: p.split_routes.iter().map(ToString::to_string).collect(),
+            split_routes: p
+                .split_routes
+                .iter()
+                .map(|e| forms::ListEntry { value: e.value.to_string(), note: e.note.clone().unwrap_or_default() })
+                .collect(),
         }
     }
 }

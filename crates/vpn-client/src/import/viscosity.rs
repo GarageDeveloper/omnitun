@@ -142,7 +142,7 @@ mod tests {
         let profile = &file.profiles[0];
         assert_eq!(profile.description.as_deref(), Some("Bureau Paris"));
         let vpn_core::ProtocolConfig::OpenVpn(p) = &profile.protocol else { panic!() };
-        assert_eq!(p.extra_routes, ["10.20.0.0/16".parse().unwrap()]);
+        assert_eq!(p.extra_routes, ["10.20.0.0/16".parse::<ipnet::Ipv4Net>().unwrap()]);
         assert_eq!(p.remotes[0].transport, vpn_core::Transport::Tcp);
         assert!(found[2].result.is_err(), "dev tap is refused");
 

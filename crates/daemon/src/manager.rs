@@ -661,7 +661,7 @@ fn unused_dns(settings: &TunnelSettings) -> Option<String> {
 
 fn apply_profile(profile: &Profile, mut settings: TunnelSettings) -> anyhow::Result<TunnelSettings> {
     if let Some(routes) = &profile.routes {
-        settings.routes = routes.clone();
+        settings.routes = vpn_core::noted::values(routes);
         settings.full_tunnel = false;
     }
     // A pushed default route means full tunnel; installing 0.0.0.0/0 on the
@@ -759,8 +759,8 @@ fn apply_profile(profile: &Profile, mut settings: TunnelSettings) -> anyhow::Res
         if !vpn_core::valid_domain(domain) {
             bail!("refusing invalid DNS domain {domain:?} in the profile");
         }
-        if !settings.dns.match_domains.contains(domain) {
-            settings.dns.match_domains.push(domain.clone());
+        if !settings.dns.match_domains.contains(&domain.value) {
+            settings.dns.match_domains.push(domain.value.clone());
         }
     }
     Ok(settings)

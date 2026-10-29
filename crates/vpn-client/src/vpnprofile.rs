@@ -62,7 +62,7 @@ pub fn export(profile: &Profile) -> anyhow::Result<String> {
     if let Some(field) = shared.protocol.keychain_ca_pem() {
         *field = None;
     }
-    let body = toml::to_string(&ProfileFile { profiles: vec![shared] })?;
+    let body = crate::profiles::to_toml(&ProfileFile { profiles: vec![shared] })?;
     Ok(format!(
         "# {} VPN profile \"{}\". It holds no password, private key or user name.\n{body}",
         vpn_core::brand::PRODUCT,

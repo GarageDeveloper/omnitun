@@ -1,3 +1,4 @@
+use crate::Noted;
 use ipnet::Ipv4Net;
 use serde::{Deserialize, Serialize};
 
@@ -24,9 +25,10 @@ pub struct Profile {
     pub save_password: bool,
     #[serde(flatten)]
     pub protocol: ProtocolConfig,
-    /// Replace the routes pushed by the gateway.
+    /// Replace the routes pushed by the gateway. Each list entry may carry
+    /// a note ([`crate::Noted`]).
     #[serde(default)]
-    pub routes: Option<Vec<Ipv4Net>>,
+    pub routes: Option<Vec<Noted<Ipv4Net>>>,
     /// Force (or refuse) full-tunnel mode regardless of the gateway.
     #[serde(default)]
     pub full_tunnel: Option<bool>,
@@ -35,10 +37,10 @@ pub struct Profile {
     /// through the VPN, whatever the gateway and `full_tunnel` say. Empty:
     /// no split mode.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub split_routes: Vec<Ipv4Net>,
+    pub split_routes: Vec<Noted<Ipv4Net>>,
     /// Extra split-DNS domains, in addition to those pushed.
     #[serde(default)]
-    pub dns_domains: Vec<String>,
+    pub dns_domains: Vec<Noted<String>>,
     /// Accept routes identical to another active session's routes.
     #[serde(default)]
     pub allow_route_overlap: bool,
@@ -530,6 +532,8 @@ impl Profile {
         if self.description.as_ref().is_some_and(|d| d.chars().count() > 256 || d.chars().any(char::is_control)) {
             anyhow::bail!("the description must be one line of at most 256 characters");
         }
+        self.routes.iter().flatten().chain(&self.split_routes).try_for_each(Noted::check_note)?;
+        self.dns_domains.iter().try_for_each(Noted::check_note)?;
         Ok(())
     }
 }
@@ -697,8 +701,9 @@ mod tests {
 
         p.split_routes.push("0.0.0.0/0".parse().unwrap());
         assert!(p.validate().is_err(), "0.0.0.0/0 is not a split");
-        p.split_routes =
-            (0..=MAX_SPLIT_ROUTES as u32).map(|i| Ipv4Net::new((0x0a00_0000 + (i << 8)).into(), 24).unwrap()).collect();
+        p.split_routes = (0..=MAX_SPLIT_ROUTES as u32)
+            .map(|i| Ipv4Net::new((0x0a00_0000 + (i << 8)).into(), 24).unwrap().into())
+            .collect();
         assert!(p.validate().is_err());
 
         let file: ProfileFile = toml::from_str(

@@ -261,7 +261,7 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         if let profile = model.profile(id), !profile.splitRoutes.isEmpty {
             let split = action(String(localized: "Connect in Split Mode"), #selector(connectSplit(_:)),
                                symbol: "arrow.triangle.branch")
-            split.toolTip = profile.splitRoutes.joined(separator: ", ")
+            split.toolTip = profile.splitRoutes.map(\.described).joined(separator: ", ")
             split.representedObject = id
             split.indentationLevel = 2
             split.isEnabled = serviceAvailable && !model.isOn(id)

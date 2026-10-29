@@ -147,7 +147,6 @@
 "Certificate" = "Certificat";
 "Changes apply at the next connection." = "Les modifications s'appliqueront à la prochaine connexion.";
 "Check the server and the fingerprint with whoever sent you this file before adding it." = "Vérifiez le serveur et l'empreinte auprès de la personne qui vous a envoyé ce fichier avant de l'ajouter.";
-"DNS domains resolved through this VPN (one per line)" = "Domaines DNS résolus par ce VPN (un par ligne)";
 "Delete" = "Supprimer";
 "ESP proposals (one per line)" = "Propositions ESP (une par ligne)";
 "Everything through the VPN" = "Tout le trafic par le VPN";
@@ -161,7 +160,6 @@
 "Local ID" = "Identifiant local";
 "Method" = "Méthode";
 "Network" = "Réseau";
-"Networks (one per line, like 10.1.0.0/16)" = "Réseaux (un par ligne, par exemple 10.1.0.0/16)";
 "New VPN" = "Nouveau VPN";
 "Only replace the certificate once your IT department has confirmed the new fingerprint." = "Ne remplacez le certificat qu'une fois la nouvelle empreinte confirmée par votre service informatique.";
 "Only the VPN's networks" = "Seulement les réseaux du VPN";
@@ -178,7 +176,6 @@
 "Traffic" = "Trafic";
 "Trusted certificate fingerprints (SHA-256, one per line)" = "Empreintes de certificats de confiance (SHA-256, une par ligne)";
 "Use my own networks instead of the gateway's" = "Utiliser mes propres réseaux au lieu de ceux de la passerelle";
-"Networks in split mode (one per line)" = "Réseaux du mode split (un par ligne)";
 "The menu then also offers to connect this VPN in split mode: only these networks go through it, the rest of the traffic does not. Add the DNS domains below, or the VPN's DNS servers are not used." = "Le menu propose alors aussi de connecter ce VPN en mode split : seuls ces réseaux passent par lui, le reste du trafic non. Ajoutez les domaines DNS ci-dessous, sinon les serveurs DNS du VPN ne servent pas.";
 "User Name" = "Identifiant";
 "Without it, a VPN that would take traffic from another one is not connected." = "Sans cette option, un VPN qui prendrait le trafic d'un autre n'est pas connecté.";
@@ -328,7 +325,6 @@
 "A one-time code asked with the password (static-challenge)." = "Un code à usage unique demandé avec le mot de passe (static-challenge).";
 "Show the code while it is typed" = "Afficher le code pendant la saisie";
 "This file is not an OpenVPN static key." = "Ce fichier n’est pas une clé statique OpenVPN.";
-"Additional networks through the VPN (one per line)" = "Réseaux supplémentaires par le VPN (un par ligne)";
 "Added to the networks the server announces, like the route lines of an OpenVPN file." = "Ajoutés aux réseaux annoncés par le serveur, comme les lignes route d'un fichier OpenVPN.";
 "Viscosity Connections Found" = "Connexions Viscosity trouvées";
 "No Viscosity connection on this Mac." = "Aucune connexion Viscosity sur ce Mac.";
@@ -436,3 +432,11 @@
 "Check for Updates…" = "Rechercher des mises à jour…";
 "Check for updates every day" = "Rechercher des mises à jour chaque jour";
 "Check for Updates Now" = "Rechercher maintenant";
+
+/* Lists of networks and domains, with notes */
+"Additional networks through the VPN" = "Réseaux supplémentaires par le VPN";
+"Networks in split mode" = "Réseaux du mode split";
+"DNS domains resolved through this VPN" = "Domaines DNS résolus par ce VPN";
+"Note" = "Note";
+"Paste Lines" = "Coller des lignes";
+"One entry per line: the network or domain, then its note" = "Une entrée par ligne : le réseau ou le domaine, puis sa note";
