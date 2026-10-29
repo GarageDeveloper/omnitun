@@ -511,7 +511,8 @@ fn convert(config: &Config, text: &str, notes: &mut Vec<String>) -> anyhow::Resu
             }
         }
     }
-    let listed_routes: Vec<vpn_core::Noted<_>> = own_routes(config, notes).into_iter().map(Into::into).collect();
+    let listed_routes: Vec<vpn_core::Noted<_>> =
+        own_routes(config, notes).into_iter().map(|net| vpn_core::Destination::from(net).into()).collect();
     let mut extra_routes = Vec::new();
     if config.has("route-nopull") {
         full_tunnel = full_tunnel.or(Some(false));
@@ -527,7 +528,7 @@ fn convert(config: &Config, text: &str, notes: &mut Vec<String>) -> anyhow::Resu
             ));
             extra_routes.truncate(vpn_core::openvpn::MAX_EXTRA_ROUTES);
         }
-        extra_routes.retain(|r| r.prefix_len() > 0);
+        extra_routes.retain(|r| r.network().is_some_and(|net| net.prefix_len() > 0));
     }
     let mut dns_domains = Vec::new();
     for d in &config.directives {
@@ -587,6 +588,7 @@ fn convert(config: &Config, text: &str, notes: &mut Vec<String>) -> anyhow::Resu
         full_tunnel,
         split_routes: Vec::new(),
         dns_domains: dns_domains.into_iter().map(Into::into).collect(),
+        excluded_domains: Vec::new(),
         allow_route_overlap: false,
         via: Vec::new(),
         exclusive: false,

@@ -146,6 +146,10 @@ impl Manager {
         {
             bail!("certificate files must be inlined by the client, not read by the daemon");
         }
+        // The DNS proxy that finds their addresses comes next (#37).
+        if profile.routes_by_domain() {
+            bail!("{} routes domains, which this version cannot do yet: remove them from its lists", profile.name);
+        }
         let mut sessions = self.sessions.lock().unwrap();
         match sessions.get(&profile.id) {
             // A failed session stays listed until replaced or dismissed.
@@ -642,6 +646,7 @@ fn claims(profile: &Profile, settings: &TunnelSettings, owner: u32) -> Claims {
             IpAddr::V4(gateway) => Some(gateway),
             IpAddr::V6(_) => None,
         },
+        dynamic: Default::default(),
     }
 }
 
@@ -661,7 +666,7 @@ fn unused_dns(settings: &TunnelSettings) -> Option<String> {
 
 fn apply_profile(profile: &Profile, mut settings: TunnelSettings) -> anyhow::Result<TunnelSettings> {
     if let Some(routes) = &profile.routes {
-        settings.routes = vpn_core::noted::values(routes);
+        settings.routes = vpn_core::destination::networks(routes);
         settings.full_tunnel = false;
     }
     // A pushed default route means full tunnel; installing 0.0.0.0/0 on the
@@ -741,7 +746,8 @@ fn apply_profile(profile: &Profile, mut settings: TunnelSettings) -> anyhow::Res
         tracing::warn!("keeping the first {MAX_DNS_SERVERS} of {} DNS servers", settings.dns.servers.len());
         settings.dns.servers.truncate(MAX_DNS_SERVERS);
     }
-    if !settings.full_tunnel && settings.routes.is_empty() {
+    // Routes by domain alone are enough: they come as names resolve.
+    if !settings.full_tunnel && settings.routes.is_empty() && profile.included_domains().is_empty() {
         bail!("the gateway pushed no routes; set `routes` or `full_tunnel = true` in the profile");
     }
     // The tunnel's DNS servers are reached through the tunnel, never in
@@ -1117,6 +1123,15 @@ mod tests {
     }
 
     #[test]
+    fn domains_alone_are_enough_routes() {
+        let p = profile(serde_json::json!({ "routes": ["*.corp-saas.com"] }));
+        let settings = apply_profile(&p, settings(&["10.0.0.0/8"], false, &[])).unwrap();
+        // Only the host route to the tunnel's DNS server.
+        assert_eq!(settings.routes, ["10.0.0.53/32".parse::<Ipv4Net>().unwrap()]);
+        assert!(!settings.full_tunnel);
+    }
+
+    #[test]
     fn profile_routes_replace_pushed_ones_and_disable_full_tunnel() {
         let p = profile(serde_json::json!({ "routes": ["10.50.0.0/16"] }));
         let s = apply_profile(&p, settings(&[], true, &[])).unwrap();
@@ -1314,6 +1329,15 @@ mod tests {
         let (link, _rx) = client();
         let p = profile(serde_json::json!({ "ca_file": "/etc/master.passwd" }));
         assert!(m.connect(p, None, link, 1000).unwrap_err().to_string().contains("must be inlined"));
+        // Until the DNS proxy exists (#37), a profile routing domains says so.
+        for extra in [
+            serde_json::json!({ "routes": ["10.1.0.0/16", "*.corp-saas.com"] }),
+            serde_json::json!({ "excluded_domains": [{ "domain": "zoom.us", "note": "Zoom" }] }),
+        ] {
+            let (link, _rx) = client();
+            let err = m.connect(profile(extra), None, link, 1000).unwrap_err();
+            assert!(err.to_string().contains("cannot do yet"), "{err}");
+        }
         assert!(m.sessions.lock().unwrap().is_empty(), "nothing started");
     }
 

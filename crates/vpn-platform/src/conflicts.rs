@@ -2,7 +2,7 @@
 //! the routes and DNS domains it will install, and a new session is refused
 //! when it would silently hijack another one's traffic.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
 
 use ipnet::Ipv4Net;
@@ -27,6 +27,9 @@ pub struct Claims {
     /// Sessions this one is chained through: overlapping their routes, and
     /// having its gateway inside them, is expected.
     pub related: Vec<String>,
+    /// Addresses routed by domain (see [`crate::dynamic`]): through the
+    /// tunnel, or for a full tunnel through the uplink.
+    pub dynamic: BTreeSet<Ipv4Addr>,
 }
 
 impl Claims {
@@ -120,6 +123,16 @@ impl Registry {
             {
                 return Err(conflict(format!("the gateway {gateway} is inside {route}, routed through {other}")));
             }
+            // Their routes by domain are host routes: more specific than ours.
+            for address in &theirs.dynamic {
+                let Some(route) = our_routes.iter().find(|r| r.contains(address)) else { continue };
+                if theirs.full_tunnel {
+                    return Err(conflict(format!(
+                        "{other} keeps {address} outside its tunnel (a domain it excludes), inside {route} of this one"
+                    )));
+                }
+                warnings.push(format!("{other} routes {address} (a domain) through its tunnel; {other} keeps it"));
+            }
             for ours in &claims.dns_domains {
                 for domain in &theirs.dns_domains {
                     let (a, b) = (normalize(ours), normalize(domain));
@@ -136,6 +149,44 @@ impl Registry {
             }
         }
         Ok(warnings)
+    }
+
+    /// Records `address`, routed by domain for session `name`, unless it
+    /// would take another session's traffic, its gateway's included, or
+    /// send that traffic out in clear (a full tunnel's excluded domains).
+    pub fn claim_dynamic(&mut self, name: &str, address: Ipv4Addr) -> Result<(), Conflict> {
+        let Some(ours) = self.active.get(name) else {
+            return Err(Conflict { with: String::new(), message: format!("{name} is not connected") });
+        };
+        for (key, theirs) in self.active.iter().filter(|(n, _)| n.as_str() != name) {
+            let conflict = |message: String| Err(Conflict { with: key.clone(), message });
+            let trusted = ours.owner == theirs.owner || ours.owner == 0;
+            let chained = trusted && (ours.related.contains(key) || theirs.related.iter().any(|r| r == name));
+            let other = if theirs.name.is_empty() { key } else { &theirs.name };
+            if theirs.dynamic.contains(&address) {
+                return conflict(format!("{address} is already routed by domain for {other}"));
+            }
+            if theirs.gateway == Some(address) {
+                return conflict(format!("{address} is the gateway of {other}"));
+            }
+            if let Some(route) = theirs.tunneled().into_iter().find(|r| r.contains(&address)) {
+                if ours.full_tunnel {
+                    return conflict(format!("{address} is inside {route}, routed through {other}"));
+                }
+                if !(trusted && (ours.allow_overlap || chained)) {
+                    return conflict(format!("{address} is inside {route} of {other}"));
+                }
+            }
+        }
+        self.active.get_mut(name).expect("checked above").dynamic.insert(address);
+        Ok(())
+    }
+
+    /// Forgets an address no longer routed by domain.
+    pub fn release_dynamic(&mut self, name: &str, address: Ipv4Addr) {
+        if let Some(claims) = self.active.get_mut(name) {
+            claims.dynamic.remove(&address);
+        }
     }
 
     pub fn insert(&mut self, name: &str, claims: Claims) {
@@ -170,7 +221,70 @@ mod tests {
             allow_overlap: false,
             related: Vec::new(),
             gateway: None,
+            dynamic: BTreeSet::new(),
         }
+    }
+
+    fn ip(text: &str) -> Ipv4Addr {
+        text.parse().unwrap()
+    }
+
+    /// An included domain resolving inside another tunnel would take that
+    /// tunnel's traffic; an excluded one would send it out in clear.
+    #[test]
+    fn routes_by_domain_take_nothing_from_others() {
+        let mut reg = Registry::default();
+        let mut corp = claims(&["10.0.0.0/8"], false, &[]);
+        corp.gateway = Some(ip("198.51.100.1"));
+        reg.insert("corp", corp);
+        reg.insert("saas", claims(&["192.168.50.0/24"], false, &[]));
+        assert!(reg.claim_dynamic("saas", ip("203.0.113.7")).is_ok());
+        assert!(reg.claim_dynamic("saas", ip("10.1.2.3")).is_err(), "inside corp");
+        assert!(reg.claim_dynamic("saas", ip("198.51.100.1")).is_err(), "corp's gateway");
+        reg.insert("other", claims(&["172.16.0.0/12"], false, &[]));
+        assert!(reg.claim_dynamic("other", ip("203.0.113.7")).is_err(), "already saas's");
+        reg.release_dynamic("saas", ip("203.0.113.7"));
+        assert!(reg.claim_dynamic("other", ip("203.0.113.7")).is_ok(), "released");
+        assert!(reg.claim_dynamic("gone", ip("203.0.113.8")).is_err(), "not connected");
+
+        // The same user may overlap on request, as with routes.
+        let mut overlap = claims(&["192.168.60.0/24"], false, &[]);
+        overlap.allow_overlap = true;
+        reg.insert("overlap", overlap);
+        assert!(reg.claim_dynamic("overlap", ip("10.9.9.9")).is_ok());
+        let mut stranger = claims(&["192.168.70.0/24"], false, &[]);
+        (stranger.owner, stranger.allow_overlap) = (502, true);
+        reg.insert("stranger", stranger);
+        assert!(reg.claim_dynamic("stranger", ip("10.9.9.10")).is_err(), "not another user's");
+
+        // A full tunnel excludes only what no other tunnel routes, on request or not.
+        let mut reg = Registry::default();
+        reg.insert("corp", claims(&["10.0.0.0/8"], false, &[]));
+        let mut full = claims(&[], true, &[]);
+        full.allow_overlap = true;
+        reg.insert("full", full);
+        assert!(reg.claim_dynamic("full", ip("10.1.2.3")).is_err());
+        assert!(reg.claim_dynamic("full", ip("203.0.113.7")).is_ok());
+    }
+
+    /// A session connecting after: an exclusion of a full tunnel inside its
+    /// routes would leak them; a route by domain of a split tunnel is kept.
+    #[test]
+    fn later_sessions_see_routes_by_domain() {
+        let mut reg = Registry::default();
+        reg.insert("full", claims(&[], true, &[]));
+        reg.claim_dynamic("full", ip("203.0.113.7")).unwrap();
+        assert!(reg.check("b", &claims(&["192.168.50.0/24"], false, &[])).is_err(), "inside the full tunnel anyway");
+        let mut b = claims(&["203.0.113.0/24"], false, &[]);
+        b.allow_overlap = true;
+        let err = reg.check("b", &b).unwrap_err();
+        assert!(err.message.contains("outside its tunnel"), "{err}");
+
+        let mut reg = Registry::default();
+        reg.insert("split", claims(&["192.168.50.0/24"], false, &[]));
+        reg.claim_dynamic("split", ip("203.0.113.7")).unwrap();
+        let warnings = reg.check("b", &claims(&["203.0.113.0/24"], false, &[])).unwrap();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
     }
 
     #[test]

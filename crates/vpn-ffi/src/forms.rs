@@ -6,9 +6,9 @@ use anyhow::Context;
 use base64::Engine;
 use ipnet::Ipv4Net;
 use vpn_core::{
-    Compression, ControlChannel, ExchangeMode, FortiSslAuth, FortiSslProfile, GatewayAuth, IpsecProfile, L2tpProfile,
-    Noted, OpenVpnProfile, OpenVpnRemote, PppAuth, Profile, ProtocolConfig, StaticChallenge, Transport,
-    WireGuardProfile, X509NameCheck, X509NameKind,
+    Compression, ControlChannel, Destination, DomainPattern, ExchangeMode, FortiSslAuth, FortiSslProfile, GatewayAuth,
+    IpsecProfile, L2tpProfile, Noted, OpenVpnProfile, OpenVpnRemote, PppAuth, Profile, ProtocolConfig, StaticChallenge,
+    Transport, WireGuardProfile, X509NameCheck, X509NameKind,
 };
 use x509_parser::prelude::{FromDer, X509Certificate};
 
@@ -717,12 +717,22 @@ fn note(text: &str) -> Option<String> {
     Some(text.trim().to_owned()).filter(|n| !n.is_empty())
 }
 
-fn noted_networks(items: &[ListEntry]) -> anyhow::Result<Vec<Noted<Ipv4Net>>> {
+fn noted_networks(items: &[ListEntry]) -> anyhow::Result<Vec<Noted<Destination>>> {
     items
         .iter()
         .filter(|e| !e.value.trim().is_empty())
-        .map(|e| Ok(Noted::new(parse_network(&e.value)?, note(&e.note))))
+        .map(|e| Ok(Noted::new(parse_destination(&e.value)?, note(&e.note))))
         .collect()
+}
+
+/// A network, or a domain routed as it resolves (kept as the profile has
+/// it: the editor offers domains once the daemon routes them, #37).
+fn parse_destination(text: &str) -> anyhow::Result<Destination> {
+    let network = parse_network(text);
+    match network {
+        Ok(net) => Ok(Destination::Network(net)),
+        Err(e) => text.trim().parse::<DomainPattern>().map(Destination::Domain).map_err(|_| e),
+    }
 }
 
 fn noted_domains(items: &[ListEntry]) -> anyhow::Result<Vec<Noted<String>>> {
@@ -1410,8 +1420,12 @@ mod tests {
             Some(vec!["10.1.0.0/16".into(), "10.1.2.3".into(), ListEntry { value: "".into(), note: "x".into() }]);
         let routes = form.to_profile(None).unwrap().routes.unwrap();
         assert_eq!(routes.iter().map(ToString::to_string).collect::<Vec<_>>(), ["10.1.0.0/16", "10.1.2.3/32"]);
-        form.routes = Some(vec!["nope".into()]);
+        form.routes = Some(vec!["no pe".into()]);
         assert!(form.to_profile(None).unwrap_err().to_string().contains("not a network"));
+        form.routes = Some(vec!["*.corp-saas.com".into()]);
+        let routes = form.to_profile(None).unwrap().routes.unwrap();
+        assert!(routes[0].domain().is_some(), "a domain of the profile is kept");
+        assert!(network_error("*.corp-saas.com".into()).is_some(), "not offered by the editor yet");
         form.routes = None;
         form.name = "bad/name".into();
         assert!(form.to_profile(None).is_err(), "'/' separates folders");

@@ -10,6 +10,7 @@ use anyhow::{Context, bail};
 use ipnet::{Ipv4Net, Ipv6Net};
 use vpn_core::TunnelSettings;
 
+use crate::dynamic::{self, Direction, DynamicRoutes};
 use crate::{cmd, journal};
 
 /// Gateway host routes are shared by sessions talking to the same gateway:
@@ -46,6 +47,21 @@ pub struct AppliedConfig {
     session: String,
     interface: String,
     undo: Vec<Undo>,
+    /// Routes by domain (#37); none unless the session reports names.
+    dynamic: DynamicRoutes,
+    direction: Direction,
+    uplink: Option<Uplink>,
+    /// Already going `direction`: no route by domain needed.
+    covered: Vec<Ipv4Net>,
+    /// The gateway and the tunnel's own address.
+    reserved: Vec<Ipv4Addr>,
+}
+
+/// Who else routes what: the conflict registry, seen by a session.
+pub trait DynamicClaims {
+    /// Whether `address` may be routed by domain for this session; recorded.
+    fn claim(&self, address: Ipv4Addr) -> bool;
+    fn release(&self, address: Ipv4Addr);
 }
 
 /// Installs routes and DNS for `session` on tun interface `interface`.
@@ -61,7 +77,25 @@ pub async fn apply(
     if !crate::valid_session_name(session) {
         bail!("invalid session name {session:?}");
     }
-    let mut applied = AppliedConfig { session: session.to_owned(), interface: interface.to_owned(), undo: Vec::new() };
+    let mut applied = AppliedConfig {
+        session: session.to_owned(),
+        interface: interface.to_owned(),
+        undo: Vec::new(),
+        dynamic: DynamicRoutes::default(),
+        direction: if settings.full_tunnel { Direction::Uplink } else { Direction::Tunnel },
+        uplink: None,
+        covered: if settings.full_tunnel { settings.excluded_routes.clone() } else { settings.routes.clone() },
+        reserved: [
+            Some(settings.address),
+            match settings.gateway {
+                IpAddr::V4(gateway) => Some(gateway),
+                IpAddr::V6(_) => None,
+            },
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
+    };
     if let Err(e) = applied.install(settings, gateway_via).await {
         applied.revert().await;
         return Err(e);
@@ -72,6 +106,7 @@ pub async fn apply(
 impl AppliedConfig {
     async fn install(&mut self, settings: &TunnelSettings, gateway_via: Option<&str>) -> anyhow::Result<()> {
         let uplink = uplink().await.context("cannot determine the default route")?;
+        self.uplink = Some(uplink.clone());
         let tun = Via::Interface(self.interface.clone());
 
         if let (IpAddr::V4(gateway), Some(parent)) = (settings.gateway, gateway_via) {
@@ -137,9 +172,95 @@ impl AppliedConfig {
         Ok(())
     }
 
+    /// Where this session's routes by domain go.
+    pub fn direction(&self) -> Direction {
+        self.direction
+    }
+
+    /// How many addresses are routed by domain.
+    pub fn dynamic_routes(&self) -> usize {
+        self.dynamic.len()
+    }
+
+    /// When the next route by domain expires, for the session to call
+    /// [`Self::expire_dynamic`].
+    pub fn next_dynamic_expiry(&self) -> Option<std::time::Instant> {
+        self.dynamic.next_expiry()
+    }
+
+    fn dynamic_via(&self) -> Option<Via> {
+        match self.direction {
+            Direction::Tunnel => Some(Via::Interface(self.interface.clone())),
+            Direction::Uplink => self.uplink.clone().map(Via::Physical),
+        }
+    }
+
+    /// Routes the addresses a listed name resolved to, valid for `ttl`,
+    /// before the answer goes back: those already routed are kept longer,
+    /// those another session routes are left alone. Returns how many are
+    /// routed by domain now.
+    pub async fn route_resolved(
+        &mut self,
+        addresses: &[Ipv4Addr],
+        ttl: std::time::Duration,
+        claims: &dyn DynamicClaims,
+    ) -> usize {
+        let Some(via) = self.dynamic_via() else { return 0 };
+        let now = std::time::Instant::now();
+        let mut routed = 0;
+        for &address in addresses {
+            if self.dynamic.refresh(address, ttl, now) {
+                routed += 1;
+                continue;
+            }
+            let needed = dynamic::routable(address, self.direction)
+                && !self.reserved.contains(&address)
+                && !self.covered.iter().any(|net| net.contains(&address));
+            if !needed || !claims.claim(address) {
+                continue;
+            }
+            if let Some(dropped) = self.dynamic.insert(address, ttl, now) {
+                self.unroute(dropped, &via, claims).await;
+            }
+            match add_route(Ipv4Net::from(address), &via).await {
+                Ok(()) => routed += 1,
+                Err(e) => {
+                    tracing::warn!(session = self.session, "cannot route {address} by domain: {e:#}");
+                    self.dynamic.remove(address);
+                    claims.release(address);
+                }
+            }
+        }
+        routed
+    }
+
+    /// Removes the routes by domain whose time is up.
+    pub async fn expire_dynamic(&mut self, claims: &dyn DynamicClaims) {
+        let Some(via) = self.dynamic_via() else { return };
+        for address in self.dynamic.expired(std::time::Instant::now()) {
+            self.unroute(address, &via, claims).await;
+        }
+    }
+
+    async fn unroute(&self, address: Ipv4Addr, via: &Via, claims: &dyn DynamicClaims) {
+        if let Err(e) = delete_route(Ipv4Net::from(address), via).await {
+            tracing::warn!(session = self.session, "cannot remove the route by domain to {address}: {e:#}");
+        }
+        claims.release(address);
+    }
+
     /// Removes everything this session installed. Errors are logged, not
     /// returned: teardown must go as far as it can.
     pub async fn revert(&mut self) {
+        // Routes by domain first: they sit on top of the others. The
+        // session's claims go with it.
+        if let Some(via) = self.dynamic_via() {
+            for address in self.dynamic.drain() {
+                if let Err(e) = delete_route(Ipv4Net::from(address), &via).await {
+                    tracing::warn!(session = self.session, "cleanup of the route by domain to {address} failed: {e:#}");
+                }
+            }
+        }
         while let Some(step) = self.undo.pop() {
             let res = match &step {
                 Undo::Route(net, via) => delete_route(*net, via).await,

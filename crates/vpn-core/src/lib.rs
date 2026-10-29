@@ -16,6 +16,7 @@ pub fn version() -> String {
         None => env!("CARGO_PKG_VERSION").to_owned(),
     }
 }
+pub mod destination;
 pub mod engine;
 pub mod engine_ipc;
 pub mod failure;
@@ -29,6 +30,7 @@ pub mod prompt;
 pub mod settings;
 pub mod wireguard;
 
+pub use destination::{Destination, DomainPattern};
 pub use engine::{Engine, PacketIo, SessionContext, TunnelStats};
 pub use failure::{CertificateInfo, Failure, FailureExt, FailureKind, failure};
 pub use l2tp::{L2TP_PORT, L2tpProfile, PppAuth};

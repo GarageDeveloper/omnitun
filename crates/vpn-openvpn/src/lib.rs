@@ -168,7 +168,7 @@ impl OpenVpnEngine {
         let wrap = crypto::Wrap::new(&self.profile)?;
         let mut control = Control::new(wrap, tls, tls::server_name(&remote.host), !link.tcp, hello)?;
         let pushed = session::establish(&mut link, &mut control, ctx).await?;
-        let settings = pushed.settings(addr.ip(), &vpn_core::noted::values(&self.profile.extra_routes))?;
+        let settings = pushed.settings(addr.ip(), &vpn_core::destination::networks(&self.profile.extra_routes))?;
         let session = Session::new(link, control, &pushed, &self.profile)?;
         Ok((session, settings))
     }
