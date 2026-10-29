@@ -1,0 +1,61 @@
+name: Service
+
+# The service installed under systemd as the README says, with a WireGuard
+# connection through it (interop/service): the unit's hardening applies to
+# the engines too, and only Linux shows what it blocks. Not required to
+# merge; runs when what it tests changes.
+on:
+  push:
+    branches: [main]
+    paths:
+      - packaging/**
+      - crates/daemon/**
+      - crates/engine/**
+      - crates/vpn-platform/**
+      - crates/vpn-core/**
+      - crates/vpn-client/**
+      - crates/vpn-wireguard/**
+      - crates/cli/**
+      - interop/service/**
+      - README.md
+      - Cargo.lock
+      - .github/workflows/service.yml
+  pull_request:
+    paths:
+      - packaging/**
+      - crates/daemon/**
+      - crates/engine/**
+      - crates/vpn-platform/**
+      - crates/vpn-core/**
+      - crates/vpn-client/**
+      - crates/vpn-wireguard/**
+      - crates/cli/**
+      - interop/service/**
+      - README.md
+      - Cargo.lock
+      - .github/workflows/service.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  systemd:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - run: cargo build --release --locked -p omnitund -p omnitun-engine -p omnitunctl
+      - run: BINARIES=target/release interop/service/run.sh

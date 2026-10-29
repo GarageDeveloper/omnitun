@@ -16,9 +16,11 @@ it:
 4. checks that the server saw a handshake and that the service still runs.
 
 It tests the unit's hardening against a real connection: the engines run
-under the same restrictions as the daemon. `KEEP=1 ./run.sh` keeps the
-container (`docker exec -it omnitun-interop-service bash`); on failure,
-the service's journal is printed.
+under the same restrictions as the daemon. `BINARIES=target/release
+./run.sh` uses binaries built already (as the CI does,
+`.github/workflows/service.yml`); `KEEP=1 ./run.sh` keeps the container
+(`docker exec -it omnitun-interop-service bash`); on failure, the
+service's journal is printed.
 
 The server's address is the container's own, redirected to the namespace
 (`iptables` DNAT): the daemon routes a gateway through the default
