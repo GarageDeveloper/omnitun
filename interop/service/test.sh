@@ -26,9 +26,12 @@ ip -n server address add 10.200.0.2/24 dev veth1
 ip -n server link set veth1 up && ip -n server link set lo up
 ip -n server route add default via 10.200.0.1
 server_key=$(wg genkey) client_key=$(wg genkey)
-echo "$server_key" > /root/server.key
+# In /etc/wireguard: the AppArmor profile of wg on Ubuntu hosts (the CI's)
+# lets it read keys there only.
+mkdir -p -m 700 /etc/wireguard
+(umask 077 && echo "$server_key" > /etc/wireguard/server.key)
 ip -n server link add wg0 type wireguard
-ip netns exec server wg set wg0 listen-port 51820 private-key /root/server.key \
+ip netns exec server wg set wg0 listen-port 51820 private-key /etc/wireguard/server.key \
     peer "$(echo "$client_key" | wg pubkey)" allowed-ips 10.9.0.2/32
 ip -n server address add 10.9.0.1/24 dev wg0 && ip -n server link set wg0 up
 me=$(ip -4 -o address show eth0 | awk '{print $4}' | cut -d/ -f1)
