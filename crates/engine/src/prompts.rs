@@ -95,7 +95,10 @@ impl PromptHub {
                 let mut line = String::new();
                 match (&mut lines).take(MAX_ANSWER_LINE).read_line(&mut line).await {
                     Ok(0) | Err(_) => break,
-                    Ok(_) if !line.ends_with('\n') => break,
+                    Ok(_) if !line.ends_with('\n') => {
+                        line.zeroize();
+                        break;
+                    }
                     Ok(_) => {
                         if let Ok(Request::Answer { id, value }) = serde_json::from_str::<Request>(&line)
                             && let Some(waiting) = pending.lock().unwrap().remove(&id)
@@ -139,11 +142,11 @@ impl PromptHub {
 
 #[async_trait]
 impl Prompter for PromptHub {
-    async fn ask(&self, prompt: Prompt) -> anyhow::Result<String> {
+    async fn ask(&self, prompt: Prompt) -> anyhow::Result<Zeroizing<String>> {
         if prompt.kind.remembered()
             && let Some(value) = self.cache.lock().unwrap().get(&prompt.key)
         {
-            return Ok(value.to_string());
+            return Ok(value.clone());
         }
         let client = self.client(&prompt.key).await?;
         let id = self.next.fetch_add(1, Ordering::Relaxed);
@@ -174,7 +177,7 @@ impl Prompter for PromptHub {
         if kind.remembered() {
             self.cache.lock().unwrap().insert(key, value.clone());
         }
-        Ok(value.to_string())
+        Ok(value)
     }
 
     async fn open_url(&self, url: &str) -> anyhow::Result<()> {
@@ -231,7 +234,7 @@ mod tests {
         client: &mut TestClient,
         key: &str,
         kind: PromptKind,
-    ) -> (u64, tokio::task::JoinHandle<anyhow::Result<String>>) {
+    ) -> (u64, tokio::task::JoinHandle<anyhow::Result<Zeroizing<String>>>) {
         let (hub2, pr) = (hub.clone(), prompt(key, kind));
         let task = tokio::spawn(async move { hub2.ask(pr).await });
         match client.next().await {
@@ -243,8 +246,8 @@ mod tests {
         }
     }
 
-    async fn result(task: tokio::task::JoinHandle<anyhow::Result<String>>) -> anyhow::Result<String> {
-        timeout(Duration::from_secs(5), task).await.expect("ask did not finish").unwrap()
+    async fn result(task: tokio::task::JoinHandle<anyhow::Result<Zeroizing<String>>>) -> anyhow::Result<String> {
+        timeout(Duration::from_secs(5), task).await.expect("ask did not finish").unwrap().map(|v| v.to_string())
     }
 
     #[tokio::test]
@@ -256,7 +259,7 @@ mod tests {
         assert_eq!(result(task).await.unwrap(), "hunter2");
         // A reconnection: no client needed for what is remembered.
         drop(client);
-        assert_eq!(hub.ask(prompt("password", PromptKind::Secret)).await.unwrap(), "hunter2");
+        assert_eq!(hub.ask(prompt("password", PromptKind::Secret)).await.unwrap().as_str(), "hunter2");
         let err = hub.ask(prompt("username", PromptKind::Text)).await.unwrap_err();
         assert_eq!(vpn_core::failure::kind_of(&err), FailureKind::NeedsUser, "{err}");
     }

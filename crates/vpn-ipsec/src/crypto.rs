@@ -81,11 +81,12 @@ impl PrfAlg {
 
     /// `prf+` from RFC 7296 §2.13.
     pub fn prf_plus(self, key: &[u8], seed: &[u8], len: usize) -> Vec<u8> {
+        // Sized up front: the output (key material) is never reallocated.
         let mut out = Vec::with_capacity(len + self.output_len());
-        let mut block = Vec::new();
+        let mut block = Zeroizing::new(Vec::new());
         let mut counter = 1u8;
         while out.len() < len {
-            block = self.compute(key, &[&block, seed, &[counter]]);
+            block = Zeroizing::new(self.compute(key, &[&block, seed, &[counter]]));
             out.extend_from_slice(&block);
             counter = counter.checked_add(1).expect("prf+ output limited to 255 blocks");
         }
@@ -583,7 +584,7 @@ macro_rules! ecp_generate {
     ($curve:ident, $len:expr) => {{
         use $curve::elliptic_curve::sec1::ToEncodedPoint;
         let secret = loop {
-            if let Ok(k) = $curve::SecretKey::from_slice(&random_bytes($len)) {
+            if let Ok(k) = $curve::SecretKey::from_slice(&Zeroizing::new(random_bytes($len))) {
                 break k;
             }
         };
@@ -630,7 +631,8 @@ impl KeyExchange {
             | DhGroup::Modp8192 => {
                 let p = modp_prime(group);
                 // 512-bit exponent: well above the strength of these groups.
-                let x = BigUint::from_bytes_be(&random_bytes(64));
+                // (num-bigint cannot erase x itself; its source bytes are.)
+                let x = BigUint::from_bytes_be(&Zeroizing::new(random_bytes(64)));
                 let y = BigUint::from(2u32).modpow(&x, &p);
                 let len = modp_len(&p);
                 (DhSecret::Modp(x, p), pad_left(&y.to_bytes_be(), len))
@@ -651,6 +653,7 @@ impl KeyExchange {
                 let mut bytes = [0u8; 32];
                 rand::rng().fill_bytes(&mut bytes);
                 let secret = x25519_dalek::StaticSecret::from(bytes);
+                bytes.zeroize();
                 let public = x25519_dalek::PublicKey::from(&secret).as_bytes().to_vec();
                 (DhSecret::X25519(secret), public)
             }
@@ -675,7 +678,7 @@ impl KeyExchange {
                 let y = BigUint::from_bytes_be(peer);
                 let one = BigUint::from(1u32);
                 ensure!(y > one && y < p - &one, "invalid MODP public value");
-                Ok(pad_left(&y.modpow(x, p).to_bytes_be(), len))
+                Ok(pad_left(&Zeroizing::new(y.modpow(x, p).to_bytes_be()), len))
             }
             DhSecret::Ecp256(secret) => ecp_shared!(p256, 32, secret, peer),
             DhSecret::Ecp384(secret) => ecp_shared!(p384, 48, secret, peer),
@@ -709,7 +712,8 @@ fn modp_len(p: &BigUint) -> usize {
 }
 
 fn pad_left(bytes: &[u8], len: usize) -> Vec<u8> {
-    let mut out = vec![0u8; len.saturating_sub(bytes.len())];
+    let mut out = Vec::with_capacity(len.max(bytes.len()));
+    out.resize(len.saturating_sub(bytes.len()), 0);
     out.extend_from_slice(bytes);
     out
 }

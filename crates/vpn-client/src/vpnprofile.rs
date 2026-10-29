@@ -132,6 +132,51 @@ pub fn parse(text: &str) -> anyhow::Result<Profile> {
     Ok(profile)
 }
 
+/// What a received profile makes this client trust, to show before adding
+/// it: its certificate authorities, pinned certificates and, for OpenVPN,
+/// the name the server must carry and its shared key.
+pub fn trust_summary(profile: &Profile) -> Vec<String> {
+    let (ca_pem, pins) = match &profile.protocol {
+        ProtocolConfig::FortiSsl(p) => (p.ca_pem.as_deref(), p.trusted_cert.as_slice()),
+        ProtocolConfig::Ipsec(p) => (p.ca_pem.as_deref(), p.trusted_cert.as_slice()),
+        ProtocolConfig::OpenVpn(p) => (p.ca_pem.as_deref(), p.trusted_cert.as_slice()),
+        ProtocolConfig::L2tp(_) | ProtocolConfig::WireGuard(_) => (None, &[][..]),
+    };
+    let mut lines = Vec::new();
+    if let Some(pem) = ca_pem {
+        lines.extend(authorities(pem));
+    }
+    lines.extend(pins.iter().map(|pin| format!("trusted certificate SHA-256: {pin}")));
+    if let ProtocolConfig::OpenVpn(p) = &profile.protocol {
+        if let Some(check) = &p.verify_x509_name {
+            lines.push(format!("the server certificate must name {}", crate::printable(&check.name)));
+        }
+        if p.static_key.is_some() {
+            lines.push("carries the server's shared key (tls-auth or tls-crypt)".to_owned());
+        }
+    }
+    lines
+}
+
+/// One line per certificate of `pem`: its name and SHA-256.
+fn authorities(pem: &str) -> Vec<String> {
+    use sha2::Digest;
+    use x509_parser::prelude::{FromDer, X509Certificate};
+    let mut lines = Vec::new();
+    for block in x509_parser::pem::Pem::iter_from_buffer(pem.as_bytes()) {
+        let Ok(block) = block else {
+            lines.push("certificate authority: unreadable PEM".to_owned());
+            break;
+        };
+        let name = X509Certificate::from_der(&block.contents)
+            .map(|(_, c)| c.subject().to_string())
+            .unwrap_or_else(|_| "unreadable certificate".to_owned());
+        let sha256 = hex::encode(sha2::Sha256::digest(&block.contents));
+        lines.push(format!("certificate authority: {} (SHA-256 {sha256})", crate::printable(&name)));
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,6 +220,28 @@ mod tests {
         std::fs::remove_file(&ca).unwrap();
         assert!(export(&p).is_err(), "a missing CA is not dropped silently");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn what_a_received_profile_trusts_is_shown() {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.distinguished_name.push(rcgen::DnType::CommonName, "Acme CA");
+        let ca = params.self_signed(&key).unwrap();
+        let pin = "ab".repeat(32);
+        let p = profile(&format!(
+            "name = \"x\"\nprotocol = \"openvpn\"\nremotes = [{{ host = \"vpn.example.com\" }}]\n\
+             ca_pem = \"\"\"{}\"\"\"\ntrusted_cert = [\"{pin}\"]\nstatic_key = \"K\"\n\
+             verify_x509_name = {{ name = \"vpn.example.com\" }}",
+            ca.pem()
+        ));
+        let lines = trust_summary(&p);
+        assert_eq!(lines.len(), 4, "{lines:?}");
+        assert!(lines[0].starts_with("certificate authority: CN=Acme CA (SHA-256 "), "{lines:?}");
+        let sha256 = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(ca.der()));
+        assert!(lines[0].ends_with(&format!("{sha256})")), "{lines:?}");
+        assert_eq!(lines[1], format!("trusted certificate SHA-256: {pin}"));
+        assert!(lines[2].contains("vpn.example.com") && lines[3].contains("shared key"), "{lines:?}");
     }
 
     #[test]

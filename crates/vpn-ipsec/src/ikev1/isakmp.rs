@@ -26,9 +26,11 @@ pub fn encrypt(
     body: &[u8],
 ) -> (Vec<u8>, Vec<u8>) {
     let block = cipher.block_len();
-    let mut plain = body.to_vec();
-    // Encrypted in place: only ciphertext remains in it afterwards.
-    plain.resize(plain.len().div_ceil(block).max(1) * block, 0);
+    // Encrypted in place: only ciphertext remains in it afterwards. Sized
+    // for the padding first, so the plaintext is never reallocated.
+    let mut plain = Vec::with_capacity(body.len().div_ceil(block).max(1) * block);
+    plain.extend_from_slice(body);
+    plain.resize(plain.capacity(), 0);
     cipher.encrypt(iv, &mut plain);
     let header = Header {
         cky_i,

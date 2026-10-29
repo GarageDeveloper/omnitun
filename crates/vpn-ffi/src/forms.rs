@@ -241,7 +241,13 @@ impl ProfileForm {
             (Some(p), VpnKind::OpenVpn) if matches!(p.protocol, ProtocolConfig::OpenVpn(_)) => p.clone(),
             (Some(p), VpnKind::L2tp) if matches!(p.protocol, ProtocolConfig::L2tp(_)) => p.clone(),
             (Some(p), VpnKind::WireGuard) if matches!(p.protocol, ProtocolConfig::WireGuard(_)) => p.clone(),
-            _ => {
+            // Another type: the protocol starts afresh, the profile keeps its
+            // id, folder and other settings (its secrets stay bound to the
+            // old server).
+            (Some(p), _) => {
+                Profile { protocol: toml::from_str::<Profile>(empty_profile(self.kind))?.protocol, ..p.clone() }
+            }
+            (None, _) => {
                 let mut fresh: Profile = toml::from_str(empty_profile(self.kind))?;
                 fresh.name.clear();
                 fresh
@@ -959,6 +965,21 @@ mod tests {
         assert_eq!((p.client_cert.as_deref(), p.client_certificate.clone()), (None, Some("cd".repeat(32))));
         saved.validate().unwrap();
         assert_eq!(ProfileForm::from(&saved).client_certificate, Some("cd".repeat(32)));
+    }
+
+    #[test]
+    fn another_type_keeps_the_profile() {
+        let base: Profile = toml::from_str(
+            "id = \"00000000-0000-4000-8000-000000000001\"\nname = \"paris\"\nfolder = \"Sites\"\n\
+             protocol = \"forti-ssl\"\nhost = \"vpn.example.com\"",
+        )
+        .unwrap();
+        let mut form = ProfileForm::from(&base);
+        form.kind = VpnKind::L2tp;
+        form.host = "l2tp.example.com".into();
+        let saved = form.to_profile(Some(&base)).unwrap();
+        assert!(matches!(saved.protocol, ProtocolConfig::L2tp(_)), "{saved:?}");
+        assert_eq!((saved.id.as_str(), saved.folder.as_deref()), (base.id.as_str(), Some("Sites")));
     }
 
     /// FortiClient's IPsec settings are shown as choices and

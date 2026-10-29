@@ -216,8 +216,10 @@ Each has a README.
   that it knows the password. PAP (off unless the profile asks for it, as
   Meraki needs) sends the password in clear inside IPsec; once a server
   has proved itself with MS-CHAPv2, its profile accepts nothing weaker.
-- A reconnection that needs a client certificate signature, a code or a
-  browser login needs the app running.
+- A reconnection that needs a code or a browser login needs the app
+  running. A client certificate signs each renegotiation and reconnection
+  from the app, or from `omnitunctl connect`, which then stays in the
+  foreground.
 - Linux: command line only, and the engines are not sandboxed yet.
 
 ## Security

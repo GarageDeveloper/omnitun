@@ -717,7 +717,7 @@ async fn xauth_answers(
                 continue;
             }
             cfg::XAUTH_USER_NAME => match &profile.username {
-                Some(u) => u.clone(),
+                Some(u) => Zeroizing::new(u.clone()),
                 None => ask("username", PromptKind::Text, format!("XAuth username for {}", ctx.name)).await?,
             },
             cfg::XAUTH_USER_PASSWORD => {
@@ -730,7 +730,6 @@ async fn xauth_answers(
             }
             _ => continue,
         };
-        let value = Zeroizing::new(value);
         out.push(CfgAttr::var(a.kind, value.as_bytes()));
     }
     Ok(out)

@@ -384,7 +384,9 @@ fn decode_cfg_attrs(mut buf: &[u8]) -> anyhow::Result<Vec<CfgAttr>> {
 
 /// Encodes a payload chain; returns the first payload type and the bytes.
 pub fn encode_chain(payloads: &[Payload]) -> (u8, Vec<u8>) {
-    let mut out = Vec::new();
+    // Room for the largest ISAKMP message: the chain may carry XAuth
+    // credentials, and a reallocation would leave a copy behind.
+    let mut out = Vec::with_capacity(usize::from(u16::MAX));
     for (i, p) in payloads.iter().enumerate() {
         let start = out.len();
         let next = payloads.get(i + 1).map_or(pt::NONE, Payload::kind);

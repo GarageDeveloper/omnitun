@@ -35,7 +35,7 @@ use vpn_core::{
     TunnelSettings, failure,
 };
 use vpn_ipsec::TransportChannel;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::l2tp::{Received, Tunnel, ppp_protocol};
 use crate::ppp::Ppp;
@@ -73,10 +73,13 @@ impl L2tpEngine {
         let ask = |key: &str, kind: PromptKind, text: String| ctx.prompter.ask(Prompt::new(key, kind, text));
         let username = match &self.profile.username {
             Some(user) => user.clone(),
-            None => ask("username", PromptKind::Text, format!("User name for {}", ctx.name)).await?,
+            None => ask("username", PromptKind::Text, format!("User name for {}", ctx.name)).await?.to_string(),
         };
-        let password = Zeroizing::new(
-            ask("password", PromptKind::Secret, format!("Password for {username} on {}", ctx.name)).await?,
+        let password = ask("password", PromptKind::Secret, format!("Password for {username} on {}", ctx.name)).await?;
+        // PAP gives each a one-byte length.
+        anyhow::ensure!(
+            username.len() <= 255 && password.len() <= 255,
+            "the user name and the password must each fit in 255 bytes"
         );
         Ok((username, password))
     }
@@ -117,11 +120,20 @@ fn classful(address: Ipv4Addr) -> Ipv4Net {
 impl Session {
     /// Sends what L2TP and PPP have queued.
     async fn flush(&mut self) -> anyhow::Result<()> {
-        for (protocol, contents) in self.ppp.take_output() {
-            if self.tunnel.is_up() {
-                let data = self.tunnel.data(protocol, &contents);
-                self.send(&data).await?;
-            }
+        // A PAP frame carries the password: each frame and its L2TP copy
+        // are erased once sent.
+        for (protocol, mut contents) in self.ppp.take_output() {
+            let sent = match self.tunnel.is_up() {
+                true => {
+                    let mut data = self.tunnel.data(protocol, &contents);
+                    let sent = self.send(&data).await;
+                    data.zeroize();
+                    sent
+                }
+                false => Ok(()),
+            };
+            contents.zeroize();
+            sent?;
         }
         for datagram in self.tunnel.take_output() {
             self.send(&datagram).await?;

@@ -23,7 +23,7 @@ pub async fn password_login(
 ) -> anyhow::Result<()> {
     let username = match &profile.username {
         Some(u) => u.clone(),
-        None => ask(ctx, "username", PromptKind::Text, format!("Username for {}", profile.host)).await?,
+        None => ask(ctx, "username", PromptKind::Text, format!("Username for {}", profile.host)).await?.to_string(),
     };
     let password =
         ask(ctx, "password", PromptKind::Secret, format!("Password for {username}@{}", profile.host)).await?;
@@ -256,7 +256,12 @@ fn portal_error(resp: &Response) -> String {
     if msg.is_empty() { String::new() } else { format!(" ({msg})") }
 }
 
-async fn ask(ctx: &SessionContext, key: &str, kind: PromptKind, message: String) -> anyhow::Result<String> {
+async fn ask(
+    ctx: &SessionContext,
+    key: &str,
+    kind: PromptKind,
+    message: String,
+) -> anyhow::Result<zeroize::Zeroizing<String>> {
     ctx.prompter.ask(Prompt::new(key, kind, message)).await
 }
 

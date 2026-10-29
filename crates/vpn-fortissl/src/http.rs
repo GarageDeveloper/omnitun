@@ -9,6 +9,7 @@ use anyhow::{Context, bail};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
 use vpn_core::{FailureKind, failure};
+use zeroize::Zeroizing;
 
 use crate::tls::{Endpoint, Stream};
 
@@ -70,20 +71,25 @@ impl Client {
         self.request("POST", path, Some(encode_form(form))).await
     }
 
-    async fn request(&mut self, method: &str, path: &str, body: Option<String>) -> anyhow::Result<Response> {
-        let mut req = format!(
+    /// The body may hold a password or a code: it and the request are
+    /// erased once sent, and never reallocated on the way.
+    async fn request(&mut self, method: &str, path: &str, body: Option<Zeroizing<String>>) -> anyhow::Result<Response> {
+        let mut head = format!(
             "{method} {path} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {USER_AGENT}\r\n\
              Accept: */*\r\nConnection: keep-alive\r\n",
             self.host_header
         );
         if !self.cookies.is_empty() {
-            req.push_str(&format!("Cookie: {}\r\n", self.cookie_header()));
+            head.push_str(&format!("Cookie: {}\r\n", self.cookie_header()));
         }
         if let Some(body) = &body {
-            req.push_str("Content-Type: application/x-www-form-urlencoded\r\n");
-            req.push_str(&format!("Content-Length: {}\r\n", body.len()));
+            head.push_str("Content-Type: application/x-www-form-urlencoded\r\n");
+            head.push_str(&format!("Content-Length: {}\r\n", body.len()));
         }
-        req.push_str("\r\n");
+        head.push_str("\r\n");
+        let body_len = body.as_ref().map_or(0, |b| b.len());
+        let mut req = Zeroizing::new(String::with_capacity(head.len() + body_len));
+        req.push_str(&head);
         if let Some(body) = &body {
             req.push_str(body);
         }
@@ -335,20 +341,39 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-pub fn encode_form(fields: &[(&str, &str)]) -> String {
-    fields.iter().map(|(k, v)| format!("{}={}", urlencode(k), urlencode(v))).collect::<Vec<_>>().join("&")
+/// The form, URL-encoded into one buffer sized for the worst case (every
+/// byte escaped): a password in it is never copied elsewhere.
+pub fn encode_form(fields: &[(&str, &str)]) -> Zeroizing<String> {
+    let capacity = fields.iter().map(|(k, v)| 3 * (k.len() + v.len()) + 2).sum();
+    let mut out = Zeroizing::new(String::with_capacity(capacity));
+    for (i, (k, v)) in fields.iter().enumerate() {
+        if i > 0 {
+            out.push('&');
+        }
+        urlencode_into(&mut out, k);
+        out.push('=');
+        urlencode_into(&mut out, v);
+    }
+    out
 }
 
 pub fn urlencode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+    let mut out = String::with_capacity(3 * s.len());
+    urlencode_into(&mut out, s);
+    out
+}
+
+fn urlencode_into(out: &mut String, s: &str) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     for b in s.bytes() {
         if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
             out.push(b as char);
         } else {
-            out.push_str(&format!("%{b:02X}"));
+            out.push('%');
+            out.push(HEX[usize::from(b >> 4)] as char);
+            out.push(HEX[usize::from(b & 15)] as char);
         }
     }
-    out
 }
 
 #[cfg(test)]
@@ -375,7 +400,7 @@ mod tests {
     #[test]
     fn form_encoding() {
         assert_eq!(
-            encode_form(&[("username", "a b"), ("credential", "p&=é")]),
+            encode_form(&[("username", "a b"), ("credential", "p&=é")]).as_str(),
             "username=a%20b&credential=p%26%3D%C3%A9"
         );
     }

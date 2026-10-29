@@ -361,8 +361,10 @@ mod tests {
 
     #[async_trait]
     impl vpn_core::Prompter for NoPrompter {
-        async fn ask(&self, _prompt: Prompt) -> anyhow::Result<String> {
-            bail!("no prompt in this test")
+        async fn ask(&self, _prompt: Prompt) -> anyhow::Result<zeroize::Zeroizing<String>> {
+            // The test answers, erased like real ones.
+            let answer: anyhow::Result<String> = async { bail!("no prompt in this test") }.await;
+            answer.map(zeroize::Zeroizing::new)
         }
 
         async fn open_url(&self, _url: &str) -> anyhow::Result<()> {

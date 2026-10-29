@@ -196,7 +196,8 @@ pub const SIGN: &str = "sign";
 /// Interactive channel back to the user who requested the connection.
 #[async_trait]
 pub trait Prompter: Send + Sync {
-    async fn ask(&self, prompt: Prompt) -> anyhow::Result<String>;
+    /// The answer is erased once dropped: it may be a password or a code.
+    async fn ask(&self, prompt: Prompt) -> anyhow::Result<zeroize::Zeroizing<String>>;
     /// Ask the user's session to open a URL in a browser (SAML).
     async fn open_url(&self, url: &str) -> anyhow::Result<()>;
 }

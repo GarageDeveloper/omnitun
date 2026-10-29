@@ -60,10 +60,10 @@ pub fn derive_phase1(
         key.extend_from_slice(&skeyid_e[..key_len]);
     } else {
         // Appendix B: Ka = K1 | K2 | ..., K1 = prf(SKEYID_e, 0), Kn = prf(SKEYID_e, Kn-1).
-        let mut block = prf.compute(&skeyid_e, &[&[0]]);
+        let mut block = Zeroizing::new(prf.compute(&skeyid_e, &[&[0]]));
         while key.len() < key_len {
             key.extend_from_slice(&block);
-            block = prf.compute(&skeyid_e, &[&block]);
+            block = Zeroizing::new(prf.compute(&skeyid_e, &[&block]));
         }
         key.truncate(key_len);
     }
