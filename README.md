@@ -59,8 +59,9 @@ macOS 14 or later.
 
 ### From source
 
-Rust (stable) is needed; on Linux, also `pkg-config` and the D-Bus headers
-(`libdbus-1-dev` on Debian and Ubuntu). The macOS app also needs Xcode 16.
+Rust 1.95 or later is needed; on Linux, also `pkg-config` and the D-Bus
+headers (`libdbus-1-dev` on Debian and Ubuntu). The macOS app also needs
+Xcode 16.
 See [apple/README.md](apple/README.md) for the app and the package.
 
 ```sh
@@ -69,13 +70,20 @@ cargo build --release
 # refuses to start otherwise).
 sudo install -o root -m 755 target/release/omnitund target/release/omnitun-engine /Library/PrivilegedHelperTools/   # macOS
 # Linux: sudo install -o root -m 755 target/release/omnitund target/release/omnitun-engine /usr/local/sbin/
-install target/release/omnitunctl /usr/local/bin/
+sudo install target/release/omnitunctl /usr/local/bin/
 
 # Only members of the omnitun group drive the daemon.
 sudo dseditgroup -o create omnitun && sudo dseditgroup -o edit -a "$USER" -t user omnitun   # macOS
 # Linux: sudo groupadd --system omnitun && sudo usermod -aG omnitun "$USER" (then log in again)
 
-# macOS
+# The engines run as the _omnitun account, without a shell or a home; the
+# daemon does not start without it.
+# macOS: create it as the package does (the dscl block of
+# apple/pkg/scripts/postinstall).
+# Linux: sudo useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin _omnitun
+
+# macOS. The log names servers and accounts: root and the administrators.
+sudo touch /var/log/omnitund.log && sudo chown root:admin /var/log/omnitund.log && sudo chmod 640 /var/log/omnitund.log
 sudo cp packaging/com.root42.omnitun.daemon.plist /Library/LaunchDaemons/
 sudo launchctl bootstrap system /Library/LaunchDaemons/com.root42.omnitun.daemon.plist
 # Linux (systemd-resolved required)
@@ -162,7 +170,9 @@ Principles:
 `cargo test --workspace` runs the unit tests and the loopback tests against
 fake gateways. The `interop/` folders run the engines against real servers
 in Docker: strongSwan 5.9 (IKEv1, IKEv2), OpenVPN 2.6, strongSwan + xl2tpd
-+ pppd (L2TP) and the Linux kernel's WireGuard; each has a README.
++ pppd (L2TP) and the Linux kernel's WireGuard; `interop/service` installs
+the service under systemd as described above and connects through it.
+Each has a README.
 
 ## Limitations
 

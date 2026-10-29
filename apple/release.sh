@@ -10,6 +10,11 @@
 #                                    in $REPO (default GarageDeveloper/omnitun)
 #                                    with the package and appcast.xml
 #
+# Publishing tags the commit built (annotated, signed when git has a signing
+# key) and pushes the tag to $REMOTE (default origin) first: the Release and
+# its source archives are then those of the package. The commit must be on
+# the remote already.
+#
 # NOTES=file: release notes (Markdown) for the Release and the appcast.
 set -eu
 cd "$(dirname "$0")/.."
@@ -18,6 +23,7 @@ publish=no
 [ "${1:-}" = "--publish" ] && publish=yes
 REPO=${REPO:-GarageDeveloper/omnitun}
 export REPO
+REMOTE=${REMOTE:-origin}
 
 brand() { sed -n "s/^pub const $1: &str = \"\(.*\)\";/\1/p" crates/vpn-core/src/brand.rs; }
 PRODUCT=$(brand PRODUCT)
@@ -32,6 +38,29 @@ fi
 if [ "$publish" = yes ] && [ -n "$(git status --porcelain --untracked-files=no)" ]; then
   echo "uncommitted changes: commit them before publishing" >&2
   exit 1
+fi
+if [ "$publish" = yes ]; then
+  case "$(git remote get-url "$REMOTE")" in
+  *"$REPO"|*"$REPO.git") ;;
+  *) echo "git remote $REMOTE is not $REPO: set REMOTE" >&2; exit 1 ;;
+  esac
+  git fetch --quiet "$REMOTE"
+  if [ -z "$(git branch -r --contains HEAD | grep "^ *$REMOTE/")" ]; then
+    echo "HEAD is not on $REMOTE: push it (through a pull request) before publishing" >&2
+    exit 1
+  fi
+  # A tag made earlier must be this commit's, here and on the remote.
+  head=$(git rev-parse HEAD)
+  local_tag=$(git rev-parse -q --verify "refs/tags/$tag^{commit}" || true)
+  remote_tag=$(git ls-remote "$REMOTE" "refs/tags/$tag^{}" "refs/tags/$tag" | head -1 | cut -f1)
+  if [ -n "$local_tag" ] && [ "$local_tag" != "$head" ]; then
+    echo "tag $tag exists already on another commit ($local_tag)" >&2
+    exit 1
+  fi
+  if [ -n "$remote_tag" ] && [ -z "$local_tag" ]; then
+    echo "tag $tag exists on $REMOTE but not here: git fetch $REMOTE tag $tag" >&2
+    exit 1
+  fi
 fi
 [ -n "${NOTARY_PROFILE:-}" ] || { echo "NOTARY_PROFILE is needed: Sparkle only installs notarized packages" >&2; exit 1; }
 
@@ -82,7 +111,14 @@ if [ "$publish" = yes ]; then
   else
     set -- --notes ""
   fi
-  gh release create "$tag" --repo "$REPO" --title "$PRODUCT $VERSION ($commit)" "$@" \
+  if [ -z "$(git rev-parse -q --verify "refs/tags/$tag" || true)" ]; then
+    sign=-a
+    [ -n "$(git config user.signingkey || true)" ] && sign=-s
+    git tag "$sign" -m "$PRODUCT $VERSION" "$tag" HEAD
+  fi
+  [ "$(git rev-parse "$tag^{commit}")" = "$(git rev-parse HEAD)" ] || { echo "tag $tag is not HEAD" >&2; exit 1; }
+  git push "$REMOTE" "refs/tags/$tag"
+  gh release create "$tag" --verify-tag --repo "$REPO" --title "$PRODUCT $VERSION ($commit)" "$@" \
     "$out/$PRODUCT-$VERSION.pkg" "$out/appcast.xml"
   echo "published: https://github.com/$REPO/releases/tag/$tag"
 fi

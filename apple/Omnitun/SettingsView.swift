@@ -42,7 +42,7 @@ private struct AboutView: View {
             Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 96, height: 96)
             Text(verbatim: brand.product).font(.title.bold())
             Text(String(localized: "Version \(version)")).foregroundStyle(.secondary).textSelection(.enabled)
-            Text("A VPN client for FortiGate SSL VPN, IPsec, OpenVPN and L2TP, several at a time.")
+            Text("A VPN client for FortiGate SSL VPN, IPsec, OpenVPN, L2TP and WireGuard, several at a time.")
                 .multilineTextAlignment(.center)
             Divider().frame(width: 300)
             Text(verbatim: "© 2026 GarageDeveloper and the \(brand.product) contributors")

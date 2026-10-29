@@ -1,7 +1,9 @@
 #!/bin/sh
 # Sets up the service the payload installed: group allowed to drive it,
-# account for the engines, launchd job, CLI link.
-set -u
+# account for the engines, launchd job, CLI link. Any step that fails
+# fails the installation (Installer and Sparkle then say so), except those
+# marked optional.
+set -eu
 app="${3%/}/Applications/@PRODUCT@.app"
 plist="/Library/LaunchDaemons/@LABEL@.plist"
 
@@ -14,7 +16,7 @@ chmod -R go-w "$app"
 dseditgroup -o read @ID@ >/dev/null 2>&1 || dseditgroup -o create -r "@PRODUCT@ VPN users" @ID@
 user=$(stat -f%Su /dev/console)
 if [ -n "$user" ] && [ "$user" != root ] && [ "$user" != loginwindow ]; then
-  dseditgroup -o edit -a "$user" -t user @ID@
+  dseditgroup -o checkmember -m "$user" @ID@ >/dev/null 2>&1 || dseditgroup -o edit -a "$user" -t user @ID@
 fi
 
 # Engines run as this hidden system account, without a shell or a home.
@@ -37,6 +39,9 @@ if ! dscl . -read /Users/@ENGINE_USER@ >/dev/null 2>&1; then
   dscl . -create /Users/@ENGINE_USER@ Password "*"
   dscl . -create /Users/@ENGINE_USER@ IsHidden 1
 fi
+# The daemon refuses to start without it, and launchd would restart it in
+# a loop.
+id @ENGINE_USER@ >/dev/null || { echo "the @ENGINE_USER@ account could not be created" >&2; exit 1; }
 
 # Installs made by hand before the package, and the jobs of earlier names
 # (com.vpnd, then com.omnitun.daemon before the reverse-DNS identifiers).
@@ -61,13 +66,13 @@ chown root:admin "$log"
 chmod 640 "$log"
 
 launchctl bootout system/@LABEL@ 2>/dev/null || true
-launchctl bootstrap system "$plist"
+launchctl bootstrap system "$plist" || { echo "the service could not be started (launchctl bootstrap)" >&2; exit 1; }
 
 mkdir -p /usr/local/bin
 # -n: replace a link, never write through one.
 ln -sfn "$app/Contents/MacOS/@CLI@" /usr/local/bin/@CLI@
 
-# Opens the app in the user's session.
+# Opens the app in the user's session (optional).
 if [ -n "$user" ] && [ "$user" != root ] && [ "$user" != loginwindow ]; then
   launchctl asuser "$(id -u "$user")" sudo -u "$user" open "$app" || true
 fi

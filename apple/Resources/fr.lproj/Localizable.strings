@@ -375,7 +375,7 @@
 "Drag VPNs here from the list to file them in this folder." = "Faites glisser des VPN depuis la liste pour les ranger dans ce dossier.";
 "About" = "À propos";
 "Version %@" = "Version %@";
-"A VPN client for FortiGate SSL VPN, IPsec, OpenVPN and L2TP, several at a time." = "Un client VPN pour le VPN SSL FortiGate, IPsec, OpenVPN et L2TP, plusieurs à la fois.";
+"A VPN client for FortiGate SSL VPN, IPsec, OpenVPN, L2TP and WireGuard, several at a time." = "Un client VPN pour le VPN SSL FortiGate, IPsec, OpenVPN, L2TP et WireGuard, plusieurs à la fois.";
 "Free software: use, change and share it under the MIT license or the Apache License 2.0, as you prefer." = "Logiciel libre : utilisez-le, modifiez-le et partagez-le selon la licence MIT ou la licence Apache 2.0, au choix.";
 "MIT License" = "Licence MIT";
 "Apache License 2.0" = "Licence Apache 2.0";
