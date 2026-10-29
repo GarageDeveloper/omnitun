@@ -40,18 +40,23 @@ final class Updates: NSObject, SPUStandardUserDriverDelegate, SPUUpdaterDelegate
 
     private static let log = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Omnitun", category: "updates")
 
-    // The package's installer asks for an administrator password before it
-    // extracts the update. When that dialog closes, macOS gives the focus
-    // back to the app active before, never to a menu bar app: Sparkle's
-    // window (ready to install) would stay behind the others.
+    // The package's installer starts once the administrator password is
+    // given. When that dialog closes, macOS gives the focus back to the app
+    // active before, never to a menu bar app, and refuses it to us: the
+    // window that then offers to install and relaunch would stay behind.
+    // It floats above the other apps' windows until it closes.
     nonisolated func updater(_ updater: SPUUpdater, didExtractUpdate item: SUAppcastItem) {
         MainActor.assumeIsolated {
-            Self.log.info("update \(item.displayVersionString, privacy: .public) extracted: bringing its window forward")
-            NSApp.activate()
-            for window in NSApp.windows where window.isVisible && window.canBecomeKey {
-                window.orderFrontRegardless()
-                window.makeKey()
+            let sparkle = Bundle(for: SPUStandardUpdaterController.self)
+            let windows = NSApp.windows.filter { window in
+                window.isVisible && window.windowController.map { Bundle(for: type(of: $0)) == sparkle } == true
             }
+            Self.log.notice("installer started for \(item.displayVersionString, privacy: .public): \(windows.count) window(s) kept in front")
+            for window in windows {
+                window.level = .floating
+                window.orderFrontRegardless()
+            }
+            NSApp.activate()
         }
     }
 }
