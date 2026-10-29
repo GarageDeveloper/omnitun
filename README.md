@@ -183,10 +183,25 @@ Principles:
 - **Reconnection.** A tunnel that drops is started again (5 attempts,
   exponential backoff) with the secrets kept in memory for the session.
 
-## Tests
+## Development
 
-`cargo test --workspace` runs the unit tests and the loopback tests against
-fake gateways. The `interop/` folders run the engines against real servers
+What CI checks (clippy and the tests on Linux and macOS):
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+cargo deny check licenses
+```
+
+`cargo test -p vpn-ipsec` tests one crate, `cargo test -p vpn-ipsec eap`
+the tests whose name contains `eap`. The app's text is in English and
+French: a new string needs its entry in
+`apple/Resources/fr.lproj/Localizable.strings`. See
+[apple/README.md](apple/README.md) to build the app.
+
+The tests are unit tests and loopback tests against fake gateways. The
+`interop/` folders run the engines against real servers
 in Docker: strongSwan 5.9 (IKEv1, IKEv2), OpenVPN 2.6, strongSwan + xl2tpd
 + pppd (L2TP) and the Linux kernel's WireGuard; `interop/service` installs
 the service under systemd as described above and connects through it.
