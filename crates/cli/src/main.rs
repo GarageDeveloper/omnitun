@@ -273,7 +273,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Profiles { names: true } => {
-            for key in completion_keys(&store.load()?) {
+            for key in completion_keys(&store.load_read_only()?) {
                 println!("{key}");
             }
         }
