@@ -17,6 +17,7 @@ pub fn version() -> String {
     }
 }
 pub mod destination;
+pub mod dns_ipc;
 pub mod engine;
 pub mod engine_ipc;
 pub mod failure;

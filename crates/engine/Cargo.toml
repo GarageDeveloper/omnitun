@@ -16,6 +16,7 @@ vpn-ipsec.workspace = true
 vpn-openvpn.workspace = true
 vpn-l2tp.workspace = true
 vpn-wireguard.workspace = true
+vpn-dnsproxy.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 tokio.workspace = true

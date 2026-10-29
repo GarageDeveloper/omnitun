@@ -3,6 +3,10 @@
 //! daemon passes the control socket as descriptor 3, the descriptor socket
 //! as 4 and the session's listening prompt socket as 5; `--owner <uid>`
 //! names the only user (besides root) whose client may attach to it.
+//!
+//! `--dns-proxy`: a session's DNS proxy instead (routes by domain, #37):
+//! the control socket as descriptor 3, the bound UDP socket as 4 and the
+//! TCP listener on the same port as 5.
 
 use std::os::fd::{FromRawFd, OwnedFd};
 
@@ -33,6 +37,9 @@ async fn main() -> anyhow::Result<()> {
     if nix::unistd::geteuid().is_root() {
         bail!("{} must not run as root", vpn_core::brand::ENGINE);
     }
+    if std::env::args().nth(1).as_deref() == Some("--dns-proxy") {
+        return dns_proxy().await;
+    }
     let mut args = std::env::args().skip(1);
     let owner = match (args.next().as_deref(), args.next()) {
         (Some("--owner"), Some(uid)) => uid.parse().context("--owner")?,
@@ -48,6 +55,24 @@ async fn main() -> anyhow::Result<()> {
     prompts.set_nonblocking(true)?;
     let prompts = tokio::net::UnixListener::from_std(prompts).context("prompt socket")?;
     omnitun_engine::serve(control, std::os::unix::net::UnixStream::from(fds), prompts, owner).await
+}
+
+async fn dns_proxy() -> anyhow::Result<()> {
+    // SAFETY: the daemon set up these three descriptors for this process.
+    let (control, udp, tcp) =
+        unsafe { (OwnedFd::from_raw_fd(CONTROL_FD), OwnedFd::from_raw_fd(FDS_FD), OwnedFd::from_raw_fd(PROMPTS_FD)) };
+    let control = std::os::unix::net::UnixStream::from(control);
+    control.set_nonblocking(true)?;
+    let udp = std::net::UdpSocket::from(udp);
+    udp.set_nonblocking(true)?;
+    let tcp = std::net::TcpListener::from(tcp);
+    tcp.set_nonblocking(true)?;
+    vpn_dnsproxy::run(
+        tokio::net::UnixStream::from_std(control).context("control socket")?,
+        tokio::net::UdpSocket::from_std(udp).context("DNS socket")?,
+        tokio::net::TcpListener::from_std(tcp).context("DNS listener")?,
+    )
+    .await
 }
 
 /// What an engine needs from its sandbox: name resolution, outbound
