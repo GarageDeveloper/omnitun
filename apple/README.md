@@ -64,5 +64,7 @@ the previous one.
 - creates the `omnitun` group and adds the session's user to it, and the
   `_omnitun` user the engines run as;
 - installs and loads `/Library/LaunchDaemons/com.root42.omnitun.daemon.plist`;
-  links `/usr/local/bin/omnitunctl`;
+  links `/usr/local/bin/omnitunctl`, and its shell completions into
+  `/usr/local/share/zsh/site-functions/_omnitunctl` and
+  `/usr/local/share/bash-completion/completions/omnitunctl`;
 - opens the app in the session at the end.
