@@ -23,7 +23,10 @@ pub fn export(profile: &Profile) -> anyhow::Result<String> {
     match &mut shared.protocol {
         ProtocolConfig::FortiSsl(p) => {
             p.username = None;
-            p.ca_file = None;
+            // The recipient does not have the file: its CA goes inline.
+            if let Some(path) = p.ca_file.take() {
+                p.ca_pem = Some(std::fs::read_to_string(&path).with_context(|| format!("cannot read {path}"))?);
+            }
             p.client_cert = None;
             p.client_key = None;
             p.client_cert_pem = None;
@@ -139,10 +142,11 @@ mod tests {
 
     #[test]
     fn export_keeps_no_secret_or_personal_field() {
-        let p = profile(
+        let pin = "ab".repeat(32);
+        let p = profile(&format!(
             "name = \"paris\"\nprotocol = \"forti-ssl\"\nhost = \"vpn.example.com\"\nusername = \"alice\"\n\
-             client_key_pem = \"KEY\"\nclient_cert = \"/Users/alice/cert.pem\"\ntrusted_cert = [\"ab\"]",
-        );
+             client_key_pem = \"KEY\"\nclient_cert = \"/Users/alice/cert.pem\"\ntrusted_cert = [\"{pin}\"]"
+        ));
         let text = export(&p).unwrap();
         for leaked in ["alice", "KEY", "cert.pem"] {
             assert!(!text.contains(leaked), "{leaked} in\n{text}");
@@ -151,8 +155,26 @@ mod tests {
         let ProtocolConfig::FortiSsl(s) = &back.protocol else { panic!() };
         assert_eq!(
             (back.name.as_str(), s.host.as_str(), s.trusted_cert.as_slice()),
-            ("paris", "vpn.example.com", &["ab".to_string()][..])
+            ("paris", "vpn.example.com", std::slice::from_ref(&pin))
         );
+    }
+
+    #[test]
+    fn export_inlines_the_ca_file() {
+        let dir = std::env::temp_dir().join(format!("vpn-client-export-ca-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ca = dir.join("ca.pem");
+        std::fs::write(&ca, "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n").unwrap();
+        let p = profile(&format!(
+            "name = \"paris\"\nprotocol = \"forti-ssl\"\nhost = \"vpn.example.com\"\nca_file = \"{}\"",
+            ca.display()
+        ));
+        let back = parse(&export(&p).unwrap()).unwrap();
+        let ProtocolConfig::FortiSsl(s) = &back.protocol else { panic!() };
+        assert!(s.ca_pem.as_deref().is_some_and(|pem| pem.contains("\nCA\n")), "{s:?}");
+        std::fs::remove_file(&ca).unwrap();
+        assert!(export(&p).is_err(), "a missing CA is not dropped silently");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

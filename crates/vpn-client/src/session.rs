@@ -5,7 +5,7 @@
 
 use anyhow::{Context, ensure};
 use async_trait::async_trait;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use vpn_core::ipc::{Event, Request, Retry, SessionInfo, SessionState};
 use vpn_core::{CertificateInfo, Profile, Prompt, PromptKind};
@@ -282,28 +282,41 @@ async fn handle_question(
 /// The session's prompt socket: the engine asks, the user answers; the
 /// daemon is not on the way.
 struct PromptSocket {
-    read: BufReader<tokio::net::unix::OwnedReadHalf>,
+    read: tokio::net::unix::OwnedReadHalf,
+    /// What was read past the last whole question. `next` runs in a
+    /// `select!`: a question read in parts survives its cancellation.
+    pending: Vec<u8>,
     write: tokio::net::unix::OwnedWriteHalf,
 }
 
 /// Longest question accepted from an engine.
-const MAX_QUESTION: u64 = 1024 * 1024;
+const MAX_QUESTION: usize = 1024 * 1024;
 
 impl PromptSocket {
     async fn open(path: &str) -> anyhow::Result<Self> {
         let stream = UnixStream::connect(path).await.with_context(|| format!("cannot reach the session at {path}"))?;
+        Ok(Self::new(stream))
+    }
+
+    fn new(stream: UnixStream) -> Self {
         let (read, write) = stream.into_split();
-        Ok(Self { read: BufReader::new(read), write })
+        Self { read, pending: Vec::new(), write }
     }
 
     /// The next question; `None` once the engine closed the socket.
+    /// Cancel safe: nothing read is lost.
     async fn next(&mut self) -> anyhow::Result<Option<Event>> {
-        let mut line = String::new();
-        if (&mut self.read).take(MAX_QUESTION).read_line(&mut line).await? == 0 {
-            return Ok(None);
+        loop {
+            if let Some(end) = self.pending.iter().position(|b| *b == b'\n') {
+                let line: Vec<u8> = self.pending.drain(..=end).collect();
+                return Ok(Some(serde_json::from_slice(&line)?));
+            }
+            ensure!(self.pending.len() < MAX_QUESTION, "the session sent an oversized message");
+            if self.read.read_buf(&mut self.pending).await? == 0 {
+                ensure!(self.pending.is_empty(), "the session closed in the middle of a message");
+                return Ok(None);
+            }
         }
-        anyhow::ensure!(line.ends_with('\n'), "the session sent an oversized message");
-        Ok(Some(serde_json::from_str(&line)?))
     }
 
     async fn answer(&mut self, id: u64, value: Option<String>) -> anyhow::Result<()> {
@@ -539,6 +552,197 @@ mod tests {
         assert!(!budget.take());
         budget.recent[0] -= SIGNATURE_PERIOD;
         assert!(budget.take(), "an old one no longer counts");
+    }
+
+    /// The user's side, answering as told and keeping what it was shown.
+    struct User {
+        trust: Trust,
+        notices: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl User {
+        fn new(trust: Trust) -> Self {
+            Self { trust, notices: Default::default() }
+        }
+
+        fn warned(&self) -> bool {
+            self.notices.lock().unwrap().iter().any(|n| n.starts_with("Warning"))
+        }
+    }
+
+    #[async_trait]
+    impl Interaction for User {
+        async fn ask(&self, _: &Prompt) -> anyhow::Result<Option<Zeroizing<String>>> {
+            Ok(None)
+        }
+        async fn trust(&self, _: &CertificateInfo) -> anyhow::Result<Trust> {
+            Ok(self.trust)
+        }
+        fn open_url(&self, _: &str) {}
+        fn notice(&self, notice: Notice) {
+            self.notices.lock().unwrap().push(format!("{notice:?}"));
+        }
+    }
+
+    /// A session's engine, at the other end of the prompt socket.
+    struct Engine {
+        read: tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
+        write: tokio::net::unix::OwnedWriteHalf,
+    }
+
+    fn sockets() -> (PromptSocket, Engine) {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let (read, write) = theirs.into_split();
+        (PromptSocket::new(ours), Engine { read: tokio::io::BufReader::new(read), write })
+    }
+
+    impl Engine {
+        async fn send(&mut self, event: &Event) {
+            let mut line = serde_json::to_vec(event).unwrap();
+            line.push(b'\n');
+            self.write.write_all(&line).await.unwrap();
+        }
+
+        async fn answer(&mut self) -> (u64, Option<String>) {
+            use tokio::io::AsyncBufReadExt;
+            let mut line = String::new();
+            self.read.read_line(&mut line).await.unwrap();
+            match serde_json::from_str(&line).unwrap() {
+                Request::Answer { id, value } => (id, value),
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    /// A FortiSSL profile with a client certificate, and its key.
+    fn signing_profile() -> (Profile, ClientKey) {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["alice".into()]).unwrap().self_signed(&key).unwrap();
+        let mut profile = profile("vpn.example.com", 443);
+        profile.id = vpn_core::new_id();
+        let vpn_core::ProtocolConfig::FortiSsl(p) = &mut profile.protocol else { unreachable!() };
+        (p.client_cert_pem, p.client_key_pem) = (Some(cert.pem()), Some(key.serialize_pem()));
+        let key = ClientKey::take(&mut profile).unwrap().unwrap();
+        (profile, key)
+    }
+
+    fn sign_request(certificate: &str, data: &[u8]) -> Option<vpn_core::SignRequest> {
+        Some(vpn_core::SignRequest {
+            certificate: certificate.into(),
+            algorithm: vpn_core::SignAlgorithm::EcdsaSha256,
+            data: hex::encode(data),
+        })
+    }
+
+    const TLS13: &[u8] = b"TLS 1.3, client CertificateVerify\0";
+
+    fn tls13_octets() -> Vec<u8> {
+        [&[b' '; 64][..], TLS13, &[7; 32]].concat()
+    }
+
+    #[tokio::test]
+    async fn signatures_only_for_the_profile() {
+        let (profile, key) = signing_profile();
+        let mut budget = SignBudget::default();
+        let ours = sign_request(key.sha256(), &tls13_octets());
+        assert!(sign(&profile, Some(&key), ours.as_ref(), &mut budget).await.is_ok());
+        let other = sign_request(&"ab".repeat(32), &tls13_octets());
+        let err = sign(&profile, Some(&key), other.as_ref(), &mut budget).await.unwrap_err();
+        assert!(err.to_string().contains("does not use"), "{err}");
+        let anything = sign_request(key.sha256(), b"a bank transfer");
+        assert!(sign(&profile, Some(&key), anything.as_ref(), &mut budget).await.is_err(), "not TLS");
+        assert!(sign(&profile, None, ours.as_ref(), &mut budget).await.is_err(), "no key");
+        assert!(sign(&profile, Some(&key), None, &mut budget).await.is_err(), "no request");
+        // The same octets, for a protocol without client certificates or
+        // signing other octets.
+        for protocol in [
+            "protocol = \"l2tp\"\ngateway = \"vpn.example.com\"",
+            "protocol = \"ipsec\"\ngateway = \"vpn.example.com\"",
+        ] {
+            let other: Profile = toml::from_str(&format!("name = \"x\"\n{protocol}")).unwrap();
+            assert!(sign(&other, Some(&key), ours.as_ref(), &mut budget).await.is_err(), "{protocol}");
+        }
+        while budget.take() {}
+        let err = sign(&profile, Some(&key), ours.as_ref(), &mut budget).await.unwrap_err();
+        assert!(err.to_string().contains("too many"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn questions_are_answered_on_the_prompt_socket() {
+        let (dir, store) = {
+            let dir = std::env::temp_dir().join(format!("vpn-client-questions-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            (dir.clone(), ProfileStore::open(Some(dir.join("profiles.toml"))).unwrap())
+        };
+        let (mut profile, key) = signing_profile();
+        let vpn_core::ProtocolConfig::FortiSsl(p) = &mut profile.protocol else { unreachable!() };
+        p.client_cert_pem = None;
+        store.save(&profile).unwrap();
+        let (mut socket, mut engine) = sockets();
+        let mut budget = SignBudget::default();
+
+        // A signature, then one for another certificate: refused, said.
+        let user = User::new(Trust::Reject);
+        let mut prompt = Prompt::new("sign", PromptKind::Sign, "");
+        prompt.sign = sign_request(key.sha256(), &tls13_octets());
+        engine.send(&Event::Prompt { id: 1, prompt: prompt.clone() }).await;
+        let asked = socket.next().await.unwrap().unwrap();
+        handle_question(asked, &mut socket, &profile, Some(&key), &store, &user, &mut budget).await.unwrap();
+        let (id, signature) = engine.answer().await;
+        assert_eq!(id, 1);
+        assert!(signature.is_some_and(|s| hex::decode(s).is_ok()));
+        prompt.sign = sign_request(&"ab".repeat(32), &tls13_octets());
+        engine.send(&Event::Prompt { id: 2, prompt }).await;
+        let asked = socket.next().await.unwrap().unwrap();
+        handle_question(asked, &mut socket, &profile, Some(&key), &store, &user, &mut budget).await.unwrap();
+        assert_eq!(engine.answer().await, (2, None));
+        assert!(user.warned());
+
+        // A certificate to trust: refused, accepted once, pinned.
+        let certificate = CertificateInfo {
+            host: "vpn.example.com".into(),
+            port: 443,
+            sha256: "cd".repeat(32),
+            der: String::new(),
+            reason: None,
+        };
+        let mut prompt = Prompt::new(vpn_core::prompt::TRUST_CERTIFICATE, PromptKind::Confirm, "");
+        prompt.certificate = Some(certificate.clone());
+        for (id, trust, answer) in [
+            (3, Trust::Reject, None),
+            (4, Trust::Once, Some(certificate.sha256.clone())),
+            (5, Trust::Pin, Some(certificate.sha256.clone())),
+        ] {
+            engine.send(&Event::Prompt { id, prompt: prompt.clone() }).await;
+            let asked = socket.next().await.unwrap().unwrap();
+            let user = User::new(trust);
+            handle_question(asked, &mut socket, &profile, Some(&key), &store, &user, &mut budget).await.unwrap();
+            assert_eq!(engine.answer().await, (id, answer));
+            let vpn_core::ProtocolConfig::FortiSsl(p) = store.find(&profile.id).unwrap().protocol else { panic!() };
+            assert_eq!(p.trusted_cert.len(), usize::from(trust == Trust::Pin), "{trust:?}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A question read in two parts, an event from the daemon between
+    /// them: the first part is kept.
+    #[tokio::test]
+    async fn questions_survive_a_cancelled_read() {
+        let (mut socket, mut engine) = sockets();
+        let mut line =
+            serde_json::to_vec(&Event::Prompt { id: 9, prompt: Prompt::new("otp", PromptKind::Secret, "Code") })
+                .unwrap();
+        line.push(b'\n');
+        let (first, rest) = line.split_at(line.len() / 2);
+        engine.write.write_all(first).await.unwrap();
+        let cancelled = tokio::time::timeout(std::time::Duration::from_millis(50), socket.next()).await;
+        assert!(cancelled.is_err(), "still waiting for the end of the line");
+        engine.write.write_all(rest).await.unwrap();
+        let Some(Event::Prompt { id, prompt }) = socket.next().await.unwrap() else { panic!() };
+        assert_eq!((id, prompt.key.as_str()), (9, "otp"));
+        drop(engine);
+        assert!(socket.next().await.unwrap().is_none());
     }
 
     #[test]
