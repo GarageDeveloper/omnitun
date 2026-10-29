@@ -2,10 +2,12 @@
 // daily; a new version is offered, installed (the .pkg, administrator
 // password asked) only when the user accepts.
 
+import AppKit
+import OSLog
 import Sparkle
 
 @MainActor
-final class Updates: NSObject, SPUStandardUserDriverDelegate {
+final class Updates: NSObject, SPUStandardUserDriverDelegate, SPUUpdaterDelegate {
     static let shared = Updates()
     private var controller: SPUStandardUpdaterController?
 
@@ -17,7 +19,7 @@ final class Updates: NSObject, SPUStandardUserDriverDelegate {
 
     func start() {
         guard installed, controller == nil else { return }
-        controller = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: self)
+        controller = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: self, userDriverDelegate: self)
     }
 
     var available: Bool { controller != nil }
@@ -35,4 +37,26 @@ final class Updates: NSObject, SPUStandardUserDriverDelegate {
     // reminder discreetly, and brings its window to the front when the user
     // asks.
     nonisolated var supportsGentleScheduledUpdateReminders: Bool { true }
+
+    private static let log = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Omnitun", category: "updates")
+
+    // The package's installer starts once the administrator password is
+    // given. When that dialog closes, macOS gives the focus back to the app
+    // active before, never to a menu bar app, and refuses it to us: the
+    // window that then offers to install and relaunch would stay behind.
+    // It floats above the other apps' windows until it closes.
+    nonisolated func updater(_ updater: SPUUpdater, didExtractUpdate item: SUAppcastItem) {
+        MainActor.assumeIsolated {
+            let sparkle = Bundle(for: SPUStandardUpdaterController.self)
+            let windows = NSApp.windows.filter { window in
+                window.isVisible && window.windowController.map { Bundle(for: type(of: $0)) == sparkle } == true
+            }
+            Self.log.notice("installer started for \(item.displayVersionString, privacy: .public): \(windows.count) window(s) kept in front")
+            for window in windows {
+                window.level = .floating
+                window.orderFrontRegardless()
+            }
+            NSApp.activate()
+        }
+    }
 }

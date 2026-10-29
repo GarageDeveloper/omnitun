@@ -15,7 +15,8 @@
 # its source archives are then those of the package. The commit must be on
 # the remote already.
 #
-# NOTES=file: release notes (Markdown) for the Release and the appcast.
+# NOTES=file: release notes (Markdown) for the Release and the appcast
+# (rendered to HTML by GitHub's Markdown API: gh must be logged in).
 set -eu
 cd "$(dirname "$0")/.."
 if [ -f apple/signing.env ]; then . apple/signing.env; fi
@@ -81,7 +82,11 @@ cp "$pkg" "$out/"
 signature=$(apple/.build/artifacts/sparkle/Sparkle/bin/sign_update --account omnitun "$pkg")
 notes=""
 if [ -n "${NOTES:-}" ]; then
-  notes="<description><![CDATA[$(sed 's/]]>/]] >/g' "$NOTES")]]></description>"
+  # Sparkle shows a description as HTML: the Markdown is rendered by GitHub,
+  # as on the Release's page, in the system font and appearance.
+  html=$(gh api -X POST markdown -f mode=markdown -F text=@"$NOTES")
+  style='<style>:root{color-scheme:light dark}body{font:13px -apple-system,sans-serif;margin:0 8px}h2{font-size:15px;margin:14px 0 6px}ul{padding-left:20px}li{margin:3px 0}code{font:12px ui-monospace,monospace}.anchor{display:none}</style>'
+  notes="<description><![CDATA[$style$(printf '%s' "$html" | sed 's/]]>/]] >/g')]]></description>"
 fi
 url="https://github.com/$REPO/releases/download/$tag/$PRODUCT-$VERSION.pkg"
 cat > "$out/appcast.xml" <<XML
