@@ -65,11 +65,11 @@ pub(crate) async fn establish_with_natt_port(
         );
     }
     // A gateway certificate with EAP or our certificate needs no PSK.
-    let psk = Zeroizing::new(if trust.is_none() || (profile.username.is_none() && client_chain.is_none()) {
+    let psk = if trust.is_none() || (profile.username.is_none() && client_chain.is_none()) {
         ctx.prompter.ask(Prompt::new("psk", PromptKind::Secret, format!("Pre-shared key for {}", ctx.name))).await?
     } else {
-        String::new()
-    });
+        Zeroizing::new(String::new())
+    };
 
     let mut transport = Transport::connect(gateway).await?;
     let spi_i = nonzero_u64();

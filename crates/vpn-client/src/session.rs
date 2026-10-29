@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use vpn_core::ipc::{Event, Request, Retry, SessionInfo, SessionState};
-use vpn_core::{CertificateInfo, Profile, Prompt, PromptKind};
+use vpn_core::{CertificateInfo, FailureKind, Profile, Prompt, PromptKind};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::client_key::ClientKey;
@@ -68,8 +68,31 @@ pub async fn connect(
     store: &ProfileStore,
     client: &str,
     user: &dyn Interaction,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Connected> {
     connect_with(profile, store, client, user, ConnectOptions::default()).await
+}
+
+/// A connection the daemon took over. Its client certificate, if any,
+/// stays here: renegotiations and reconnections are signed by this process
+/// while it lives.
+#[must_use = "a session with a client certificate needs this process to sign"]
+pub struct Connected {
+    signers: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl Connected {
+    /// Whether the session (or a VPN it goes through) will ask this
+    /// process for signatures.
+    pub fn signs(&self) -> bool {
+        !self.signers.is_empty()
+    }
+
+    /// Returns once no session needs this process to sign any more.
+    pub async fn signing(self) {
+        for signer in self.signers {
+            let _ = signer.await;
+        }
+    }
 }
 
 /// How to connect, besides the profile.
@@ -87,18 +110,26 @@ pub async fn connect_with(
     client: &str,
     user: &dyn Interaction,
     options: ConnectOptions,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Connected> {
     let ConnectOptions { direct, split } = options;
     // A company VPN still runs alone in split mode.
     let profile = if split { profile.in_split_mode()? } else { profile };
     let sessions = Daemon::open(client).await?.status().await?;
-    let others = exclusive_conflicts(&profile, &sessions, &store.load()?, direct);
-    ensure!(others.is_empty(), "{}", exclusive_refusal(&profile, &others));
+    let profiles = store.load()?;
+    let others = exclusive_sessions(&profile, &sessions, &profiles, direct);
+    if !others.is_empty() {
+        // One VPN in the way: the app offers to disconnect it.
+        let with = (others.len() == 1).then(|| others[0].id.clone());
+        let names: Vec<String> = others.iter().map(|s| s.name.clone()).collect();
+        return Err(vpn_core::failure(FailureKind::Conflict { with }, exclusive_refusal(&profile, &names)));
+    }
+    let mut signers = Vec::new();
     let via = match direct || profile.via.is_empty() {
         true => None,
-        false => Some(chain_parent(&profile, store, client, user, 0).await?),
+        false => Some(chain_parent(&profile, store, client, user, 0, &mut signers).await?),
     };
-    connect_one(profile, store, client, user, via).await
+    signers.extend(connect_one(profile, store, client, user, via).await?);
+    Ok(Connected { signers })
 }
 
 /// The sessions that keep `profile` from coming up, by name: a company VPN
@@ -110,6 +141,15 @@ pub fn exclusive_conflicts(
     profiles: &[Profile],
     direct: bool,
 ) -> Vec<String> {
+    exclusive_sessions(profile, sessions, profiles, direct).into_iter().map(|s| s.name.clone()).collect()
+}
+
+fn exclusive_sessions<'a>(
+    profile: &Profile,
+    sessions: &'a [SessionInfo],
+    profiles: &[Profile],
+    direct: bool,
+) -> Vec<&'a SessionInfo> {
     let up = [SessionState::Connecting, SessionState::Connected, SessionState::Reconnecting];
     let exclusive = |id: &str| profiles.iter().any(|p| p.id == id && p.exclusive);
     sessions
@@ -117,7 +157,6 @@ pub fn exclusive_conflicts(
         .filter(|s| s.id != profile.id && up.contains(&s.state))
         .filter(|s| direct || !profile.via.contains(&s.id))
         .filter(|s| profile.exclusive || exclusive(&s.id))
-        .map(|s| s.name.clone())
         .collect()
 }
 
@@ -136,6 +175,7 @@ fn chain_parent<'a>(
     client: &'a str,
     user: &'a dyn Interaction,
     depth: usize,
+    signers: &'a mut Vec<tokio::task::JoinHandle<()>>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + 'a>> {
     Box::pin(async move {
         ensure!(depth < vpn_core::profile::MAX_VIA, "the VPN chain of {} is too long or loops", profile.name);
@@ -155,11 +195,12 @@ fn chain_parent<'a>(
         let (id, name) = (first.id.clone(), first.name.clone());
         let via = match first.via.is_empty() {
             true => None,
-            false => Some(chain_parent(&first, store, client, user, depth + 1).await?),
+            false => Some(chain_parent(&first, store, client, user, depth + 1, signers).await?),
         };
-        connect_one(first, store, client, user, via)
+        let signer = connect_one(first, store, client, user, via)
             .await
             .with_context(|| format!("{} goes through {name}", profile.name))?;
+        signers.extend(signer);
         Ok(id)
     })
 }
@@ -170,7 +211,7 @@ async fn connect_one(
     client: &str,
     user: &dyn Interaction,
     via: Option<String>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
     user.notice(Notice::Connecting { id: profile.id.clone(), name: profile.name.clone() });
     if let vpn_core::ProtocolConfig::FortiSsl(p) = &mut profile.protocol {
         // The daemon runs as root and never opens user-supplied paths.
@@ -215,10 +256,10 @@ async fn connect_one(
             Event::Done => {
                 // Renegotiations and reconnections sign again: this
                 // process keeps signing for the session while it lives.
-                if let (Some(socket), Some(key)) = (prompts, key) {
-                    tokio::spawn(keep_signing(socket, profile, key, signatures));
-                }
-                return Ok(());
+                return Ok(match (prompts, key) {
+                    (Some(socket), Some(key)) => Some(tokio::spawn(keep_signing(socket, profile, key, signatures))),
+                    _ => None,
+                });
             }
             Event::Error { message, failure } => return Err(crate::daemon::error(message, failure)),
             Event::Prompt { .. } | Event::OpenUrl { .. } | Event::Status { .. } | Event::Hello { .. } => {}

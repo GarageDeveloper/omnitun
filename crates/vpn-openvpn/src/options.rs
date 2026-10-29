@@ -178,11 +178,14 @@ impl Pushed {
         routes.sort();
         routes.dedup();
         cap(&mut routes, MAX_ROUTES, "routes");
+        // In the server's order, each once.
         let mut servers = self.dns.clone();
-        servers.dedup();
+        let mut seen = std::collections::HashSet::new();
+        servers.retain(|s| seen.insert(*s));
         cap(&mut servers, MAX_DNS_SERVERS, "DNS servers");
         let mut domains = self.domains.clone();
-        domains.dedup();
+        let mut seen = std::collections::HashSet::new();
+        domains.retain(|d| seen.insert(d.clone()));
         cap(&mut domains, MAX_DOMAINS, "DNS domains");
         let full_tunnel = self.redirect_gateway;
         Ok(TunnelSettings {
@@ -240,6 +243,17 @@ mod tests {
         net30.add("PUSH_REPLY,ifconfig 10.8.0.6 10.8.0.5,redirect-gateway def1 bypass-dhcp").unwrap();
         let s = net30.settings("192.0.2.1".parse().unwrap(), &[]).unwrap();
         assert!(s.full_tunnel && s.dns.match_domains.is_empty());
+
+        // Each DNS server once, in the server's order.
+        let mut dns = Pushed::default();
+        dns.add(
+            "PUSH_REPLY,ifconfig 10.8.0.6 10.8.0.5,dhcp-option DNS 10.8.0.1,dhcp-option DNS 10.8.0.2,\
+             dhcp-option DNS 10.8.0.1",
+        )
+        .unwrap();
+        let s = dns.settings("192.0.2.1".parse().unwrap(), &[]).unwrap();
+        let servers: Vec<String> = s.dns.servers.iter().map(ToString::to_string).collect();
+        assert_eq!(servers, ["10.8.0.1", "10.8.0.2"]);
         assert_eq!(s.routes, ["10.8.0.5/32".parse().unwrap()]);
         assert!(Pushed::default().add("PUSH_REPLY,compress lzo-v9").is_err());
         assert!(Pushed::default().settings("192.0.2.1".parse().unwrap(), &[]).is_err(), "no address");

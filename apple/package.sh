@@ -90,6 +90,15 @@ subst apple/Info.plist > "$app/Contents/Info.plist"
 cp -R apple/Resources/en.lproj apple/Resources/fr.lproj "$app/Contents/Resources/"
 # The licenses of what we ship (Rust crates, Sparkle): Settings › About.
 scripts/third-party-notices.sh > "$app/Contents/Resources/ThirdPartyNotices.txt"
+# Shell completions, written by the CLI just built; postinstall links them
+# where zsh and bash-completion look. Written outside the bundle, then
+# copied: run for the first time, the bundle's CLI gets EIO writing into its
+# own bundle.
+mkdir -p "$dist/completions" "$app/Contents/Resources/completions"
+"$app/Contents/MacOS/$CLI" completions zsh > "$dist/completions/_$CLI"
+"$app/Contents/MacOS/$CLI" completions bash > "$dist/completions/$CLI.bash"
+cp "$dist/completions/_$CLI" "$dist/completions/$CLI.bash" "$app/Contents/Resources/completions/"
+rm -rf "$dist/completions"
 subst apple/pkg/daemon.plist > "$dist/$LABEL.plist"
 plutil -lint "$app/Contents/Info.plist" "$dist/$LABEL.plist" >/dev/null
 

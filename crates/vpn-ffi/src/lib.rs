@@ -392,8 +392,11 @@ impl Client {
         let task = runtime().spawn(async move {
             let result = async {
                 let profile = store.find(&id)?;
+                // The app outlives the connection: its signing tasks, once
+                // detached, keep signing for the session.
                 vpn_client::connect_with(profile, &store, CLIENT, &bridge, vpn_client::ConnectOptions { direct, split })
                     .await
+                    .map(drop)
             }
             .await;
             delegate.finished(result.err().map(ClientError::from));

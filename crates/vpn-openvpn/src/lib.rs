@@ -125,15 +125,13 @@ impl OpenVpnEngine {
         let ask = |key: &str, kind: PromptKind, text: String| ctx.prompter.ask(Prompt::new(key, kind, text));
         let username = match &self.profile.username {
             Some(user) => user.clone(),
-            None => ask("username", PromptKind::Text, format!("User name for {}", ctx.name)).await?,
+            None => ask("username", PromptKind::Text, format!("User name for {}", ctx.name)).await?.to_string(),
         };
-        let password = Zeroizing::new(
-            ask("password", PromptKind::Secret, format!("Password for {username} on {}", ctx.name)).await?,
-        );
+        let password = ask("password", PromptKind::Secret, format!("Password for {username} on {}", ctx.name)).await?;
         let password = match &self.profile.static_challenge {
             Some(challenge) => {
                 let kind = if challenge.echo { PromptKind::Text } else { PromptKind::Otp };
-                let answer = Zeroizing::new(ask("otp", kind, challenge.text.clone()).await?);
+                let answer = ask("otp", kind, challenge.text.clone()).await?;
                 Zeroizing::new(format!("SCRV1:{}:{}", b64(&password), b64(&answer)))
             }
             None => password,
@@ -203,7 +201,7 @@ impl Engine for OpenVpnEngine {
                 if let Some(challenge) = parse_challenge(reason).filter(|_| challenges < MAX_CHALLENGES) {
                     challenges += 1;
                     let kind = if challenge.echo { PromptKind::Text } else { PromptKind::Otp };
-                    let answer = Zeroizing::new(ctx.prompter.ask(Prompt::new("otp", kind, challenge.text)).await?);
+                    let answer = ctx.prompter.ask(Prompt::new("otp", kind, challenge.text)).await?;
                     username = challenge.username;
                     password = Zeroizing::new(format!("CRV1::{}::{}", challenge.state, *answer));
                     continue;

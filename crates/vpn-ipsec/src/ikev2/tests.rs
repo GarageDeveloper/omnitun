@@ -30,8 +30,11 @@ struct StaticPrompter;
 
 #[async_trait]
 impl Prompter for StaticPrompter {
-    async fn ask(&self, prompt: Prompt) -> anyhow::Result<String> {
-        Ok(if prompt.key == "psk" { PSK.into() } else { String::new() })
+    async fn ask(&self, prompt: Prompt) -> anyhow::Result<zeroize::Zeroizing<String>> {
+        // The test answers, erased like real ones.
+        let answer: anyhow::Result<String> =
+            async { Ok(if prompt.key == "psk" { PSK.into() } else { String::new() }) }.await;
+        answer.map(zeroize::Zeroizing::new)
     }
 
     async fn open_url(&self, _url: &str) -> anyhow::Result<()> {

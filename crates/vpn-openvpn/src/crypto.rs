@@ -180,22 +180,24 @@ impl DataKeys {
         let mut nonce = [0u8; 12];
         nonce[..4].copy_from_slice(&pid);
         nonce[4..].copy_from_slice(&self.encrypt_iv);
-        // P_DATA_V2 authenticates its 4-byte header, P_DATA_V1 only the id.
-        let mut aad = Vec::with_capacity(8);
-        if header.len() == 4 {
-            aad.extend_from_slice(header);
-        }
-        aad.extend_from_slice(&pid);
-        let mut body = payload.to_vec();
-        let tag = self
-            .encrypt
-            .seal_in_place_separate_tag(Nonce::assume_unique_for_key(nonce), Aad::from(&aad), &mut body)
-            .map_err(|_| anyhow::anyhow!("encryption failed"))?;
-        let mut out = Vec::with_capacity(header.len() + 4 + TAG_LEN + body.len());
+        let aad = Self::aad(header, pid);
+        // One buffer: header, id, room for the tag, then the payload,
+        // encrypted in place.
+        let body = header.len() + 4 + TAG_LEN;
+        let mut out = Vec::with_capacity(body + payload.len());
         out.extend_from_slice(header);
         out.extend_from_slice(&pid);
-        out.extend_from_slice(tag.as_ref());
-        out.extend_from_slice(&body);
+        out.extend_from_slice(&[0; TAG_LEN]);
+        out.extend_from_slice(payload);
+        let tag = self
+            .encrypt
+            .seal_in_place_separate_tag(
+                Nonce::assume_unique_for_key(nonce),
+                Aad::from(aad.as_slice()),
+                &mut out[body..],
+            )
+            .map_err(|_| anyhow::anyhow!("encryption failed"))?;
+        out[body - TAG_LEN..body].copy_from_slice(tag.as_ref());
         Ok(out)
     }
 
@@ -208,22 +210,44 @@ impl DataKeys {
         let mut nonce = [0u8; 12];
         nonce[..4].copy_from_slice(&pid);
         nonce[4..].copy_from_slice(&self.decrypt_iv);
-        let mut aad = Vec::with_capacity(8);
-        if header.len() == 4 {
-            aad.extend_from_slice(header);
-        }
-        aad.extend_from_slice(&pid);
-        let mut body = Vec::with_capacity(packet.len() - 4);
-        body.extend_from_slice(&packet[4 + TAG_LEN..]);
-        body.extend_from_slice(&packet[4..4 + TAG_LEN]);
-        let plain = self
-            .decrypt
-            .open_in_place(Nonce::assume_unique_for_key(nonce), Aad::from(&aad), &mut body)
-            .map_err(|_| anyhow::anyhow!("data packet authentication failed"))?
-            .len();
+        let aad = Self::aad(header, pid);
+        let tag = aead::Tag::try_from(&packet[4..4 + TAG_LEN]).expect("TAG_LEN bytes");
+        let mut body = packet[4 + TAG_LEN..].to_vec();
+        self.decrypt
+            .open_in_place_separate_tag(
+                Nonce::assume_unique_for_key(nonce),
+                Aad::from(aad.as_slice()),
+                tag,
+                &mut body,
+                0..,
+            )
+            .map_err(|_| anyhow::anyhow!("data packet authentication failed"))?;
         self.replay.accept(id);
-        body.truncate(plain);
         Ok(body)
+    }
+
+    /// P_DATA_V2 authenticates its 4-byte header, P_DATA_V1 only the id.
+    fn aad(header: &[u8], pid: [u8; 4]) -> AadBytes {
+        let mut aad = AadBytes { bytes: [0; 8], len: 0 };
+        if header.len() == 4 {
+            aad.bytes[..4].copy_from_slice(header);
+            aad.len = 4;
+        }
+        aad.bytes[aad.len..aad.len + 4].copy_from_slice(&pid);
+        aad.len += 4;
+        aad
+    }
+}
+
+/// The additional data of a data packet, on the stack.
+struct AadBytes {
+    bytes: [u8; 8],
+    len: usize,
+}
+
+impl AadBytes {
+    fn as_slice(&self) -> &[u8] {
+        &self.bytes[..self.len]
     }
 }
 

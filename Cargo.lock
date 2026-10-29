@@ -598,6 +598,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap_complete"
+version = "4.6.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "037e2a1a92236d0aff7e845093f64661d6df4c02c9fcc61a60e9e1d736fa392f"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "clap_derive"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1655,7 +1664,7 @@ dependencies = [
 
 [[package]]
 name = "omnitun-engine"
-version = "0.3.6"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1677,11 +1686,12 @@ dependencies = [
 
 [[package]]
 name = "omnitunctl"
-version = "0.3.6"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "async-trait",
  "clap",
+ "clap_complete",
  "libc",
  "rpassword",
  "serde_json",
@@ -1693,7 +1703,7 @@ dependencies = [
 
 [[package]]
 name = "omnitund"
-version = "0.3.6"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3072,7 +3082,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "utun-probe"
-version = "0.3.6"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "nix 0.31.3",
@@ -3093,7 +3103,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vpn-client"
-version = "0.3.6"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3124,7 +3134,7 @@ dependencies = [
 
 [[package]]
 name = "vpn-core"
-version = "0.3.6"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3138,11 +3148,12 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
+ "zeroize",
 ]
 
 [[package]]
 name = "vpn-ffi"
-version = "0.3.6"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3163,7 +3174,7 @@ dependencies = [
 
 [[package]]
 name = "vpn-fortissl"
-version = "0.3.6"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3183,11 +3194,12 @@ dependencies = [
  "vpn-core",
  "vpn-tls",
  "webpki-roots",
+ "zeroize",
 ]
 
 [[package]]
 name = "vpn-ipsec"
-version = "0.3.6"
+version = "0.3.8"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -3226,7 +3238,7 @@ dependencies = [
 
 [[package]]
 name = "vpn-l2tp"
-version = "0.3.6"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3247,7 +3259,7 @@ dependencies = [
 
 [[package]]
 name = "vpn-openvpn"
-version = "0.3.6"
+version = "0.3.8"
 dependencies = [
  "aes",
  "anyhow",
@@ -3278,7 +3290,7 @@ dependencies = [
 
 [[package]]
 name = "vpn-platform"
-version = "0.3.6"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3293,7 +3305,7 @@ dependencies = [
 
 [[package]]
 name = "vpn-tls"
-version = "0.3.6"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "hex",
@@ -3306,7 +3318,7 @@ dependencies = [
 
 [[package]]
 name = "vpn-wireguard"
-version = "0.3.6"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "async-trait",

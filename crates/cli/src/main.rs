@@ -3,13 +3,14 @@
 
 #[cfg(target_os = "macos")]
 mod app;
+mod completions;
 mod log;
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, bail};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueHint};
 use vpn_client::{Daemon, Interaction, Notice, ProfileStore, Trust, import, printable, secrets};
 use vpn_core::ipc::{Event, SessionInfo, SessionState};
 use vpn_core::{CertificateInfo, FailureKind, Prompt, PromptKind, brand};
@@ -22,7 +23,7 @@ static VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(vpn_core:
 #[command(version = VERSION.as_str(), about = "Omnitun command line: connect, disconnect and configure VPNs")]
 struct Cli {
     /// Profiles file (default: ~/.config/omnitun/profiles.toml).
-    #[arg(long, global = true)]
+    #[arg(long, global = true, value_hint = ValueHint::FilePath)]
     config: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
@@ -34,6 +35,7 @@ enum Command {
     /// profile (`via`) goes through its first VPN that is up, or brings it
     /// up first.
     Connect {
+        #[arg(value_name = "PROFILE")]
         names: Vec<String>,
         /// Without the VPNs the profiles are chained through.
         #[arg(long)]
@@ -45,6 +47,7 @@ enum Command {
     },
     /// Tear down sessions.
     Disconnect {
+        #[arg(value_name = "PROFILE")]
         names: Vec<String>,
         #[arg(long)]
         all: bool,
@@ -55,7 +58,12 @@ enum Command {
         json: bool,
     },
     /// List configured profiles.
-    Profiles,
+    Profiles {
+        /// Only the names to give other commands, one per line (for shell
+        /// completions).
+        #[arg(long)]
+        names: bool,
+    },
     /// List the Keychain certificates usable for IPsec authentication (the
     /// SHA-256 goes in a profile's client_certificate).
     Identities,
@@ -80,9 +88,10 @@ enum Command {
     /// Write a profile as a .vpnprofile file to share (no secret, key or
     /// user name).
     Export {
+        #[arg(value_name = "PROFILE")]
         name: String,
         /// File to write (default: standard output).
-        #[arg(long, short)]
+        #[arg(long, short, value_hint = ValueHint::FilePath)]
         output: Option<PathBuf>,
     },
     /// Follow state changes of your sessions until interrupted.
@@ -91,6 +100,7 @@ enum Command {
     /// lines, in local time. Readable by administrators.
     Log {
         /// Profile names.
+        #[arg(value_name = "PROFILE")]
         names: Vec<String>,
         /// How far back: 30m, 2h, 3d.
         #[arg(long, default_value = "24h", value_parser = log::duration)]
@@ -107,7 +117,7 @@ enum Command {
     /// domains and addresses replaced by placeholders.
     Diagnose {
         /// File to write (default: standard output).
-        #[arg(long, short)]
+        #[arg(long, short, value_hint = ValueHint::FilePath)]
         output: Option<PathBuf>,
     },
     /// Disconnect everything and restart the service (after an update).
@@ -117,6 +127,10 @@ enum Command {
         #[command(subcommand)]
         action: AppAction,
     },
+    /// Print the shell completion script: `omnitunctl completions zsh >
+    /// "${fpath[1]}/_omnitunctl"`, or for bash into
+    /// ~/.local/share/bash-completion/completions/omnitunctl.
+    Completions { shell: completions::Shell },
 }
 
 #[derive(Subcommand)]
@@ -132,6 +146,7 @@ enum AppAction {
 enum ImportSource {
     /// A .vpnprofile file received from someone else.
     File {
+        #[arg(value_hint = ValueHint::FilePath)]
         path: PathBuf,
         /// Add it without asking.
         #[arg(long)]
@@ -140,6 +155,7 @@ enum ImportSource {
     /// An OpenVPN client configuration (.ovpn, .conf); the files it names
     /// are read and inlined.
     Openvpn {
+        #[arg(value_hint = ValueHint::FilePath)]
         path: PathBuf,
         /// Append to the profiles file instead of printing.
         #[arg(long)]
@@ -147,6 +163,7 @@ enum ImportSource {
     },
     /// Viscosity's connections: its library, or an exported .visc folder.
     Viscosity {
+        #[arg(value_hint = ValueHint::AnyPath)]
         path: Option<PathBuf>,
         /// Append to the profiles file instead of printing.
         #[arg(long)]
@@ -155,7 +172,7 @@ enum ImportSource {
     /// The VPNs of macOS's System Settings (Cisco IPSec); their secrets
     /// stay in the System keychain.
     Macos {
-        #[arg(long, default_value = import::MACOS_NETWORK_PREFERENCES)]
+        #[arg(long, default_value = import::MACOS_NETWORK_PREFERENCES, value_hint = ValueHint::FilePath)]
         from: PathBuf,
         /// Append to the profiles file instead of printing.
         #[arg(long)]
@@ -163,7 +180,7 @@ enum ImportSource {
     },
     /// FortiClient's vpn.plist (macOS).
     Forticlient {
-        #[arg(long, default_value = import::FORTICLIENT_PLIST)]
+        #[arg(long, default_value = import::FORTICLIENT_PLIST, value_hint = ValueHint::FilePath)]
         from: PathBuf,
         /// Append to the profiles file instead of printing.
         #[arg(long)]
@@ -175,12 +192,14 @@ enum ImportSource {
 enum SecretAction {
     /// Store a secret (asked interactively).
     Set {
+        #[arg(value_name = "PROFILE")]
         profile: String,
         /// Which secret: password or psk.
         #[arg(long, default_value = "password")]
         key: String,
     },
     Delete {
+        #[arg(value_name = "PROFILE")]
         profile: String,
         #[arg(long, default_value = "password")]
         key: String,
@@ -190,6 +209,11 @@ enum SecretAction {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    // Needs no profiles file: run before opening one.
+    if let Command::Completions { shell } = cli.command {
+        print!("{}", completions::script(shell, &mut Cli::command())?);
+        return Ok(());
+    }
     let store = ProfileStore::open(cli.config)?;
     if store.is_legacy() {
         eprintln!("note: using {}; move it to ~/.config/{}/", store.path().display(), brand::ID);
@@ -199,24 +223,48 @@ async fn main() -> anyhow::Result<()> {
             if names.is_empty() {
                 bail!("name at least one profile");
             }
+            let mut signing = Vec::new();
             for key in names {
                 // Its name, Folder/Name when several share it, or its id.
                 let profile = store.find(&key)?;
                 let name = profile.name.clone();
                 let terminal = Terminal { name: name.clone(), store: &store };
                 let options = vpn_client::ConnectOptions { direct, split };
-                if let Err(e) = vpn_client::connect_with(profile.clone(), &store, brand::CLI, &terminal, options).await
-                {
-                    if let FailureKind::CertificateChanged { certificate, pinned } = vpn_core::failure::kind_of(&e) {
-                        eprintln!(
-                            "{name}: the server certificate CHANGED. This can be a renewal or an interception.\n  \
-                             pinned:    {}\n  presented: {}\n\
-                             Confirm the new fingerprint with your IT department before editing trusted_cert.",
-                            pinned.join(", "),
-                            certificate.sha256
-                        );
+                match vpn_client::connect_with(profile.clone(), &store, brand::CLI, &terminal, options).await {
+                    Ok(connected) if connected.signs() => signing.push((name, connected)),
+                    Ok(_) => {}
+                    Err(e) => {
+                        if let FailureKind::CertificateChanged { certificate, pinned } = vpn_core::failure::kind_of(&e)
+                        {
+                            eprintln!(
+                                "{name}: the server certificate CHANGED. This can be a renewal or an interception.\n  \
+                                 pinned:    {}\n  presented: {}\n\
+                                 Confirm the new fingerprint with your IT department before editing trusted_cert.",
+                                pinned.join(", "),
+                                certificate.sha256
+                            );
+                        }
+                        return Err(e);
                     }
-                    return Err(e);
+                }
+            }
+            // The client certificate's key stays with this process, which
+            // signs each renegotiation and reconnection.
+            if !signing.is_empty() {
+                let names: Vec<&str> = signing.iter().map(|(name, _)| name.as_str()).collect();
+                println!(
+                    "{}: signing with the client certificate; keep this running (Ctrl-C stops signing, and the \
+                     VPN then drops at its next renegotiation, or use the app)",
+                    names.join(", ")
+                );
+                let all = async {
+                    for (_, connected) in signing {
+                        connected.signing().await;
+                    }
+                };
+                tokio::select! {
+                    _ = all => println!("no session needs signing any more"),
+                    _ = tokio::signal::ctrl_c() => println!("stopped signing; the VPNs stay up until they need it"),
                 }
             }
         }
@@ -248,7 +296,12 @@ async fn main() -> anyhow::Result<()> {
                 print_status(&sessions);
             }
         }
-        Command::Profiles => {
+        Command::Profiles { names: true } => {
+            for key in completion_keys(&store.load_read_only()?) {
+                println!("{key}");
+            }
+        }
+        Command::Profiles { names: false } => {
             for p in store.load()? {
                 println!("{:<32} {:<10} {}", vpn_client::profiles::path_of(&p), p.protocol.name(), p.id);
             }
@@ -265,10 +318,8 @@ async fn main() -> anyhow::Result<()> {
             let profile = vpn_client::vpnprofile::parse(&text)?;
             let (host, port) = profile.protocol.endpoint();
             println!("{}: {} at {host}:{port}", profile.name, profile.protocol.name());
-            if let vpn_core::ProtocolConfig::FortiSsl(p) = &profile.protocol {
-                for pin in &p.trusted_cert {
-                    println!("  trusted certificate SHA-256: {pin}");
-                }
+            for line in vpn_client::vpnprofile::trust_summary(&profile) {
+                println!("  {line}");
             }
             // What changes this Mac's routing and name resolution.
             match profile.full_tunnel {
@@ -310,16 +361,21 @@ async fn main() -> anyhow::Result<()> {
             match output {
                 // Its shared keys (tls-auth, tls-crypt) are for the other
                 // users of the VPN, not for everyone on this Mac.
+                // The mode is set before writing: an existing file keeps
+                // its own otherwise.
                 Some(path) => {
                     use std::io::Write;
-                    use std::os::unix::fs::OpenOptionsExt;
+                    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
                     std::fs::OpenOptions::new()
                         .write(true)
                         .create(true)
                         .truncate(true)
                         .mode(0o600)
                         .open(&path)
-                        .and_then(|mut f| f.write_all(text.as_bytes()))
+                        .and_then(|mut f| {
+                            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+                            f.write_all(text.as_bytes())
+                        })
                         .with_context(|| format!("cannot write {}", path.display()))?
                 }
                 None => print!("{text}"),
@@ -371,7 +427,7 @@ async fn main() -> anyhow::Result<()> {
             let existing: Vec<String> = store.load()?.into_iter().map(|p| p.name).collect();
             add_found(&store, import::macos_vpns(Some(&from), &existing)?, write, "macOS VPN")?;
         }
-        Command::Watch => watch().await?,
+        Command::Watch => watch(&store).await?,
         Command::Diagnose { output } => {
             let client = format!("{} {}", brand::CLI, vpn_core::version());
             let report = vpn_client::diagnostic::report(&store, &client).await;
@@ -401,6 +457,7 @@ async fn main() -> anyhow::Result<()> {
         },
         #[cfg(not(target_os = "macos"))]
         Command::App { .. } => bail!("the menu bar app only exists on macOS"),
+        Command::Completions { .. } => unreachable!("handled before the profiles file is opened"),
         Command::Secret { action } => match action {
             SecretAction::Set { profile, key } => {
                 let profile = store.find(&profile)?;
@@ -435,7 +492,8 @@ struct Terminal<'a> {
 impl Interaction for Terminal<'_> {
     async fn ask(&self, prompt: &Prompt) -> anyhow::Result<Option<Zeroizing<String>>> {
         let label = format!("{}: {}: ", self.name, printable(&prompt.message));
-        let hidden = prompt.kind == PromptKind::Secret;
+        // Codes too: a server that wants them echoed asks for Text.
+        let hidden = matches!(prompt.kind, PromptKind::Secret | PromptKind::Otp);
         tokio::task::spawn_blocking(move || -> anyhow::Result<Option<Zeroizing<String>>> {
             if hidden {
                 return Ok(Some(Zeroizing::new(rpassword::prompt_password(label)?)));
@@ -504,17 +562,17 @@ async fn confirm(question: &'static str, default: bool) -> anyhow::Result<bool> 
 }
 
 /// A session's profile name, or its id if the profile is gone.
-fn store_name(id: &str) -> String {
-    ProfileStore::open(None).and_then(|s| s.find(id)).map_or(id.to_owned(), |p| p.name)
+fn store_name(store: &ProfileStore, id: &str) -> String {
+    store.find(id).map_or(id.to_owned(), |p| p.name)
 }
 
-async fn watch() -> anyhow::Result<()> {
+async fn watch(store: &ProfileStore) -> anyhow::Result<()> {
     let mut daemon = daemon().await?.watch().await?;
     loop {
         match daemon.next().await? {
             Event::Status { sessions } => print_status(&sessions),
             Event::State { id, state, detail, retry, .. } => {
-                let name = store_name(&id);
+                let name = store_name(store, &id);
                 let retry = retry.map(|r| format!(" (retry {}/{} in {}s)", r.attempt, r.max, r.delay_secs));
                 println!(
                     "{name}: {state:?}{}{}",
@@ -655,4 +713,45 @@ fn add_found(store: &ProfileStore, found: Vec<import::Found>, write: bool, what:
         print!("{text}");
     }
     Ok(())
+}
+
+/// How each profile can be named on the command line, for completions.
+fn completion_keys(profiles: &[vpn_core::Profile]) -> Vec<String> {
+    profiles
+        .iter()
+        .map(|p| {
+            // `find` takes the bare name only when no other VPN has it.
+            if profiles.iter().filter(|other| other.name == p.name).count() == 1 {
+                p.name.clone()
+            } else {
+                vpn_client::profiles::path_of(p)
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn profile(name: &str, folder: Option<&str>) -> vpn_core::Profile {
+        let mut v = serde_json::json!({ "name": name, "protocol": "forti-ssl", "host": "vpn.example.com" });
+        if let Some(folder) = folder {
+            v["folder"] = folder.into();
+        }
+        serde_json::from_value(v).unwrap()
+    }
+
+    /// What `find` accepts, shortest first: the bare name when it is the
+    /// only one, the folder path when several VPNs share it.
+    #[test]
+    fn completion_keys_are_names_unless_shared() {
+        let profiles = [
+            profile("paris", None),
+            profile("EU", Some("Clients/Acme")),
+            profile("EU", Some("Clients/Beta")),
+            profile("lyon office", Some("Sites")),
+        ];
+        assert_eq!(completion_keys(&profiles), ["paris", "Clients/Acme/EU", "Clients/Beta/EU", "lyon office"]);
+    }
 }

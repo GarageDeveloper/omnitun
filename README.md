@@ -54,14 +54,16 @@ published on the GitHub Releases page:
 (earlier versions are under [all releases](https://github.com/GarageDeveloper/omnitun/releases)).
 
 The package (`Omnitun-<version>.pkg`) installs the app, the service and
-`omnitunctl`; the app then offers updates (Sparkle) and the user decides.
+`omnitunctl` with its bash and zsh completions; the app then offers updates (Sparkle) and the user decides.
 macOS 14 or later.
 
 ### From source
 
 Rust 1.95 or later is needed; on Linux, also `pkg-config` and the D-Bus
-headers (`libdbus-1-dev` on Debian and Ubuntu). The macOS app also needs
-Xcode 16.
+headers (`libdbus-1-dev` on Debian and Ubuntu). At run time on Linux,
+`omnitunctl` needs the D-Bus library (`libdbus-1-3` on Debian and Ubuntu,
+installed with `libdbus-1-dev`) for the Secret Service keyring. The macOS
+app also needs Xcode 16.
 See [apple/README.md](apple/README.md) for the app and the package.
 
 ```sh
@@ -111,6 +113,22 @@ omnitunctl diagnose -o report.txt          # a report to share, without secrets 
 omnitunctl disconnect --all
 omnitunctl app restart                     # relaunch the menu bar app; the VPNs stay up (macOS)
 omnitunctl duplicate paris --name paris-test  # a copy to try other settings
+```
+
+### Shell completions
+
+`omnitunctl completions bash|zsh` prints a script that completes the
+subcommands, the options, the files, and the profile names (read from the
+profiles file, the one given with `--config` included). The macOS package
+installs both: zsh finds `/usr/local/share/zsh/site-functions/_omnitunctl`
+once `compinit` runs in `.zshrc`, and bash-completion 2 (Homebrew's
+`bash-completion@2`) loads `/usr/local/share/bash-completion/completions/omnitunctl`.
+From source, or on Linux:
+
+```sh
+omnitunctl completions zsh > "${fpath[1]}/_omnitunctl"   # a folder of your fpath you can write to
+mkdir -p ~/.local/share/bash-completion/completions
+omnitunctl completions bash > ~/.local/share/bash-completion/completions/omnitunctl
 ```
 
 ## Architecture
@@ -188,7 +206,10 @@ Each has a README.
   PSK, anyone holding the PSK can capture MSCHAPv2 answers: prefer the
   gateway's certificate.
 - Certificates: no revocation check (CRL, OCSP).
-- Fortinet SSL VPN: no DTLS, no host check.
+- Fortinet SSL VPN: no DTLS, no host check. During a browser (SAML)
+  login, up to 5 minutes, a web page open in the browser could send the
+  local listener a session of another account; finish the login without
+  browsing elsewhere.
 - OpenVPN: no tls-crypt-v2, no browser login (WEB_AUTH), no CBC ciphers, no
   static key mode, no `dev tap`; compressed packets from the server are
   dropped (VORACLE). The client key and the tls-auth or tls-crypt key of a
@@ -198,8 +219,10 @@ Each has a README.
   that it knows the password. PAP (off unless the profile asks for it, as
   Meraki needs) sends the password in clear inside IPsec; once a server
   has proved itself with MS-CHAPv2, its profile accepts nothing weaker.
-- A reconnection that needs a client certificate signature, a code or a
-  browser login needs the app running.
+- A reconnection that needs a code or a browser login needs the app
+  running. A client certificate signs each renegotiation and reconnection
+  from the app, or from `omnitunctl connect`, which then stays in the
+  foreground.
 - Linux: command line only, and the engines are not sandboxed yet.
 
 ## Security
