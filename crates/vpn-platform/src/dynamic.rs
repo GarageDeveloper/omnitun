@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn addresses_that_may_be_routed() {
-        for address in ["203.0.113.7", "52.72.0.1", "8.8.8.8"] {
+        for address in ["203.0.113.7", "198.51.100.7", "8.8.8.8"] {
             let address = address.parse().unwrap();
             assert!(routable(address, Direction::Tunnel) && routable(address, Direction::Uplink), "{address}");
         }

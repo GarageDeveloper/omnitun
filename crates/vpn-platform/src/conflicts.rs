@@ -387,12 +387,12 @@ mod tests {
         let mut r = Registry::default();
         r.insert("acme-eu", claims(&[], true, &[]));
         let mut common = claims(&["10.42.0.0/16"], false, &[]);
-        common.gateway = Some("52.72.0.1".parse().unwrap());
+        common.gateway = Some("198.51.100.1".parse().unwrap());
         assert!(r.check("common", &common).is_err(), "not chained: refused");
         common.related = vec!["acme-us".into(), "acme-eu".into()];
         assert_eq!(r.check("common", &common).unwrap().len(), 1, "a warning");
         let mut split = Registry::default();
-        split.insert("eu", claims(&["52.72.0.0/16"], false, &[]));
+        split.insert("eu", claims(&["198.51.100.0/24"], false, &[]));
         common.related = vec!["eu".into()];
         assert!(split.check("common", &common).is_ok(), "the gateway inside the chained VPN");
     }
