@@ -10,6 +10,8 @@ import Sparkle
 final class Updates: NSObject, SPUStandardUserDriverDelegate, SPUUpdaterDelegate {
     static let shared = Updates()
     private var controller: SPUStandardUpdaterController?
+    /// Called just before the installer stops the service and the app.
+    var willInstall: (() -> Void)?
 
     /// A build run from the package's .app: `swift run` has no bundle, no
     /// feed and no key to check against.
@@ -45,6 +47,15 @@ final class Updates: NSObject, SPUStandardUserDriverDelegate, SPUUpdaterDelegate
     // active before, never to a menu bar app, and refuses it to us: the
     // window that then offers to install and relaunch would stay behind.
     // It floats above the other apps' windows until it closes.
+    // The VPNs up now come back after the update: quitting for it must not
+    // disconnect them first.
+    nonisolated func updater(_ updater: SPUUpdater, willInstallUpdate item: SUAppcastItem) {
+        MainActor.assumeIsolated {
+            Settings.relaunching = true
+            willInstall?()
+        }
+    }
+
     nonisolated func updater(_ updater: SPUUpdater, didExtractUpdate item: SUAppcastItem) {
         MainActor.assumeIsolated {
             let sparkle = Bundle(for: SPUStandardUpdaterController.self)

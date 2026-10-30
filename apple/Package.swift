@@ -28,5 +28,6 @@ let package = Package(
             linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]
         ),
         .executableTarget(name: "Smoke", dependencies: ["VPNClientCore"], path: "Smoke"),
+        .testTarget(name: "OmnitunTests", dependencies: ["Omnitun"], path: "Tests", swiftSettings: [.swiftLanguageMode(.v5)]),
     ]
 )

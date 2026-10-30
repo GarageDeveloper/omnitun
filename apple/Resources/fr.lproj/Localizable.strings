@@ -111,6 +111,8 @@
 "General" = "Général";
 "Service" = "Service";
 "Disconnect VPNs when I quit %@" = "Déconnecter les VPN quand je quitte %@";
+"Reconnect VPNs after an update" = "Reconnecter les VPN après une mise à jour";
+"Reconnecting after the update" = "Reconnexion après la mise à jour";
 "Without the app, a code or a browser login cannot be asked again when a VPN reconnects." = "Sans l'app, un code ou une connexion par navigateur ne peut pas être redemandé lors d'une reconnexion.";
 "Language" = "Langue";
 "Same as macOS" = "Comme macOS";
