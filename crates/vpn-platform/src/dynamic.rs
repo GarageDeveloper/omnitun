@@ -72,6 +72,12 @@ impl DynamicRoutes {
     /// Records a newly routed address; returns the one dropped to make
     /// room, whose route must go.
     pub fn insert(&mut self, address: Ipv4Addr, name: &str, ttl: Duration, now: Instant) -> Option<Ipv4Addr> {
+        self.insert_until(address, name.to_owned(), expiry(ttl, now))
+    }
+
+    /// Records an address kept until `until` (moved from another list);
+    /// returns the one dropped to make room.
+    pub fn insert_until(&mut self, address: Ipv4Addr, name: String, until: Instant) -> Option<Ipv4Addr> {
         let dropped = if self.until.len() >= MAX_PER_SESSION && !self.contains(address) {
             let first = self.until.iter().min_by_key(|(_, (until, _))| *until).map(|(a, _)| *a);
             first.inspect(|a| {
@@ -80,8 +86,13 @@ impl DynamicRoutes {
         } else {
             None
         };
-        self.until.insert(address, (expiry(ttl, now), name.to_owned()));
+        self.until.insert(address, (until, name));
         dropped
+    }
+
+    /// Forgets `address`: until when it was kept, and its name.
+    pub fn take(&mut self, address: Ipv4Addr) -> Option<(Instant, String)> {
+        self.until.remove(&address)
     }
 
     /// Forgets an address whose route could not be added.
@@ -127,6 +138,19 @@ mod tests {
 
     fn ip(n: u32) -> Ipv4Addr {
         Ipv4Addr::from(0xcb00_7100 + n)
+    }
+
+    /// An address moved between lists keeps its expiry and its name.
+    #[test]
+    fn moved_with_its_expiry() {
+        let now = Instant::now();
+        let mut routed = DynamicRoutes::default();
+        let mut waiting = DynamicRoutes::default();
+        routed.insert(ip(1), "a.example", Duration::from_secs(3600), now);
+        let (until, name) = routed.take(ip(1)).unwrap();
+        assert!(routed.is_empty() && routed.take(ip(1)).is_none());
+        waiting.insert_until(ip(1), name, until);
+        assert_eq!(waiting.entries(), [(ip(1), "a.example", now + Duration::from_secs(3600))]);
     }
 
     #[test]
