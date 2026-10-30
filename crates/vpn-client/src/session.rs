@@ -546,6 +546,7 @@ mod tests {
             reconnects: 0,
             last_drop: None,
             dynamic_routes: 0,
+            routed_by_domain: Vec::new(),
         };
         let (company, lab, home) = (named("company", true), named("lab", false), named("home", false));
         let profiles = [company.clone(), lab.clone(), home.clone()];

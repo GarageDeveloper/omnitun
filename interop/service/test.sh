@@ -130,7 +130,9 @@ expect "no route before resolving" '! ip route get 198.51.100.10 | grep -q "dev 
 resolvectl query --cache=no eu.app.saas.test | grep -q 198.51.100.10
 expect "routed through $tun once resolved" 'ip route get 198.51.100.10 | grep -q "dev $tun"'
 expect "reached through the tunnel" 'ping -c 2 -W 2 198.51.100.10 >/dev/null'
-as_alice 'omnitunctl status' | grep "by domain"
+as_alice 'omnitunctl status' > /tmp/status.txt
+grep -A1 "by domain" /tmp/status.txt
+expect "status names the address" 'grep -q "198.51.100.10  eu.app.saas.test" /tmp/status.txt'
 expect "the tunnel's domain still on its servers" 'resolvectl query --cache=no intranet.corp.test | grep -q 10.9.0.80'
 expect "no IPv6 for a routed name" '! resolvectl query --cache=no -t AAAA app.saas.test 2>&1 | grep -q "2001:"'
 echo "-- the proxy fails: the DNS as without it"

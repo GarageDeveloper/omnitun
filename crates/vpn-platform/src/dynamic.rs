@@ -34,10 +34,11 @@ pub fn routable(address: Ipv4Addr, direction: Direction) -> bool {
     !local && (direction == Direction::Tunnel || !private)
 }
 
-/// The addresses routed for one session, and until when.
+/// The addresses routed for one session, until when, and the name they
+/// were last resolved for.
 #[derive(Debug, Default)]
 pub struct DynamicRoutes {
-    until: HashMap<Ipv4Addr, Instant>,
+    until: HashMap<Ipv4Addr, (Instant, String)>,
 }
 
 impl DynamicRoutes {
@@ -53,12 +54,15 @@ impl DynamicRoutes {
         self.until.contains_key(&address)
     }
 
-    /// Keeps a routed address longer, resolved again; false if it is not
-    /// routed.
-    pub fn refresh(&mut self, address: Ipv4Addr, ttl: Duration, now: Instant) -> bool {
+    /// Keeps a routed address longer, resolved again for `name`; false if
+    /// it is not routed.
+    pub fn refresh(&mut self, address: Ipv4Addr, name: &str, ttl: Duration, now: Instant) -> bool {
         match self.until.get_mut(&address) {
-            Some(until) => {
+            Some((until, last)) => {
                 *until = (*until).max(expiry(ttl, now));
+                if last != name {
+                    *last = name.to_owned();
+                }
                 true
             }
             None => false,
@@ -67,16 +71,16 @@ impl DynamicRoutes {
 
     /// Records a newly routed address; returns the one dropped to make
     /// room, whose route must go.
-    pub fn insert(&mut self, address: Ipv4Addr, ttl: Duration, now: Instant) -> Option<Ipv4Addr> {
+    pub fn insert(&mut self, address: Ipv4Addr, name: &str, ttl: Duration, now: Instant) -> Option<Ipv4Addr> {
         let dropped = if self.until.len() >= MAX_PER_SESSION && !self.contains(address) {
-            let first = self.until.iter().min_by_key(|(_, until)| **until).map(|(a, _)| *a);
+            let first = self.until.iter().min_by_key(|(_, (until, _))| *until).map(|(a, _)| *a);
             first.inspect(|a| {
                 self.until.remove(a);
             })
         } else {
             None
         };
-        self.until.insert(address, expiry(ttl, now));
+        self.until.insert(address, (expiry(ttl, now), name.to_owned()));
         dropped
     }
 
@@ -87,7 +91,8 @@ impl DynamicRoutes {
 
     /// The addresses expired at `now`, forgotten.
     pub fn expired(&mut self, now: Instant) -> Vec<Ipv4Addr> {
-        let expired: Vec<Ipv4Addr> = self.until.iter().filter(|(_, until)| **until <= now).map(|(a, _)| *a).collect();
+        let expired: Vec<Ipv4Addr> =
+            self.until.iter().filter(|(_, (until, _))| *until <= now).map(|(a, _)| *a).collect();
         for address in &expired {
             self.until.remove(address);
         }
@@ -96,7 +101,14 @@ impl DynamicRoutes {
 
     /// When the next address expires.
     pub fn next_expiry(&self) -> Option<Instant> {
-        self.until.values().min().copied()
+        self.until.values().map(|(until, _)| *until).min()
+    }
+
+    /// Every address, its name and its expiry, by name then address.
+    pub fn entries(&self) -> Vec<(Ipv4Addr, &str, Instant)> {
+        let mut entries: Vec<_> = self.until.iter().map(|(a, (until, name))| (*a, name.as_str(), *until)).collect();
+        entries.sort_by(|a, b| (a.1, a.0).cmp(&(b.1, b.0)));
+        entries
     }
 
     /// Every address, forgotten.
@@ -121,23 +133,24 @@ mod tests {
     fn kept_for_the_ttl_with_a_floor_and_a_ceiling() {
         let now = Instant::now();
         let mut routes = DynamicRoutes::default();
-        assert_eq!(routes.insert(ip(1), Duration::from_secs(30), now), None);
-        routes.insert(ip(2), Duration::from_secs(7 * 86_400), now);
+        assert_eq!(routes.insert(ip(1), "a.example", Duration::from_secs(30), now), None);
+        routes.insert(ip(2), "b.example", Duration::from_secs(7 * 86_400), now);
         assert!(routes.expired(now + FLOOR - Duration::from_secs(1)).is_empty(), "the floor, not 30 s");
         assert_eq!(routes.expired(now + FLOOR), [ip(1)]);
         assert_eq!(routes.next_expiry(), Some(now + CEILING), "a week is capped");
-        assert!(!routes.refresh(ip(1), Duration::ZERO, now), "expired: routed again");
+        assert!(!routes.refresh(ip(1), "a.example", Duration::ZERO, now), "expired: routed again");
     }
 
     #[test]
     fn resolved_again_lasts_longer_never_shorter() {
         let now = Instant::now();
         let mut routes = DynamicRoutes::default();
-        routes.insert(ip(1), Duration::from_secs(3600), now);
-        assert!(routes.refresh(ip(1), Duration::from_secs(60), now + Duration::from_secs(10)));
+        routes.insert(ip(1), "a.example", Duration::from_secs(3600), now);
+        assert!(routes.refresh(ip(1), "a.example", Duration::from_secs(60), now + Duration::from_secs(10)));
         assert_eq!(routes.next_expiry(), Some(now + Duration::from_secs(3600)));
-        assert!(routes.refresh(ip(1), Duration::from_secs(3600), now + Duration::from_secs(100)));
+        assert!(routes.refresh(ip(1), "cdn.example", Duration::from_secs(3600), now + Duration::from_secs(100)));
         assert_eq!(routes.next_expiry(), Some(now + Duration::from_secs(3700)));
+        assert_eq!(routes.entries(), [(ip(1), "cdn.example", now + Duration::from_secs(3700))], "the last name");
     }
 
     #[test]
@@ -147,11 +160,11 @@ mod tests {
         for n in 0..MAX_PER_SESSION as u32 {
             // ip(5) expires first.
             let ttl = if n == 5 { FLOOR } else { Duration::from_secs(7200) };
-            assert_eq!(routes.insert(ip(n), ttl, now), None);
+            assert_eq!(routes.insert(ip(n), "a.example", ttl, now), None);
         }
-        assert_eq!(routes.insert(ip(5000), FLOOR, now), Some(ip(5)));
+        assert_eq!(routes.insert(ip(5000), "b.example", FLOOR, now), Some(ip(5)));
         assert_eq!(routes.len(), MAX_PER_SESSION);
-        assert_eq!(routes.insert(ip(5000), FLOOR, now), None, "already there");
+        assert_eq!(routes.insert(ip(5000), "b.example", FLOOR, now), None, "already there");
         assert_eq!(routes.drain().len(), MAX_PER_SESSION);
         assert!(routes.is_empty());
     }

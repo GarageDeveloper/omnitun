@@ -187,6 +187,17 @@ impl AppliedConfig {
         self.dynamic.len()
     }
 
+    /// The addresses routed by domain, the names they were resolved for,
+    /// and how long they stay.
+    pub fn dynamic_entries(&self) -> Vec<(Ipv4Addr, String, std::time::Duration)> {
+        let now = std::time::Instant::now();
+        self.dynamic
+            .entries()
+            .into_iter()
+            .map(|(a, name, until)| (a, name.to_owned(), until.saturating_duration_since(now)))
+            .collect()
+    }
+
     /// When the next route by domain expires, for the session to call
     /// [`Self::expire_dynamic`].
     pub fn next_dynamic_expiry(&self) -> Option<std::time::Instant> {
@@ -206,6 +217,7 @@ impl AppliedConfig {
     /// routed by domain now.
     pub async fn route_resolved(
         &mut self,
+        name: &str,
         addresses: &[Ipv4Addr],
         ttl: std::time::Duration,
         claims: &(dyn DynamicClaims + Sync),
@@ -214,7 +226,7 @@ impl AppliedConfig {
         let now = std::time::Instant::now();
         let mut routed = 0;
         for &address in addresses {
-            if self.dynamic.refresh(address, ttl, now) {
+            if self.dynamic.refresh(address, name, ttl, now) {
                 routed += 1;
                 continue;
             }
@@ -224,7 +236,7 @@ impl AppliedConfig {
             if !needed || !claims.claim(address) {
                 continue;
             }
-            if let Some(dropped) = self.dynamic.insert(address, ttl, now) {
+            if let Some(dropped) = self.dynamic.insert(address, name, ttl, now) {
                 self.unroute(dropped, &via, claims).await;
             }
             match add_route(Ipv4Net::from(address), &via).await {
@@ -496,11 +508,23 @@ fn scutil_key(session: &str, entity: &str) -> String {
     format!("{SERVICE_PREFIX}{}-{session}/{entity}", vpn_core::brand::ID)
 }
 
-/// macOS: a per-session service in the dynamic store. Split tunnels publish
-/// supplemental match domains; a full tunnel also publishes an IPv4 entity
-/// with `OverridePrimary` so its resolver becomes the default one.
 #[cfg(target_os = "macos")]
 async fn set_dns(session: &str, interface: &str, settings: &TunnelSettings) -> anyhow::Result<()> {
+    set_dns_except(session, interface, settings, &[]).await
+}
+
+/// macOS: a per-session service in the dynamic store. Split tunnels publish
+/// supplemental match domains, but those under `taken` (resolved through
+/// the session's DNS proxy: of two resolvers for one domain, mDNSResponder
+/// would keep this one); a full tunnel also publishes an IPv4 entity with
+/// `OverridePrimary` so its resolver becomes the default one.
+#[cfg(target_os = "macos")]
+async fn set_dns_except(
+    session: &str,
+    interface: &str,
+    settings: &TunnelSettings,
+    taken: &[String],
+) -> anyhow::Result<()> {
     check_domains(settings)?;
     let dns = &settings.dns;
     let servers: Vec<String> = dns.servers.iter().map(|s| s.to_string()).collect();
@@ -510,11 +534,21 @@ async fn set_dns(session: &str, interface: &str, settings: &TunnelSettings) -> a
     }
     if !settings.full_tunnel {
         let domains = if dns.match_domains.is_empty() { &dns.search_domains } else { &dns.match_domains };
+        let domains = not_taken(domains, taken);
         if domains.is_empty() {
-            tracing::warn!(session, "split tunnel without DNS domains: tunnel DNS servers left unused");
+            if taken.is_empty() {
+                tracing::warn!(session, "split tunnel without DNS domains: tunnel DNS servers left unused");
+            } else {
+                // All through the proxy now.
+                let script = format!("remove {}\n", scutil_key(session, "DNS"));
+                cmd::run_with_stdin("/usr/sbin/scutil", &[], Some(&script)).await?;
+            }
             return Ok(());
         }
-        script += &format!("d.add SupplementalMatchDomains * {}\n", domains.join(" "));
+        script += &format!(
+            "d.add SupplementalMatchDomains * {}\n",
+            domains.iter().map(|d| d.as_str()).collect::<Vec<_>>().join(" ")
+        );
     }
     script += &format!("set {}\n", scutil_key(session, "DNS"));
     if settings.full_tunnel {
@@ -575,12 +609,15 @@ async fn resolvectl(args: &[String]) -> anyhow::Result<()> {
 }
 
 /// macOS: a resolver entry of its own for the proxy's domains, next to the
-/// session's; port other than 53 accepted (#37, phase 0).
+/// session's; port other than 53 accepted (#37, phase 0). The session's
+/// own domains under them leave its entry: the proxy relays them to the
+/// tunnel's servers (`*.corp.example` included with `corp.example` as
+/// the tunnel's search domain).
 #[cfg(target_os = "macos")]
 async fn set_proxy_dns(
     session: &str,
-    _interface: &str,
-    _settings: &TunnelSettings,
+    interface: &str,
+    settings: &TunnelSettings,
     port: u16,
     domains: &[String],
 ) -> anyhow::Result<()> {
@@ -591,16 +628,23 @@ async fn set_proxy_dns(
         scutil_key(&format!("{session}-dns-proxy"), "DNS"),
     );
     cmd::run_with_stdin("/usr/sbin/scutil", &[], Some(&script)).await?;
+    if !settings.dns.servers.is_empty() {
+        set_dns_except(session, interface, settings, domains).await?;
+    }
     Ok(())
 }
 
+/// `restore`: the session goes on, its own domains back in its entry.
 #[cfg(target_os = "macos")]
 async fn clear_proxy_dns(
     session: &str,
-    _interface: &str,
-    _settings: &TunnelSettings,
-    _restore: bool,
+    interface: &str,
+    settings: &TunnelSettings,
+    restore: bool,
 ) -> anyhow::Result<()> {
+    if restore && !settings.dns.servers.is_empty() {
+        set_dns(session, interface, settings).await?;
+    }
     let script = format!("remove {}\n", scutil_key(&format!("{session}-dns-proxy"), "DNS"));
     cmd::run_with_stdin("/usr/sbin/scutil", &[], Some(&script)).await?;
     Ok(())
@@ -734,6 +778,13 @@ fn link_resolvers_linux(text: &str, ignore: &[String]) -> Vec<SocketAddr> {
     servers
 }
 
+/// The session's domains the DNS proxy does not resolve: not under one of
+/// `taken`.
+#[cfg(any(target_os = "macos", test))]
+fn not_taken<'a>(domains: &'a [String], taken: &[String]) -> Vec<&'a String> {
+    domains.iter().filter(|d| !taken.iter().any(|t| vpn_core::destination::is_under(d, t))).collect()
+}
+
 /// DNS names come from the gateway and end up in scutil's command stream
 /// or resolvectl's argv: refuse anything that is not a plain hostname.
 fn check_domains(settings: &TunnelSettings) -> anyhow::Result<()> {
@@ -815,6 +866,16 @@ mod tests {
                 "1.1.1.1:53".parse().unwrap()
             ]
         );
+    }
+
+    /// `*.r4u.be` included with `r4u.be` as the tunnel's search domain: the
+    /// proxy takes it, and what is under it.
+    #[test]
+    fn the_proxy_takes_the_tunnels_domains_under_its_own() {
+        let domains = ["r4u.be".to_owned(), "eu.r4u.be".to_owned(), "corp.example".to_owned()];
+        assert_eq!(super::not_taken(&domains, &["r4u.be".into()]), [&domains[2]]);
+        assert_eq!(super::not_taken(&domains, &["app.r4u.be".into()]).len(), 3, "a narrower one takes nothing");
+        assert_eq!(super::not_taken(&domains, &[]).len(), 3);
     }
 
     #[test]

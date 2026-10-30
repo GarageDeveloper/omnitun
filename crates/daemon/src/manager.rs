@@ -13,7 +13,7 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use vpn_core::dns_ipc::FromProxy;
-use vpn_core::ipc::{Event, Retry, SessionInfo, SessionState};
+use vpn_core::ipc::{Event, Retry, RoutedByDomain, SessionInfo, SessionState};
 use vpn_core::{FailureKind, Profile, ProtocolConfig, TunnelSettings, TunnelStats, failure};
 use vpn_platform::{Claims, Conflict, DynamicClaims, Registry};
 
@@ -199,6 +199,7 @@ impl Manager {
             reconnects: 0,
             last_drop: None,
             dynamic_routes: 0,
+            routed_by_domain: Vec::new(),
         }));
         // The engine asks the owner's client directly, on this socket.
         let prompt_socket = vpn_core::ipc::prompt_socket_path(&self.control_socket, &profile.id);
@@ -658,7 +659,9 @@ impl Runner {
                     report = report => match (report, &proxy) {
                         (Some(FromProxy::Resolved { id, name, addresses, ttl }), Some((running, plan))) => {
                             if plan.routes(&name) && addresses.len() <= vpn_core::dns_ipc::MAX_ADDRESSES {
-                                applied.route_resolved(&addresses, Duration::from_secs(ttl.into()), &claims).await;
+                                applied
+                                    .route_resolved(&name, &addresses, Duration::from_secs(ttl.into()), &claims)
+                                    .await;
                             } else {
                                 tracing::warn!(session = self.profile.name, "the DNS proxy reported a name it does not route");
                             }
@@ -673,7 +676,17 @@ impl Runner {
                     },
                     _ = expired => applied.expire_dynamic(&claims).await,
                 }
-                self.info.lock().unwrap().dynamic_routes = applied.dynamic_routes();
+                let routed = applied.dynamic_entries();
+                let mut info = self.info.lock().unwrap();
+                info.dynamic_routes = routed.len();
+                info.routed_by_domain = routed
+                    .into_iter()
+                    .map(|(address, name, left)| RoutedByDomain {
+                        address: address.to_string(),
+                        name,
+                        expires_in: left.as_secs(),
+                    })
+                    .collect();
             }
         };
         if self.cancel.is_cancelled() {
@@ -1092,6 +1105,7 @@ mod tests {
             reconnects: 0,
             last_drop: None,
             dynamic_routes: 0,
+            routed_by_domain: Vec::new(),
         };
         let stats = Arc::new(TunnelStats::default());
         stats.record_rx(100);
