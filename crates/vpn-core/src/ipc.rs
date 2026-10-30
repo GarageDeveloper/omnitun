@@ -218,6 +218,20 @@ pub struct SessionInfo {
     /// Those addresses, with the names they were resolved for.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub routed_by_domain: Vec<RoutedByDomain>,
+    /// What the gateway announced, before the profile's own choices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announced: Option<Announced>,
+}
+
+/// The routing a gateway announced.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Announced {
+    /// All traffic (a default route).
+    pub full_tunnel: bool,
+    /// Its networks, the default route aside.
+    pub routes: Vec<String>,
+    /// Its DNS domains.
+    pub dns_domains: Vec<String>,
 }
 
 /// An address routed by domain.

@@ -162,7 +162,6 @@
 "Network" = "Réseau";
 "New VPN" = "Nouveau VPN";
 "Only replace the certificate once your IT department has confirmed the new fingerprint." = "Ne remplacez le certificat qu'une fois la nouvelle empreinte confirmée par votre service informatique.";
-"Only the VPN's networks" = "Seulement les réseaux du VPN";
 "Port" = "Port";
 "Profile File (.vpnprofile)…" = "Fichier de profil (.vpnprofile)…";
 "Realm" = "Royaume";
@@ -175,8 +174,6 @@
 "Select a VPN, or create one with +." = "Sélectionnez un VPN, ou créez-en un avec +.";
 "Traffic" = "Trafic";
 "Trusted certificate fingerprints (SHA-256, one per line)" = "Empreintes de certificats de confiance (SHA-256, une par ligne)";
-"Use my own networks instead of the gateway's" = "Utiliser mes propres réseaux au lieu de ceux de la passerelle";
-"The menu then also offers to connect this VPN in split mode: only these networks go through it, the rest of the traffic does not. Add the DNS domains below, or the VPN's DNS servers are not used." = "Le menu propose alors aussi de connecter ce VPN en mode split : seuls ces réseaux passent par lui, le reste du trafic non. Ajoutez les domaines DNS ci-dessous, sinon les serveurs DNS du VPN ne servent pas.";
 "User Name" = "Identifiant";
 "Without it, a VPN that would take traffic from another one is not connected." = "Sans cette option, un VPN qui prendrait le trafic d'un autre n'est pas connecté.";
 "Manage VPNs" = "Gérer les VPN";
@@ -325,7 +322,6 @@
 "A one-time code asked with the password (static-challenge)." = "Un code à usage unique demandé avec le mot de passe (static-challenge).";
 "Show the code while it is typed" = "Afficher le code pendant la saisie";
 "This file is not an OpenVPN static key." = "Ce fichier n’est pas une clé statique OpenVPN.";
-"Added to the networks the server announces, like the route lines of an OpenVPN file." = "Ajoutés aux réseaux annoncés par le serveur, comme les lignes route d'un fichier OpenVPN.";
 "Viscosity Connections Found" = "Connexions Viscosity trouvées";
 "No Viscosity connection on this Mac." = "Aucune connexion Viscosity sur ce Mac.";
 "Cannot be imported: %@" = "Import impossible : %@";
@@ -434,7 +430,6 @@
 "Check for Updates Now" = "Rechercher maintenant";
 
 /* Lists of networks and domains, with notes */
-"Additional networks through the VPN" = "Réseaux supplémentaires par le VPN";
 "Networks in split mode" = "Réseaux du mode split";
 "DNS domains resolved through this VPN" = "Domaines DNS résolus par ce VPN";
 "Note" = "Note";
@@ -442,6 +437,34 @@
 "One entry per line: the network or domain, then its note" = "Une entrée par ligne : le réseau ou le domaine, puis sa note";
 
 /* Routes by domain (dynamic split tunneling) */
-"A network list may also hold domains (*.corp-saas.com for every name under it): their addresses go through the VPN as they are resolved." = "Une liste de réseaux peut aussi contenir des domaines (*.corp-saas.com pour tous les noms en dessous) : leurs adresses passent par le VPN dès qu'elles sont résolues.";
 "Outside the VPN" = "En dehors du VPN";
-"When the VPN takes all traffic: the names under these domains are resolved by the DNS in place before the VPN, and their addresses reached directly (video calls, say). Public addresses only." = "Quand le VPN prend tout le trafic : les noms sous ces domaines sont résolus par le DNS en place avant le VPN, et leurs adresses jointes directement (visioconférence, par exemple). Adresses publiques uniquement.";
+
+/* Network tab: traffic modes */
+"Only these networks" = "Seulement ces réseaux";
+"The networks the gateway announces, or all traffic if it asks for it." = "Les réseaux que la passerelle annonce, ou tout le trafic si elle le demande.";
+"All traffic, except the domains kept outside." = "Tout le trafic, sauf les domaines gardés en dehors.";
+"A split tunnel at every connection: the list below, the rest of the traffic outside." = "Split tunnel à chaque connexion : la liste ci-dessous, le reste du trafic en dehors.";
+"Outside the VPN, if the gateway sends everything" = "En dehors du VPN, si la passerelle envoie tout";
+"Used only when the gateway asks for all traffic; otherwise they are outside already. Resolved by the DNS in place before the VPN, and reached directly (video calls, say). Public addresses only." = "Utilisés seulement quand la passerelle demande tout le trafic ; sinon ils passent déjà en dehors. Résolus par le DNS en place avant le VPN, et joints directement (visioconférence, par exemple). Adresses publiques uniquement.";
+"Resolved by the DNS in place before the VPN, and reached directly (video calls, say). Public addresses only." = "Résolus par le DNS en place avant le VPN, et joints directement (visioconférence, par exemple). Adresses publiques uniquement.";
+"A network (10.1.0.0/16), a single address, or a domain: *.corp.example for every name under it, routed as they are resolved." = "Un réseau (10.1.0.0/16), une adresse seule, ou un domaine : *.corp.example pour tous les noms en dessous, routés dès qu'ils sont résolus.";
+"Announced by the gateway" = "Annoncé par la passerelle";
+"Last connection, %@" = "Dernière connexion, %@";
+"All traffic" = "Tout le trafic";
+"default route" = "route par défaut";
+"network" = "réseau";
+"and %lld more" = "et %lld de plus";
+"DNS domain" = "domaine DNS";
+"Nothing" = "Rien";
+"Shown after a first connection." = "Affiché après une première connexion.";
+"Read only: the gateway decides, at every connection. To set your own networks, choose “Only these networks”; to send everything whatever it says, “Everything through the VPN”." = "Lecture seule : c'est la passerelle qui décide, à chaque connexion. Pour imposer vos réseaux, choisissez « Seulement ces réseaux » ; pour tout envoyer quoi qu'elle dise, « Tout le trafic par le VPN ».";
+"Networks through the VPN" = "Réseaux par le VPN";
+"Add the networks the gateway announces" = "Ajouter les réseaux annoncés par la passerelle";
+"Off: only this list. On: this list on top of what the gateway announces." = "Décoché : seulement cette liste. Coché : cette liste en plus de ce que la passerelle annonce.";
+"The menu also offers to connect in split mode, with these networks instead." = "Le menu propose aussi de se connecter en mode split, avec ces réseaux à la place.";
+"Also offer split mode" = "Proposer aussi le mode split";
+"The menu offers “Connect in Split Mode”: only these networks, for that connection." = "Le menu propose « Connecter en mode split » : seulement ces réseaux, pour cette connexion-là.";
+"One list for the VPN: the same as in “Only these networks”. Changing the mode keeps it." = "Une seule liste pour le VPN : c'est la même que dans « Seulement ces réseaux ». Changer de mode la garde telle quelle.";
+"Added to the gateway's networks" = "Ajoutés aux réseaux de la passerelle";
+"Unused while everything goes through the VPN." = "Inutilisés tant que tout passe par le VPN.";
+"Added when the gateway announces networks, like the route lines of an OpenVPN file." = "Ajoutés quand la passerelle annonce des réseaux, comme les lignes route d'un fichier OpenVPN.";

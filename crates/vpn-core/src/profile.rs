@@ -39,6 +39,10 @@ pub struct Profile {
     /// no split mode.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub split_routes: Vec<Noted<Destination>>,
+    /// Added to the networks the gateway pushes (the `route` lines of an
+    /// OpenVPN file); `routes`, when set, replace both.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_routes: Vec<Noted<Destination>>,
     /// Extra split-DNS domains, in addition to those pushed.
     #[serde(default)]
     pub dns_domains: Vec<Noted<String>>,
@@ -385,6 +389,9 @@ pub const MAX_VIA: usize = 4;
 /// At most as many as the daemon accepts from a gateway.
 pub const MAX_SPLIT_ROUTES: usize = 256;
 
+/// Most networks added to the gateway's.
+pub const MAX_EXTRA_ROUTES: usize = 64;
+
 /// Domains routed as they resolve, all lists together.
 pub const MAX_DYNAMIC_DOMAINS: usize = 256;
 
@@ -540,10 +547,21 @@ impl Profile {
         if self.description.as_ref().is_some_and(|d| d.chars().count() > 256 || d.chars().any(char::is_control)) {
             anyhow::bail!("the description must be one line of at most 256 characters");
         }
-        self.routes.iter().flatten().chain(&self.split_routes).try_for_each(Noted::check_note)?;
+        if self.extra_routes.len() > MAX_EXTRA_ROUTES {
+            anyhow::bail!("at most {MAX_EXTRA_ROUTES} networks can be added to the gateway's");
+        }
+        if destination::networks(&self.extra_routes).iter().any(|net| net.prefix_len() == 0) {
+            anyhow::bail!("an added network cannot be the default route: choose a full tunnel instead");
+        }
+        self.routes
+            .iter()
+            .flatten()
+            .chain(&self.split_routes)
+            .chain(&self.extra_routes)
+            .try_for_each(Noted::check_note)?;
         self.dns_domains.iter().try_for_each(Noted::check_note)?;
         self.excluded_domains.iter().try_for_each(Noted::check_note)?;
-        let dynamic = [self.routes.as_deref().unwrap_or_default(), &self.split_routes, self.extra_routes()]
+        let dynamic = [self.routes.as_deref().unwrap_or_default(), &self.split_routes, &self.extra_routes]
             .into_iter()
             .map(|list| destination::domains(list).count())
             .sum::<usize>()
@@ -567,21 +585,15 @@ impl Profile {
         Ok(self)
     }
 
-    /// OpenVPN's additional networks; empty for the other protocols.
-    pub fn extra_routes(&self) -> &[Noted<Destination>] {
-        match &self.protocol {
-            ProtocolConfig::OpenVpn(p) => &p.extra_routes,
-            _ => &[],
-        }
-    }
-
     /// The domains routed through a split tunnel as they resolve: those of
     /// the routes in use (`split_routes` in split mode, see
-    /// [`Self::in_split_mode`]) and OpenVPN's additional networks.
+    /// [`Self::in_split_mode`]), or else of the networks added to the
+    /// gateway's.
     pub fn included_domains(&self) -> Vec<&DomainPattern> {
-        destination::domains(self.routes.as_deref().unwrap_or_default())
-            .chain(destination::domains(self.extra_routes()))
-            .collect()
+        match &self.routes {
+            Some(routes) => destination::domains(routes).collect(),
+            None => destination::domains(&self.extra_routes).collect(),
+        }
     }
 
     /// Whether a connection may need routes by domain: without, nothing of

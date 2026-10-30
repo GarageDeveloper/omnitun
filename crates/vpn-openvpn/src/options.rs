@@ -158,12 +158,10 @@ impl Pushed {
         Ok(more)
     }
 
-    /// The tunnel to set up; `gateway` is the server's outer address,
-    /// `extra` the profile's own networks.
-    pub fn settings(&self, gateway: IpAddr, extra: &[Ipv4Net]) -> anyhow::Result<TunnelSettings> {
+    /// The tunnel to set up; `gateway` is the server's outer address.
+    pub fn settings(&self, gateway: IpAddr) -> anyhow::Result<TunnelSettings> {
         let address = self.address.context("the server assigned no address (ifconfig)")?;
         let mut routes = self.routes.clone();
-        routes.extend(extra.iter().map(Ipv4Net::trunc));
         // The tunnel's own network: the server and the other clients.
         match self.ifconfig_second {
             Some(mask) if self.topology_subnet => {
@@ -232,16 +230,16 @@ mod tests {
         assert_eq!((p.peer_id, p.cipher, p.ekm, p.ping), (Some(3), Some(DataCipher::Aes256Gcm), true, Some(10)));
         assert_eq!(p.compression, Some(Compression::StubV2));
         assert_eq!(p.auth_token.as_deref(), Some("SESS_ID_x"));
-        let s = p.settings("192.0.2.1".parse().unwrap(), &["10.20.0.0/16".parse().unwrap()]).unwrap();
+        let s = p.settings("192.0.2.1".parse().unwrap()).unwrap();
         assert_eq!(s.address, Ipv4Addr::new(10, 8, 0, 2));
         let routes: Vec<String> = s.routes.iter().map(ToString::to_string).collect();
-        assert_eq!(routes, ["10.8.0.0/24", "10.20.0.0/16", "10.20.0.5/32", "192.168.10.0/24"]);
+        assert_eq!(routes, ["10.8.0.0/24", "10.20.0.5/32", "192.168.10.0/24"]);
         assert_eq!((s.full_tunnel, s.mtu), (false, 1400));
         assert_eq!(s.dns.match_domains, ["corp.example"]);
 
         let mut net30 = Pushed::default();
         net30.add("PUSH_REPLY,ifconfig 10.8.0.6 10.8.0.5,redirect-gateway def1 bypass-dhcp").unwrap();
-        let s = net30.settings("192.0.2.1".parse().unwrap(), &[]).unwrap();
+        let s = net30.settings("192.0.2.1".parse().unwrap()).unwrap();
         assert!(s.full_tunnel && s.dns.match_domains.is_empty());
 
         // Each DNS server once, in the server's order.
@@ -251,12 +249,12 @@ mod tests {
              dhcp-option DNS 10.8.0.1",
         )
         .unwrap();
-        let s = dns.settings("192.0.2.1".parse().unwrap(), &[]).unwrap();
+        let s = dns.settings("192.0.2.1".parse().unwrap()).unwrap();
         let servers: Vec<String> = s.dns.servers.iter().map(ToString::to_string).collect();
         assert_eq!(servers, ["10.8.0.1", "10.8.0.2"]);
         assert_eq!(s.routes, ["10.8.0.5/32".parse().unwrap()]);
         assert!(Pushed::default().add("PUSH_REPLY,compress lzo-v9").is_err());
-        assert!(Pushed::default().settings("192.0.2.1".parse().unwrap(), &[]).is_err(), "no address");
+        assert!(Pushed::default().settings("192.0.2.1".parse().unwrap()).is_err(), "no address");
     }
 
     #[test]

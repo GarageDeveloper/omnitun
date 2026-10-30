@@ -200,6 +200,7 @@ impl Manager {
             last_drop: None,
             dynamic_routes: 0,
             routed_by_domain: Vec::new(),
+            announced: None,
         }));
         // The engine asks the owner's client directly, on this socket.
         let prompt_socket = vpn_core::ipc::prompt_socket_path(&self.control_socket, &profile.id);
@@ -537,6 +538,9 @@ impl Runner {
             Ok(settings) => check_gateway(&self.profile, settings, &resolved).await,
             Err(e) => Err(e),
         };
+        if let Ok(settings) = &connected {
+            self.info.lock().unwrap().announced = Some(announced(settings));
+        }
         let settings = match connected.and_then(|s| apply_profile(&self.profile, s)) {
             Ok(s) => s,
             // A gateway that was reachable before is worth retrying.
@@ -761,6 +765,20 @@ impl DynamicClaims for SessionClaims<'_> {
     }
 }
 
+/// What the gateway asked for, as the app shows it: at most as much as a
+/// session takes.
+fn announced(settings: &TunnelSettings) -> vpn_core::ipc::Announced {
+    let full_tunnel = settings.full_tunnel || settings.routes.iter().any(|r| r.prefix_len() == 0);
+    let routes = settings.routes.iter().filter(|r| r.prefix_len() > 0).take(MAX_ROUTES).map(ToString::to_string);
+    let mut dns_domains: Vec<String> = Vec::new();
+    for domain in settings.dns.domains() {
+        if dns_domains.len() < MAX_DNS_DOMAINS && !dns_domains.iter().any(|d| d == domain) {
+            dns_domains.push(domain.to_owned());
+        }
+    }
+    vpn_core::ipc::Announced { full_tunnel, routes: routes.collect(), dns_domains }
+}
+
 /// What a session will install, for conflict checks with the others.
 fn claims(profile: &Profile, settings: &TunnelSettings, owner: u32) -> Claims {
     Claims {
@@ -798,6 +816,12 @@ fn apply_profile(profile: &Profile, mut settings: TunnelSettings) -> anyhow::Res
     if let Some(routes) = &profile.routes {
         settings.routes = vpn_core::destination::networks(routes);
         settings.full_tunnel = false;
+    } else {
+        for extra in vpn_core::destination::networks(&profile.extra_routes) {
+            if !settings.routes.contains(&extra.trunc()) {
+                settings.routes.push(extra.trunc());
+            }
+        }
     }
     // A pushed default route means full tunnel; installing 0.0.0.0/0 on the
     // tun would fight the physical default route.
@@ -1106,6 +1130,7 @@ mod tests {
             last_drop: None,
             dynamic_routes: 0,
             routed_by_domain: Vec::new(),
+            announced: None,
         };
         let stats = Arc::new(TunnelStats::default());
         stats.record_rx(100);
@@ -1270,6 +1295,28 @@ mod tests {
         // The pushed DNS server (10.0.0.53) stays reachable through the tunnel.
         assert_eq!(s.routes.iter().map(ToString::to_string).collect::<Vec<_>>(), vec!["10.50.0.0/16", "10.0.0.53/32"]);
         assert!(!s.full_tunnel);
+    }
+
+    #[test]
+    fn what_the_gateway_announced() {
+        let mut s = settings(&["0.0.0.0/0", "10.0.0.0/8"], false, &["corp.example"]);
+        s.dns.search_domains = vec!["corp.example".into(), "lab.example".into()];
+        let a = announced(&s);
+        assert!(a.full_tunnel, "a default route");
+        assert_eq!(
+            (a.routes, a.dns_domains),
+            (vec!["10.0.0.0/8".to_owned()], vec!["corp.example".to_owned(), "lab.example".to_owned()])
+        );
+    }
+
+    #[test]
+    fn extra_routes_add_to_the_pushed_ones_unless_routes_replace_them() {
+        let p = profile(serde_json::json!({ "extra_routes": ["10.50.0.0/16", "10.0.0.0/8", "*.corp.example"] }));
+        let s = apply_profile(&p, settings(&["10.0.0.0/8"], false, &[])).unwrap();
+        assert_eq!(s.routes.iter().map(ToString::to_string).collect::<Vec<_>>(), ["10.0.0.0/8", "10.50.0.0/16"]);
+        let p = profile(serde_json::json!({ "routes": ["192.168.5.0/24"], "extra_routes": ["10.50.0.0/16"] }));
+        let s = apply_profile(&p, settings(&["10.0.0.0/8"], false, &[])).unwrap();
+        assert_eq!(s.routes.iter().map(ToString::to_string).collect::<Vec<_>>(), ["192.168.5.0/24", "10.0.0.53/32"]);
     }
 
     #[test]
