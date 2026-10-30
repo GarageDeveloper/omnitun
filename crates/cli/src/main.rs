@@ -659,6 +659,15 @@ fn print_status(sessions: &[SessionInfo]) {
             if s.dynamic_routes > 0 {
                 let way = if s.full_tunnel { "kept outside" } else { "through the tunnel" };
                 row("by domain", format!("{} address(es) {way}", s.dynamic_routes));
+                let width = s.routed_by_domain.iter().map(|r| r.address.len()).max().unwrap_or(0);
+                for routed in &s.routed_by_domain {
+                    let minutes = routed.expires_in.div_ceil(60);
+                    println!(
+                        "               {:<width$}  {}  (for {minutes} min)",
+                        routed.address,
+                        printable(&routed.name)
+                    );
+                }
             }
         }
         if !s.dns_servers.is_empty() {

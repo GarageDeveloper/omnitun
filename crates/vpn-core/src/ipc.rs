@@ -215,6 +215,19 @@ pub struct SessionInfo {
     /// Addresses routed by domain now (#37).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub dynamic_routes: usize,
+    /// Those addresses, with the names they were resolved for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routed_by_domain: Vec<RoutedByDomain>,
+}
+
+/// An address routed by domain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoutedByDomain {
+    pub address: String,
+    /// The name last resolved to it.
+    pub name: String,
+    /// Seconds before its route goes, unless resolved again.
+    pub expires_in: u64,
 }
 
 fn is_zero(n: &usize) -> bool {
