@@ -118,9 +118,29 @@ omnitunctl app restart                     # relaunch the menu bar app; the VPNs
 omnitunctl duplicate paris --name paris-test  # a copy to try other settings
 ```
 
+### What goes through the VPN
+
+The Network tab of Manage VPNs offers three modes; in `profiles.toml`:
+
+| Mode | Keys |
+| --- | --- |
+| As the gateway decides | no `full_tunnel`; `extra_routes` add networks to those the gateway announces |
+| Everything through the VPN | `full_tunnel = true`; `excluded_domains` stay outside |
+| Only these networks (split tunnel) | `full_tunnel = false` and `routes = [...]`, which replace the gateway's networks, or `extra_routes = [...]` on top of them |
+
+`split_routes` offer a split mode besides, chosen when connecting (the
+menu's "Connect in Split Mode", `omnitunctl connect --split`): only those
+networks go through the VPN for that connection.
+
+```toml
+# A split tunnel, whatever the gateway announces.
+full_tunnel = false
+routes = ["10.20.0.0/16", { domain = "*.corp.example", note = "Intranet" }]
+```
+
 ### Routes by domain
 
-A route list (`routes`, `split_routes`, OpenVPN's `extra_routes`) may hold
+A route list (`routes`, `split_routes`, `extra_routes`) may hold
 domains besides networks; `excluded_domains` keeps names outside a full
 tunnel. `crm.example` is that name only, `*.corp-saas.com` that domain and
 every name under it.

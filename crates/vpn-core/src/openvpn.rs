@@ -76,11 +76,6 @@ pub struct OpenVpnProfile {
     /// never (the server may still do it).
     #[serde(default = "default_reneg")]
     pub reneg_sec: u32,
-    /// Networks routed through the tunnel besides those the server pushes
-    /// (`route` lines of the configuration), and domains routed as they
-    /// resolve.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub extra_routes: Vec<crate::Noted<crate::Destination>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,15 +171,12 @@ impl std::fmt::Debug for OpenVpnProfile {
             .field("data_ciphers", &self.data_ciphers)
             .field("compression", &self.compression)
             .field("reneg_sec", &self.reneg_sec)
-            .field("extra_routes", &self.extra_routes)
             .finish()
     }
 }
 
 /// Most servers a profile may list.
 pub const MAX_REMOTES: usize = 16;
-/// Most additional networks.
-pub const MAX_EXTRA_ROUTES: usize = 64;
 
 impl OpenVpnProfile {
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -235,12 +227,6 @@ impl OpenVpnProfile {
             );
         }
         ensure!(self.reneg_sec == 0 || self.reneg_sec >= 60, "reneg-sec must be 0 or at least 60 seconds");
-        ensure!(self.extra_routes.len() <= MAX_EXTRA_ROUTES, "at most {MAX_EXTRA_ROUTES} additional networks");
-        ensure!(
-            crate::destination::networks(&self.extra_routes).iter().all(|r| r.prefix_len() > 0),
-            "an additional network cannot be the default route: choose a full tunnel instead"
-        );
-        self.extra_routes.iter().try_for_each(crate::Noted::check_note)?;
         if let Some(challenge) = &self.static_challenge {
             ensure!(self.auth_user_pass, "static-challenge needs auth-user-pass");
             ensure!(challenge.text.len() <= 256, "the static challenge text is too long");

@@ -520,13 +520,13 @@ fn convert(config: &Config, text: &str, notes: &mut Vec<String>) -> anyhow::Resu
     } else {
         // Added to the networks the server pushes.
         extra_routes = listed_routes;
-        if extra_routes.len() > vpn_core::openvpn::MAX_EXTRA_ROUTES {
+        if extra_routes.len() > vpn_core::profile::MAX_EXTRA_ROUTES {
             notes.push(format!(
                 "{} route lines: only the first {} are kept",
                 extra_routes.len(),
-                vpn_core::openvpn::MAX_EXTRA_ROUTES
+                vpn_core::profile::MAX_EXTRA_ROUTES
             ));
-            extra_routes.truncate(vpn_core::openvpn::MAX_EXTRA_ROUTES);
+            extra_routes.truncate(vpn_core::profile::MAX_EXTRA_ROUTES);
         }
         extra_routes.retain(|r| r.network().is_some_and(|net| net.prefix_len() > 0));
     }
@@ -582,11 +582,11 @@ fn convert(config: &Config, text: &str, notes: &mut Vec<String>) -> anyhow::Resu
             data_ciphers,
             compression,
             reneg_sec,
-            extra_routes,
         }),
         routes,
         full_tunnel,
         split_routes: Vec::new(),
+        extra_routes,
         dns_domains: dns_domains.into_iter().map(Into::into).collect(),
         excluded_domains: Vec::new(),
         allow_route_overlap: false,
@@ -872,7 +872,7 @@ pub(super) mod tests {
         assert!(p.client_cert_pem.is_none());
         assert_eq!(profile.full_tunnel, Some(false));
         assert_eq!(profile.routes, None, "route adds to the pushed routes");
-        assert_eq!(p.extra_routes, ["10.20.0.0/16".parse::<ipnet::Ipv4Net>().unwrap()]);
+        assert_eq!(profile.extra_routes, ["10.20.0.0/16".parse::<ipnet::Ipv4Net>().unwrap()]);
         assert_eq!(profile.dns_domains, ["corp.example"]);
         assert!(imported.notes.iter().any(|n| n.contains("password in the auth-user-pass file")));
         assert!(imported.notes.iter().any(|n| n.contains("\"alice\", read from pass.txt")), "{:?}", imported.notes);

@@ -161,8 +161,43 @@ enum Settings {
         }
     }
 
+    /// What each VPN's gateway announced at its last connection, by
+    /// profile id.
+    static func announced(for id: String) -> GatewayAnnouncement? {
+        announcements[id]
+    }
+
+    static func remember(_ announced: Announced, for id: String, at date: Date) {
+        let new = GatewayAnnouncement(announced, at: date)
+        guard announcements[id] != new else { return }
+        announcements[id] = new
+    }
+
+    private static var announcements: [String: GatewayAnnouncement] {
+        get {
+            defaults.data(forKey: "announced")
+                .flatMap { try? JSONDecoder().decode([String: GatewayAnnouncement].self, from: $0) } ?? [:]
+        }
+        set { defaults.set(try? JSONEncoder().encode(newValue), forKey: "announced") }
+    }
+
     /// Set while restarting the app, which must not disconnect the VPNs.
     @MainActor static var relaunching = false
+}
+
+/// The routing a gateway announced, and when.
+struct GatewayAnnouncement: Codable, Equatable {
+    var fullTunnel: Bool
+    var routes: [String]
+    var dnsDomains: [String]
+    var at: Date
+
+    init(_ announced: Announced, at date: Date) {
+        fullTunnel = announced.fullTunnel
+        routes = announced.routes
+        dnsDomains = announced.dnsDomains
+        at = date
+    }
 }
 
 /// Quits and opens the app again (for a language change); the VPNs run in

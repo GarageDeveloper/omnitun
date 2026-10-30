@@ -135,6 +135,12 @@ final class AppModel: ObservableObject {
 
     fileprivate func received(_ list: [Session]) {
         sessions = Dictionary(list.map { ($0.id, $0) }, uniquingKeysWith: { _, new in new })
+        for session in list {
+            if let announced = session.announced {
+                let since = session.connectedSince.map { Date(timeIntervalSince1970: TimeInterval($0)) } ?? Date()
+                Settings.remember(announced, for: session.id, at: since)
+            }
+        }
         for id in retries.keys where sessions[id]?.state != .reconnecting {
             retries[id] = nil
         }
