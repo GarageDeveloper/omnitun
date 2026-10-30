@@ -15,6 +15,7 @@ on:
       - crates/vpn-core/**
       - crates/vpn-client/**
       - crates/vpn-wireguard/**
+      - crates/vpn-dnsproxy/**
       - crates/cli/**
       - interop/service/**
       - README.md
@@ -29,6 +30,7 @@ on:
       - crates/vpn-core/**
       - crates/vpn-client/**
       - crates/vpn-wireguard/**
+      - crates/vpn-dnsproxy/**
       - crates/cli/**
       - interop/service/**
       - README.md

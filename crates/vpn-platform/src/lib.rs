@@ -4,13 +4,15 @@
 
 mod cmd;
 pub mod conflicts;
+pub mod dynamic;
 pub mod fdpass;
 mod journal;
 mod netconfig;
 mod tun;
 
 pub use conflicts::{Claims, Conflict, Registry};
-pub use netconfig::{AppliedConfig, apply, cleanup_stale};
+pub use dynamic::Direction;
+pub use netconfig::{AppliedConfig, DynamicClaims, apply, cleanup_stale, current_resolvers};
 pub use tun::{TunDevice, TunInterface, attach, create, create_device};
 
 /// Session names end up in interface keys and command arguments.

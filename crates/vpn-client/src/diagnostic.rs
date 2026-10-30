@@ -137,6 +137,13 @@ fn describe(p: &Profile) -> String {
     if !p.dns_domains.is_empty() {
         parts.push(format!("{} DNS domain(s)", p.dns_domains.len()));
     }
+    let routed = vpn_core::destination::domains(&p.split_routes).count() + p.included_domains().len();
+    if routed > 0 {
+        parts.push(format!("{routed} domain(s) routed through it"));
+    }
+    if !p.excluded_domains.is_empty() {
+        parts.push(format!("{} domain(s) kept outside", p.excluded_domains.len()));
+    }
     if !p.via.is_empty() {
         parts.push(format!("chained through {} VPN(s)", p.via.len()));
     }
@@ -276,10 +283,16 @@ impl Redactor {
         for account in accounts {
             self.known.push((account, "<account>".into()));
         }
-        for domain in &profile.dns_domains {
-            if !self.known.iter().any(|(k, _)| *k == domain.value) {
+        // A routed domain's base also masks the names under it.
+        let routed = [profile.routes.as_deref().unwrap_or_default(), &profile.split_routes, profile.extra_routes()]
+            .into_iter()
+            .flat_map(vpn_core::destination::domains)
+            .chain(profile.excluded_domains.iter().map(|d| &d.value))
+            .map(|d| d.base().to_owned());
+        for domain in profile.dns_domains.iter().map(|d| d.value.clone()).chain(routed) {
+            if !self.known.iter().any(|(k, _)| *k == domain) {
                 self.domains += 1;
-                self.known.push((domain.value.clone(), format!("<domain-{}>", self.domains)));
+                self.known.push((domain, format!("<domain-{}>", self.domains)));
             }
         }
         self.known.retain(|(k, _)| k.len() >= 3);
@@ -392,17 +405,21 @@ mod tests {
     fn profiles_are_redacted() {
         let profile: Profile = toml::from_str(
             "name = \"paris\"\nprotocol = \"forti-ssl\"\nhost = \"vpn.example.com\"\nport = 443\n\
-             username = \"jdoe\"\ndns_domains = [\"corp.example\"]",
+             username = \"jdoe\"\ndns_domains = [\"corp.example\"]\n\
+             split_routes = [\"10.1.0.0/16\", { domain = \"*.corp-saas.com\", note = \"CRM\" }]\n\
+             excluded_domains = [\"zoom.us\"]",
         )
         .unwrap();
         let mut redact = Redactor::default();
         redact.learn(&profile);
         assert_eq!(
-            redact.text("jdoe on vpn.example.com resolves corp.example"),
-            "<account> on <server-1> resolves <domain-1>"
+            redact.text("jdoe on vpn.example.com resolves corp.example, eu.corp-saas.com, not zoom.us"),
+            "<account> on <server-1> resolves <domain-1>, eu.<domain-2>, not <domain-3>"
         );
         let line = describe(&profile);
         assert!(line.starts_with("paris: forti-ssl"), "{line}");
+        assert!(line.contains("1 domain(s) routed through it") && line.contains("1 domain(s) kept outside"), "{line}");
+        assert!(!line.contains("saas") && !line.contains("zoom"), "{line}");
         assert!(!line.contains("example") && !line.contains("jdoe"), "{line}");
     }
 

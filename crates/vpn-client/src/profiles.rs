@@ -534,7 +534,7 @@ fn update_table(table: &mut Table, new: &Table, unknown: &[String]) {
 }
 
 /// Lists whose entries may carry a note (`vpn_core::Noted`).
-const NOTED_LISTS: [&str; 4] = ["routes", "split_routes", "extra_routes", "dns_domains"];
+const NOTED_LISTS: [&str; 5] = ["routes", "split_routes", "extra_routes", "dns_domains", "excluded_domains"];
 
 /// Keeps a list of noted entries on one line, `[..., { net = ..., note =
 /// ... }]`: toml writes `[[profile.split_routes]]` tables when every entry

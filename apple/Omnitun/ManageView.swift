@@ -848,19 +848,34 @@ extension ListEntry {
 /// the VPN is saved.
 private struct NotedList: View {
     enum Kind {
-        case network, domain
+        /// A network, or a domain routed as it resolves.
+        case network
+        /// A DNS domain.
+        case domain
+        /// A domain to keep outside the VPN (`*.` for every name under it).
+        case pattern
     }
 
     let title: LocalizedStringKey
     @Binding var entries: [ListEntry]
     let kind: Kind
 
-    private var placeholder: String { kind == .network ? "10.1.0.0/16" : "corp.example" }
+    private var placeholder: String {
+        switch kind {
+        case .network: "10.1.0.0/16, *.corp.example"
+        case .domain: "corp.example"
+        case .pattern: "*.zoom.us"
+        }
+    }
 
     private func error(_ value: String) -> String? {
         let value = value.trimmingCharacters(in: .whitespaces)
         guard !value.isEmpty else { return nil }
-        return kind == .network ? networkError(text: value) : domainError(text: value)
+        switch kind {
+        case .network: return networkError(text: value)
+        case .domain: return domainError(text: value)
+        case .pattern: return patternError(text: value)
+        }
     }
 
     /// Row `i`'s field, safe while rows are removed.
@@ -1934,6 +1949,15 @@ private struct NetworkTab: View {
                 NotedList(title: "Networks in split mode", entries: $form.splitRoutes, kind: .network)
                 Text("The menu then also offers to connect this VPN in split mode: only these networks go through it, the rest of the traffic does not. Add the DNS domains below, or the VPN's DNS servers are not used.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            Text("A network list may also hold domains (*.corp-saas.com for every name under it): their addresses go through the VPN as they are resolved.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if form.tunnelMode != .split {
+                VStack(alignment: .leading, spacing: 4) {
+                    NotedList(title: "Outside the VPN", entries: $form.excludedDomains, kind: .pattern)
+                    Text("When the VPN takes all traffic: the names under these domains are resolved by the DNS in place before the VPN, and their addresses reached directly (video calls, say). Public addresses only.")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
             }
             NotedList(title: "DNS domains resolved through this VPN", entries: $form.dnsDomains, kind: .domain)
             if !others.isEmpty {

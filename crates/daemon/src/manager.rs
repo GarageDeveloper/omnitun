@@ -12,10 +12,12 @@ use ipnet::Ipv4Net;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use vpn_core::dns_ipc::FromProxy;
 use vpn_core::ipc::{Event, Retry, SessionInfo, SessionState};
 use vpn_core::{FailureKind, Profile, ProtocolConfig, TunnelSettings, TunnelStats, failure};
-use vpn_platform::{Claims, Conflict, Registry};
+use vpn_platform::{Claims, Conflict, DynamicClaims, Registry};
 
+use crate::dnsproxy::{DnsProxy, Plan};
 use crate::engine::{Launcher, RemoteEngine};
 use crate::prompter::{ClientLink, SessionClient};
 
@@ -196,6 +198,7 @@ impl Manager {
             up_since: None,
             reconnects: 0,
             last_drop: None,
+            dynamic_routes: 0,
         }));
         // The engine asks the owner's client directly, on this socket.
         let prompt_socket = vpn_core::ipc::prompt_socket_path(&self.control_socket, &profile.id);
@@ -352,6 +355,12 @@ impl Manager {
         let sessions = self.sessions.lock().unwrap();
         let info = sessions.get(name)?.info.lock().unwrap();
         (info.state == SessionState::Connected).then(|| info.interface.clone()).flatten()
+    }
+
+    /// The tunnel interfaces of the sessions up.
+    fn interfaces(&self) -> Vec<String> {
+        let sessions = self.sessions.lock().unwrap();
+        sessions.values().filter_map(|s| s.info.lock().unwrap().interface.clone()).collect()
     }
 
     /// Stops the sessions chained through `name`: its tunnel is gone.
@@ -593,8 +602,19 @@ impl Runner {
             ),
             None => None,
         };
+        // Routes by domain relay to the resolvers in place, read before this
+        // session's DNS changes them.
+        let previous = if self.profile.routes_by_domain() {
+            vpn_platform::current_resolvers(&self.manager.interfaces()).await.unwrap_or_else(|e| {
+                tracing::warn!(session = self.profile.name, "resolvers in place: {e:#}");
+                Vec::new()
+            })
+        } else {
+            Vec::new()
+        };
         let device = vpn_platform::create_device(settings).context("cannot create tun interface")?;
         let mut applied = vpn_platform::apply(&self.profile.id, &device.name, settings, gateway_via.as_deref()).await?;
+        let mut proxy = self.start_proxy(&mut applied, settings, &previous).await;
         {
             let mut info = self.info.lock().unwrap();
             info.interface = Some(device.name.clone());
@@ -606,6 +626,7 @@ impl Runner {
             info.mtu = Some(settings.mtu);
             info.dns_servers = settings.dns.servers.iter().map(ToString::to_string).collect();
             info.excluded_routes = settings.excluded_routes.iter().map(ToString::to_string).collect();
+            info.dynamic_routes = 0;
             info.connected_since.get_or_insert(now());
             info.up_since = Some(now());
         }
@@ -613,17 +634,117 @@ impl Runner {
         self.set_state(SessionState::Connected, Some(format!("{} on {}", settings.address, device.name)));
         self.client.notify(Event::Done);
 
-        let result = tokio::select! {
-            _ = self.cancel.cancelled() => Ok(()),
-            res = engine.run(&self.stats, &device) => res,
+        let claims = SessionClaims { manager: &self.manager, session: &self.profile.id };
+        let result = {
+            let run = engine.run(&self.stats, &device);
+            tokio::pin!(run);
+            loop {
+                let expiry = applied.next_dynamic_expiry();
+                let expired = async {
+                    match expiry {
+                        Some(at) => tokio::time::sleep_until(at.into()).await,
+                        None => std::future::pending().await,
+                    }
+                };
+                let report = async {
+                    match &mut proxy {
+                        Some((proxy, _)) => proxy.next().await,
+                        None => std::future::pending().await,
+                    }
+                };
+                tokio::select! {
+                    _ = self.cancel.cancelled() => break Ok(()),
+                    res = &mut run => break res,
+                    report = report => match (report, &proxy) {
+                        (Some(FromProxy::Resolved { id, name, addresses, ttl }), Some((running, plan))) => {
+                            if plan.routes(&name) && addresses.len() <= vpn_core::dns_ipc::MAX_ADDRESSES {
+                                applied.route_resolved(&addresses, Duration::from_secs(ttl.into()), &claims).await;
+                            } else {
+                                tracing::warn!(session = self.profile.name, "the DNS proxy reported a name it does not route");
+                            }
+                            running.routed(id).await;
+                        }
+                        _ => {
+                            // Failing open: the DNS as without the proxy.
+                            tracing::warn!(session = self.profile.name, "the DNS proxy stopped: routes by domain off");
+                            applied.stop_proxy().await;
+                            proxy = None;
+                        }
+                    },
+                    _ = expired => applied.expire_dynamic(&claims).await,
+                }
+                self.info.lock().unwrap().dynamic_routes = applied.dynamic_routes();
+            }
         };
         if self.cancel.is_cancelled() {
             self.set_state(SessionState::Disconnecting, None);
         }
         engine.stop().await;
         applied.revert().await;
+        // After the resolver configuration that pointed at it.
+        drop(proxy);
         drop(device);
         result
+    }
+
+    /// The session's DNS proxy, when its profile lists domains for this
+    /// tunnel: started, and made the resolver of those domains. Any
+    /// failure leaves the DNS as it is without the proxy.
+    async fn start_proxy(
+        &self,
+        applied: &mut vpn_platform::AppliedConfig,
+        settings: &TunnelSettings,
+        previous: &[std::net::SocketAddr],
+    ) -> Option<(DnsProxy, Plan)> {
+        if !self.profile.routes_by_domain() {
+            return None;
+        }
+        let name = &self.profile.name;
+        let plan = match crate::dnsproxy::plan(&self.profile, settings, previous) {
+            Ok(Some(plan)) => plan,
+            Ok(None) => return None,
+            Err(e) => {
+                tracing::warn!(session = name, "routes by domain off: {e:#}");
+                return None;
+            }
+        };
+        let proxy = match DnsProxy::start(&self.manager.launcher, name, plan.config.clone()).await {
+            Ok(proxy) => proxy,
+            Err(e) => {
+                tracing::warn!(session = name, "routes by domain off: cannot start the DNS proxy: {e:#}");
+                return None;
+            }
+        };
+        if let Err(e) = applied.use_proxy(proxy.port, &plan.domains).await {
+            tracing::warn!(session = name, "routes by domain off: {e:#}");
+            applied.stop_proxy().await;
+            return None;
+        }
+        let way = if settings.full_tunnel { "kept outside" } else { "through the tunnel" };
+        tracing::info!(session = name, "routes by domain: {} domain(s) {way}", plan.domains.len());
+        Some((proxy, plan))
+    }
+}
+
+/// The registry, for one session's routes by domain.
+struct SessionClaims<'a> {
+    manager: &'a Manager,
+    session: &'a str,
+}
+
+impl DynamicClaims for SessionClaims<'_> {
+    fn claim(&self, address: std::net::Ipv4Addr) -> bool {
+        match self.manager.registry.lock().unwrap().claim_dynamic(self.session, address) {
+            Ok(()) => true,
+            Err(conflict) => {
+                tracing::info!("not routed by domain: {conflict}");
+                false
+            }
+        }
+    }
+
+    fn release(&self, address: std::net::Ipv4Addr) {
+        self.manager.registry.lock().unwrap().release_dynamic(self.session, address);
     }
 }
 
@@ -642,6 +763,7 @@ fn claims(profile: &Profile, settings: &TunnelSettings, owner: u32) -> Claims {
             IpAddr::V4(gateway) => Some(gateway),
             IpAddr::V6(_) => None,
         },
+        dynamic: Default::default(),
     }
 }
 
@@ -661,7 +783,7 @@ fn unused_dns(settings: &TunnelSettings) -> Option<String> {
 
 fn apply_profile(profile: &Profile, mut settings: TunnelSettings) -> anyhow::Result<TunnelSettings> {
     if let Some(routes) = &profile.routes {
-        settings.routes = vpn_core::noted::values(routes);
+        settings.routes = vpn_core::destination::networks(routes);
         settings.full_tunnel = false;
     }
     // A pushed default route means full tunnel; installing 0.0.0.0/0 on the
@@ -741,7 +863,8 @@ fn apply_profile(profile: &Profile, mut settings: TunnelSettings) -> anyhow::Res
         tracing::warn!("keeping the first {MAX_DNS_SERVERS} of {} DNS servers", settings.dns.servers.len());
         settings.dns.servers.truncate(MAX_DNS_SERVERS);
     }
-    if !settings.full_tunnel && settings.routes.is_empty() {
+    // Routes by domain alone are enough: they come as names resolve.
+    if !settings.full_tunnel && settings.routes.is_empty() && profile.included_domains().is_empty() {
         bail!("the gateway pushed no routes; set `routes` or `full_tunnel = true` in the profile");
     }
     // The tunnel's DNS servers are reached through the tunnel, never in
@@ -968,6 +1091,7 @@ mod tests {
             up_since: None,
             reconnects: 0,
             last_drop: None,
+            dynamic_routes: 0,
         };
         let stats = Arc::new(TunnelStats::default());
         stats.record_rx(100);
@@ -1114,6 +1238,15 @@ mod tests {
         let mut s = settings(&[], false, &[]);
         s.address = "240.0.0.1".parse().unwrap();
         assert!(apply_profile(&profile(serde_json::json!({})), s).is_err());
+    }
+
+    #[test]
+    fn domains_alone_are_enough_routes() {
+        let p = profile(serde_json::json!({ "routes": ["*.corp-saas.com"] }));
+        let settings = apply_profile(&p, settings(&["10.0.0.0/8"], false, &[])).unwrap();
+        // Only the host route to the tunnel's DNS server.
+        assert_eq!(settings.routes, ["10.0.0.53/32".parse::<Ipv4Net>().unwrap()]);
+        assert!(!settings.full_tunnel);
     }
 
     #[test]

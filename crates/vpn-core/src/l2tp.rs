@@ -78,6 +78,7 @@ impl L2tpProfile {
             full_tunnel: None,
             split_routes: Vec::new(),
             dns_domains: Vec::new(),
+            excluded_domains: Vec::new(),
             allow_route_overlap: false,
             via: Vec::new(),
             exclusive: false,

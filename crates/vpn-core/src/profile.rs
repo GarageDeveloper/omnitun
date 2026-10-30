@@ -1,5 +1,5 @@
 use crate::Noted;
-use ipnet::Ipv4Net;
+use crate::destination::{self, Destination, DomainPattern};
 use serde::{Deserialize, Serialize};
 
 /// A named connection, as stored in the user's `profiles.toml`.
@@ -26,9 +26,10 @@ pub struct Profile {
     #[serde(flatten)]
     pub protocol: ProtocolConfig,
     /// Replace the routes pushed by the gateway. Each list entry may carry
-    /// a note ([`crate::Noted`]).
+    /// a note ([`crate::Noted`]), and be a domain routed as it resolves
+    /// ([`Destination`]).
     #[serde(default)]
-    pub routes: Option<Vec<Noted<Ipv4Net>>>,
+    pub routes: Option<Vec<Noted<Destination>>>,
     /// Force (or refuse) full-tunnel mode regardless of the gateway.
     #[serde(default)]
     pub full_tunnel: Option<bool>,
@@ -37,10 +38,14 @@ pub struct Profile {
     /// through the VPN, whatever the gateway and `full_tunnel` say. Empty:
     /// no split mode.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub split_routes: Vec<Noted<Ipv4Net>>,
+    pub split_routes: Vec<Noted<Destination>>,
     /// Extra split-DNS domains, in addition to those pushed.
     #[serde(default)]
     pub dns_domains: Vec<Noted<String>>,
+    /// Kept outside a full tunnel: the addresses these names resolve to go
+    /// out directly (`*.zoom.us`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_domains: Vec<Noted<DomainPattern>>,
     /// Accept routes identical to another active session's routes.
     #[serde(default)]
     pub allow_route_overlap: bool,
@@ -380,6 +385,9 @@ pub const MAX_VIA: usize = 4;
 /// At most as many as the daemon accepts from a gateway.
 pub const MAX_SPLIT_ROUTES: usize = 256;
 
+/// Domains routed as they resolve, all lists together.
+pub const MAX_DYNAMIC_DOMAINS: usize = 256;
+
 /// Lowest SAML callback port: the daemon runs as root and must not be
 /// made to listen on a privileged port.
 pub const MIN_SAML_PORT: u16 = 1024;
@@ -526,7 +534,7 @@ impl Profile {
         if self.split_routes.len() > MAX_SPLIT_ROUTES {
             anyhow::bail!("split mode takes at most {MAX_SPLIT_ROUTES} networks");
         }
-        if self.split_routes.iter().any(|net| net.prefix_len() == 0) {
+        if destination::networks(&self.split_routes).iter().any(|net| net.prefix_len() == 0) {
             anyhow::bail!("split mode is for some networks: 0.0.0.0/0 would take all traffic");
         }
         if self.description.as_ref().is_some_and(|d| d.chars().count() > 256 || d.chars().any(char::is_control)) {
@@ -534,6 +542,15 @@ impl Profile {
         }
         self.routes.iter().flatten().chain(&self.split_routes).try_for_each(Noted::check_note)?;
         self.dns_domains.iter().try_for_each(Noted::check_note)?;
+        self.excluded_domains.iter().try_for_each(Noted::check_note)?;
+        let dynamic = [self.routes.as_deref().unwrap_or_default(), &self.split_routes, self.extra_routes()]
+            .into_iter()
+            .map(|list| destination::domains(list).count())
+            .sum::<usize>()
+            + self.excluded_domains.len();
+        if dynamic > MAX_DYNAMIC_DOMAINS {
+            anyhow::bail!("at most {MAX_DYNAMIC_DOMAINS} domains can be routed as they resolve");
+        }
         Ok(())
     }
 }
@@ -548,6 +565,29 @@ impl Profile {
         self.routes = Some(self.split_routes.clone());
         self.full_tunnel = Some(false);
         Ok(self)
+    }
+
+    /// OpenVPN's additional networks; empty for the other protocols.
+    pub fn extra_routes(&self) -> &[Noted<Destination>] {
+        match &self.protocol {
+            ProtocolConfig::OpenVpn(p) => &p.extra_routes,
+            _ => &[],
+        }
+    }
+
+    /// The domains routed through a split tunnel as they resolve: those of
+    /// the routes in use (`split_routes` in split mode, see
+    /// [`Self::in_split_mode`]) and OpenVPN's additional networks.
+    pub fn included_domains(&self) -> Vec<&DomainPattern> {
+        destination::domains(self.routes.as_deref().unwrap_or_default())
+            .chain(destination::domains(self.extra_routes()))
+            .collect()
+    }
+
+    /// Whether a connection may need routes by domain: without, nothing of
+    /// dynamic split tunneling runs.
+    pub fn routes_by_domain(&self) -> bool {
+        !self.included_domains().is_empty() || !self.excluded_domains.is_empty()
     }
 }
 
@@ -702,7 +742,7 @@ mod tests {
         p.split_routes.push("0.0.0.0/0".parse().unwrap());
         assert!(p.validate().is_err(), "0.0.0.0/0 is not a split");
         p.split_routes = (0..=MAX_SPLIT_ROUTES as u32)
-            .map(|i| Ipv4Net::new((0x0a00_0000 + (i << 8)).into(), 24).unwrap().into())
+            .map(|i| Destination::from(ipnet::Ipv4Net::new((0x0a00_0000 + (i << 8)).into(), 24).unwrap()).into())
             .collect();
         assert!(p.validate().is_err());
 
@@ -710,10 +750,44 @@ mod tests {
             "[[profile]]\nname = \"t\"\nprotocol = \"forti-ssl\"\nhost = \"h.example\"\nsplit_routes = [\"10.2.0.0/16\"]",
         )
         .unwrap();
-        assert_eq!(file.profiles[0].split_routes, vec!["10.2.0.0/16".parse::<Ipv4Net>().unwrap()]);
+        assert_eq!(file.profiles[0].split_routes, vec!["10.2.0.0/16".parse::<Destination>().unwrap()]);
         let written =
             toml::to_string(&ProfileFile { profiles: vec![ssl("h.example", FortiSslAuth::Password)] }).unwrap();
         assert!(!written.contains("split_routes"), "left out when empty");
+    }
+
+    /// Domains in the route lists, and outside a full tunnel; a profile
+    /// without any does nothing of dynamic split tunneling.
+    #[test]
+    fn routes_by_domain() {
+        let mut p = ssl("vpn.example.com", FortiSslAuth::Password);
+        assert!(!p.routes_by_domain());
+        p.split_routes = vec!["10.1.0.0/16".parse().unwrap(), "*.corp-saas.com".parse().unwrap()];
+        assert!(!p.routes_by_domain(), "split mode not chosen");
+        let split = p.clone().in_split_mode().unwrap();
+        assert_eq!(split.included_domains().iter().map(ToString::to_string).collect::<Vec<_>>(), ["*.corp-saas.com"]);
+        assert!(split.routes_by_domain() && split.validate().is_ok());
+        p.split_routes = vec!["*.corp-saas.com".parse().unwrap()];
+        assert!(p.clone().in_split_mode().is_ok(), "domains alone are a split");
+
+        let mut full = ssl("vpn.example.com", FortiSslAuth::Password);
+        full.excluded_domains = vec!["*.zoom.us".parse().unwrap()];
+        assert!(full.routes_by_domain() && full.included_domains().is_empty());
+        full.excluded_domains = (0..=MAX_DYNAMIC_DOMAINS).map(|i| format!("d{i}.example").parse().unwrap()).collect();
+        assert!(full.validate().is_err(), "too many domains");
+
+        let file: ProfileFile = toml::from_str(
+            "[[profile]]\nname = \"t\"\nprotocol = \"forti-ssl\"\nhost = \"h.example\"\n\
+             excluded_domains = [\"*.zoom.us\", { domain = \"teams.microsoft.com\", note = \"Teams\" }]",
+        )
+        .unwrap();
+        assert_eq!(file.profiles[0].excluded_domains[1].note.as_deref(), Some("Teams"));
+        assert!(
+            toml::from_str::<ProfileFile>(
+                "[[profile]]\nname = \"t\"\nprotocol = \"forti-ssl\"\nhost = \"h\"\nexcluded_domains = [\"10.0.0.0/8\"]"
+            )
+            .is_err()
+        );
     }
 
     #[test]

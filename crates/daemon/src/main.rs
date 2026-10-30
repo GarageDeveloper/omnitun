@@ -2,6 +2,7 @@
 //! create tun interfaces and change routes and DNS; users drive it with
 //! `omnitunctl` through a Unix socket restricted to one group.
 
+mod dnsproxy;
 mod engine;
 mod logfile;
 mod manager;

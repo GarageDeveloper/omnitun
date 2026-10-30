@@ -6,9 +6,9 @@ use anyhow::Context;
 use base64::Engine;
 use ipnet::Ipv4Net;
 use vpn_core::{
-    Compression, ControlChannel, ExchangeMode, FortiSslAuth, FortiSslProfile, GatewayAuth, IpsecProfile, L2tpProfile,
-    Noted, OpenVpnProfile, OpenVpnRemote, PppAuth, Profile, ProtocolConfig, StaticChallenge, Transport,
-    WireGuardProfile, X509NameCheck, X509NameKind,
+    Compression, ControlChannel, Destination, DomainPattern, ExchangeMode, FortiSslAuth, FortiSslProfile, GatewayAuth,
+    IpsecProfile, L2tpProfile, Noted, OpenVpnProfile, OpenVpnRemote, PppAuth, Profile, ProtocolConfig, StaticChallenge,
+    Transport, WireGuardProfile, X509NameCheck, X509NameKind,
 };
 use x509_parser::prelude::{FromDer, X509Certificate};
 
@@ -192,6 +192,8 @@ pub struct ProfileForm {
     /// The networks of a connection in split mode; empty for none.
     pub split_routes: Vec<ListEntry>,
     pub dns_domains: Vec<ListEntry>,
+    /// Kept outside a full tunnel.
+    pub excluded_domains: Vec<ListEntry>,
     pub allow_route_overlap: bool,
     /// VPNs this one is chained through, preferred first.
     pub via: Vec<String>,
@@ -325,6 +327,12 @@ impl ProfileForm {
             TunnelMode::Split => Some(false),
         };
         profile.dns_domains = noted_domains(&self.dns_domains)?;
+        profile.excluded_domains = self
+            .excluded_domains
+            .iter()
+            .filter(|e| !e.value.trim().is_empty())
+            .map(|e| Ok(Noted::new(parse_pattern(&e.value)?, note(&e.note))))
+            .collect::<anyhow::Result<_>>()?;
         profile.allow_route_overlap = self.allow_route_overlap;
         profile.via = dedup(clean_list(&self.via));
         profile.exclusive = self.exclusive;
@@ -717,12 +725,31 @@ fn note(text: &str) -> Option<String> {
     Some(text.trim().to_owned()).filter(|n| !n.is_empty())
 }
 
-fn noted_networks(items: &[ListEntry]) -> anyhow::Result<Vec<Noted<Ipv4Net>>> {
+fn noted_networks(items: &[ListEntry]) -> anyhow::Result<Vec<Noted<Destination>>> {
     items
         .iter()
         .filter(|e| !e.value.trim().is_empty())
-        .map(|e| Ok(Noted::new(parse_network(&e.value)?, note(&e.note))))
+        .map(|e| Ok(Noted::new(parse_destination(&e.value)?, note(&e.note))))
         .collect()
+}
+
+/// A network or an address, or a domain routed as it resolves (#37).
+fn parse_destination(text: &str) -> anyhow::Result<Destination> {
+    let text = text.trim();
+    match parse_network(text) {
+        Ok(net) => Ok(Destination::Network(net)),
+        // Digits and dots: a mistyped network, explained as such.
+        Err(e) if text.bytes().all(|b| b.is_ascii_digit() || b == b'.' || b == b'/') => Err(e),
+        Err(_) => text.parse::<DomainPattern>().map(Destination::Domain).map_err(|_| {
+            anyhow::anyhow!(
+                "{text:?} is not a network (like 10.1.0.0/16), an address or a domain (like *.corp.example)"
+            )
+        }),
+    }
+}
+
+fn parse_pattern(text: &str) -> anyhow::Result<DomainPattern> {
+    text.trim().parse::<DomainPattern>().map_err(anyhow::Error::msg)
 }
 
 fn noted_domains(items: &[ListEntry]) -> anyhow::Result<Vec<Noted<String>>> {
@@ -762,10 +789,16 @@ fn entries<T: std::fmt::Display>(list: &[Noted<T>]) -> Vec<ListEntry> {
 }
 
 /// What is wrong with a network typed in the editor, if anything (an
-/// address alone is a /32).
+/// address alone is a /32; a domain is routed as it resolves).
 #[uniffi::export]
 pub fn network_error(text: String) -> Option<String> {
-    parse_network(&text).err().map(|e| e.to_string())
+    parse_destination(&text).err().map(|e| e.to_string())
+}
+
+/// What is wrong with a domain to keep outside the VPN, if anything.
+#[uniffi::export]
+pub fn pattern_error(text: String) -> Option<String> {
+    parse_pattern(&text).err().map(|e| e.to_string())
 }
 
 /// What is wrong with a DNS domain typed in the editor, if anything.
@@ -863,6 +896,7 @@ impl From<&Profile> for ProfileForm {
             },
             split_routes: entries(&profile.split_routes),
             dns_domains: entries(&profile.dns_domains),
+            excluded_domains: entries(&profile.excluded_domains),
             allow_route_overlap: profile.allow_route_overlap,
             via: profile.via.clone(),
             folder: profile.folder.clone(),
@@ -1410,8 +1444,20 @@ mod tests {
             Some(vec!["10.1.0.0/16".into(), "10.1.2.3".into(), ListEntry { value: "".into(), note: "x".into() }]);
         let routes = form.to_profile(None).unwrap().routes.unwrap();
         assert_eq!(routes.iter().map(ToString::to_string).collect::<Vec<_>>(), ["10.1.0.0/16", "10.1.2.3/32"]);
-        form.routes = Some(vec!["nope".into()]);
+        form.routes = Some(vec!["no pe".into()]);
         assert!(form.to_profile(None).unwrap_err().to_string().contains("not a network"));
+        form.routes = Some(vec!["*.corp-saas.com".into()]);
+        let routes = form.to_profile(None).unwrap().routes.unwrap();
+        assert!(routes[0].domain().is_some(), "a domain of the profile is kept");
+        assert_eq!(network_error("*.corp-saas.com".into()), None);
+        assert!(network_error("10.1.2.300".into()).unwrap().contains("not a network"), "an address, mistyped");
+        assert!(pattern_error("10.0.0.0/8".into()).is_some() && pattern_error("*.zoom.us".into()).is_none());
+        form.excluded_domains = vec![ListEntry { value: "*.Zoom.us".into(), note: "Zoom".into() }];
+        let saved = form.to_profile(None).unwrap();
+        assert_eq!(saved.excluded_domains[0].value.to_string(), "*.zoom.us");
+        form.excluded_domains = vec!["10.0.0.0/8".into()];
+        assert!(form.to_profile(None).is_err());
+        form.excluded_domains = vec![];
         form.routes = None;
         form.name = "bad/name".into();
         assert!(form.to_profile(None).is_err(), "'/' separates folders");

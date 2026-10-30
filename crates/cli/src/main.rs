@@ -656,6 +656,10 @@ fn print_status(sessions: &[SessionInfo]) {
             if !s.excluded_routes.is_empty() {
                 row("except", s.excluded_routes.join(", "));
             }
+            if s.dynamic_routes > 0 {
+                let way = if s.full_tunnel { "kept outside" } else { "through the tunnel" };
+                row("by domain", format!("{} address(es) {way}", s.dynamic_routes));
+            }
         }
         if !s.dns_servers.is_empty() {
             row("dns servers", s.dns_servers.join(", "));

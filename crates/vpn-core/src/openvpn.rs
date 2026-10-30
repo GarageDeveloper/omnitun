@@ -77,9 +77,10 @@ pub struct OpenVpnProfile {
     #[serde(default = "default_reneg")]
     pub reneg_sec: u32,
     /// Networks routed through the tunnel besides those the server pushes
-    /// (`route` lines of the configuration).
+    /// (`route` lines of the configuration), and domains routed as they
+    /// resolve.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub extra_routes: Vec<crate::Noted<ipnet::Ipv4Net>>,
+    pub extra_routes: Vec<crate::Noted<crate::Destination>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -236,7 +237,7 @@ impl OpenVpnProfile {
         ensure!(self.reneg_sec == 0 || self.reneg_sec >= 60, "reneg-sec must be 0 or at least 60 seconds");
         ensure!(self.extra_routes.len() <= MAX_EXTRA_ROUTES, "at most {MAX_EXTRA_ROUTES} additional networks");
         ensure!(
-            self.extra_routes.iter().all(|r| r.prefix_len() > 0),
+            crate::destination::networks(&self.extra_routes).iter().all(|r| r.prefix_len() > 0),
             "an additional network cannot be the default route: choose a full tunnel instead"
         );
         self.extra_routes.iter().try_for_each(crate::Noted::check_note)?;

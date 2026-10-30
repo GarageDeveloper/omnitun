@@ -279,6 +279,8 @@ pub struct Session {
     pub failure: Option<FailureInfo>,
     /// The session it goes through, if chained.
     pub via: Option<String>,
+    /// Addresses routed by domain now.
+    pub dynamic_routes: u32,
 }
 
 impl From<SessionInfo> for Session {
@@ -299,6 +301,7 @@ impl From<SessionInfo> for Session {
             detail: s.detail.as_deref().map(vpn_client::printable),
             failure: s.failure.map(Into::into),
             via: s.via,
+            dynamic_routes: s.dynamic_routes.try_into().unwrap_or(u32::MAX),
         }
     }
 }

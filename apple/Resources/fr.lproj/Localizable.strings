@@ -440,3 +440,8 @@
 "Note" = "Note";
 "Paste Lines" = "Coller des lignes";
 "One entry per line: the network or domain, then its note" = "Une entrée par ligne : le réseau ou le domaine, puis sa note";
+
+/* Routes by domain (dynamic split tunneling) */
+"A network list may also hold domains (*.corp-saas.com for every name under it): their addresses go through the VPN as they are resolved." = "Une liste de réseaux peut aussi contenir des domaines (*.corp-saas.com pour tous les noms en dessous) : leurs adresses passent par le VPN dès qu'elles sont résolues.";
+"Outside the VPN" = "En dehors du VPN";
+"When the VPN takes all traffic: the names under these domains are resolved by the DNS in place before the VPN, and their addresses reached directly (video calls, say). Public addresses only." = "Quand le VPN prend tout le trafic : les noms sous ces domaines sont résolus par le DNS en place avant le VPN, et leurs adresses jointes directement (visioconférence, par exemple). Adresses publiques uniquement.";

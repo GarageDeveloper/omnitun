@@ -212,6 +212,13 @@ pub struct SessionInfo {
     /// Unix time and cause of the last drop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_drop: Option<(u64, String)>,
+    /// Addresses routed by domain now (#37).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dynamic_routes: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 #[cfg(test)]

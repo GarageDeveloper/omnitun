@@ -20,16 +20,39 @@ pub struct Noted<T> {
 }
 
 /// The key naming the value in the table form.
-pub trait NoteKey {
-    const KEY: &'static str;
+pub trait NoteKey: Sized {
+    /// The keys the table form accepts.
+    const KEYS: &'static [&'static str];
+
+    /// The key this value is written under.
+    fn key(&self) -> &'static str;
+
+    /// The value read under `key`, one of `KEYS`.
+    fn keyed(key: &str, text: &str) -> Result<Self, String>;
 }
 
 impl NoteKey for Ipv4Net {
-    const KEY: &'static str = "net";
+    const KEYS: &'static [&'static str] = &["net"];
+
+    fn key(&self) -> &'static str {
+        "net"
+    }
+
+    fn keyed(_key: &str, text: &str) -> Result<Self, String> {
+        text.parse().map_err(|_| format!("{text:?} is not a network (10.1.0.0/16)"))
+    }
 }
 
 impl NoteKey for String {
-    const KEY: &'static str = "domain";
+    const KEYS: &'static [&'static str] = &["domain"];
+
+    fn key(&self) -> &'static str {
+        "domain"
+    }
+
+    fn keyed(_key: &str, text: &str) -> Result<Self, String> {
+        Ok(text.to_owned())
+    }
 }
 
 impl<T> Noted<T> {
@@ -94,7 +117,7 @@ impl<T: Serialize + NoteKey> Serialize for Noted<T> {
             None => self.value.serialize(serializer),
             Some(note) => {
                 let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry(T::KEY, &self.value)?;
+                map.serialize_entry(self.value.key(), &self.value)?;
                 map.serialize_entry("note", note)?;
                 map.end()
             }
@@ -110,7 +133,7 @@ impl<'de, T: Deserialize<'de> + NoteKey> Deserialize<'de> for Noted<T> {
             type Value = Noted<T>;
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "a string, or a table with `{}` and `note`", T::KEY)
+                write!(f, "a string, or a table with `{}` and `note`", T::KEYS.join("` or `"))
             }
 
             fn visit_str<E: de::Error>(self, text: &str) -> Result<Self::Value, E> {
@@ -121,12 +144,15 @@ impl<'de, T: Deserialize<'de> + NoteKey> Deserialize<'de> for Noted<T> {
                 let (mut value, mut note) = (None, None);
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
-                        k if k == T::KEY && value.is_none() => value = Some(map.next_value::<T>()?),
+                        k if T::KEYS.contains(&k) && value.is_none() => {
+                            let text = map.next_value::<String>()?;
+                            value = Some(T::keyed(k, &text).map_err(de::Error::custom)?);
+                        }
                         "note" if note.is_none() => note = Some(map.next_value::<String>()?),
-                        other => return Err(de::Error::unknown_field(other, &[T::KEY, "note"])),
+                        other => return Err(de::Error::unknown_field(other, T::KEYS)),
                     }
                 }
-                let value = value.ok_or_else(|| de::Error::missing_field(T::KEY))?;
+                let value = value.ok_or_else(|| de::Error::missing_field(T::KEYS[0]))?;
                 // An empty note is no note.
                 Ok(Noted { value, note: note.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty()) })
             }

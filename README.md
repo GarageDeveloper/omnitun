@@ -27,6 +27,9 @@ Beyond connecting:
   first if needed;
 - **split mode on demand**: a VPN that takes all traffic can also be
   connected with only a list of networks through it;
+- **routes by domain**: `*.corp-saas.com` through a split tunnel, or
+  `*.zoom.us` kept outside a full one, whatever addresses these names
+  resolve to (see [Routes by domain](#routes-by-domain));
 - **several VPNs at once**, each with its own routes and DNS, with
   conflicts between them detected; a VPN can also be marked as a company
   VPN that never runs alongside another;
@@ -114,6 +117,37 @@ omnitunctl disconnect --all
 omnitunctl app restart                     # relaunch the menu bar app; the VPNs stay up (macOS)
 omnitunctl duplicate paris --name paris-test  # a copy to try other settings
 ```
+
+### Routes by domain
+
+A route list (`routes`, `split_routes`, OpenVPN's `extra_routes`) may hold
+domains besides networks; `excluded_domains` keeps names outside a full
+tunnel. `crm.example` is that name only, `*.corp-saas.com` that domain and
+every name under it.
+
+```toml
+split_routes = ["10.20.0.0/16", { domain = "*.corp-saas.com", note = "CRM" }]
+excluded_domains = ["*.zoom.us", { domain = "*.teams.microsoft.com", note = "Teams" }]
+```
+
+Only a connection with such domains runs a DNS proxy (unprivileged, as
+the engines): the system resolver sends it the names under those domains,
+it relays them to the resolvers that answered before (the tunnel's for its
+own domains, otherwise those in place before the VPN, so DNS filtering by
+an antivirus goes on), and has the addresses of each answer routed before
+returning it: through the tunnel, or outside it, for at least 10 minutes.
+`omnitunctl status` counts them. If the proxy fails, the DNS goes back to
+how it is without it. Limits:
+
+- names resolved by an application on its own (DNS over HTTPS in a
+  browser, iCloud Private Relay) get no route; the proxy tells Firefox to
+  keep the system's DNS;
+- an address shared by several names (a CDN) follows the first rule that
+  routed it;
+- IPv4 only: routed names get no IPv6 address;
+- through the tunnel, the gateway must accept those destinations (a
+  WireGuard peer with `AllowedIPs = 0.0.0.0/0`, IPsec traffic selectors
+  that cover them); outside a full tunnel, only public addresses.
 
 ### Shell completions
 
