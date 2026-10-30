@@ -158,10 +158,34 @@ impl Registry {
         let Some(ours) = self.active.get(name) else {
             return Err(Conflict { with: String::new(), message: format!("{name} is not connected") });
         };
+        if let Some(conflict) = self.dynamic_conflict(name, ours, address, true) {
+            return Err(conflict);
+        }
+        self.active.get_mut(name).expect("checked above").dynamic.insert(address);
+        Ok(())
+    }
+
+    /// The addresses routed by domain for `name` that a session connected
+    /// since routes itself: its network, or its gateway, wins. A full
+    /// tunnel connected since takes none of them.
+    pub fn lost_dynamic(&self, name: &str) -> Vec<(Ipv4Addr, Conflict)> {
+        let Some(ours) = self.active.get(name) else { return Vec::new() };
+        ours.dynamic
+            .iter()
+            .filter_map(|&address| self.dynamic_conflict(name, ours, address, false).map(|c| (address, c)))
+            .collect()
+    }
+
+    /// Why `ours` may not route `address` by domain; `full`: whether full
+    /// tunnels count.
+    fn dynamic_conflict(&self, name: &str, ours: &Claims, address: Ipv4Addr, full: bool) -> Option<Conflict> {
         for (key, theirs) in self.active.iter().filter(|(n, _)| n.as_str() != name) {
-            let conflict = |message: String| Err(Conflict { with: key.clone(), message });
+            let conflict = |message: String| Some(Conflict { with: key.clone(), message });
             let trusted = ours.owner == theirs.owner || ours.owner == 0;
-            let chained = trusted && (ours.related.contains(key) || theirs.related.iter().any(|r| r == name));
+            // Only a VPN this one goes through: an address inside the
+            // network of a VPN chained through this one is that VPN's, and
+            // a host route here would take its traffic.
+            let through = trusted && ours.related.contains(key);
             let other = if theirs.name.is_empty() { key } else { &theirs.name };
             if theirs.dynamic.contains(&address) {
                 return conflict(format!("{address} is already routed by domain for {other}"));
@@ -169,17 +193,24 @@ impl Registry {
             if theirs.gateway == Some(address) {
                 return conflict(format!("{address} is the gateway of {other}"));
             }
+            if theirs.full_tunnel && !full {
+                continue;
+            }
             if let Some(route) = theirs.tunneled().into_iter().find(|r| r.contains(&address)) {
                 if ours.full_tunnel {
                     return conflict(format!("{address} is inside {route}, routed through {other}"));
                 }
-                if !(trusted && (ours.allow_overlap || chained)) {
+                if !(trusted && (ours.allow_overlap || through)) {
                     return conflict(format!("{address} is inside {route} of {other}"));
                 }
             }
         }
-        self.active.get_mut(name).expect("checked above").dynamic.insert(address);
-        Ok(())
+        None
+    }
+
+    /// Whether session `name` has `net` itself among its routes.
+    pub fn has_route(&self, name: &str, net: Ipv4Net) -> bool {
+        self.active.get(name).is_some_and(|claims| claims.routes.contains(&net))
     }
 
     /// Forgets an address no longer routed by domain.
@@ -265,6 +296,60 @@ mod tests {
         reg.insert("full", full);
         assert!(reg.claim_dynamic("full", ip("10.1.2.3")).is_err());
         assert!(reg.claim_dynamic("full", ip("203.0.113.7")).is_ok());
+    }
+
+    /// A VPN chained through another: the first one's routes by domain
+    /// never take the second one's networks, whichever connected first.
+    #[test]
+    fn routes_by_domain_leave_a_chained_vpn_its_networks() {
+        let mut reg = Registry::default();
+        reg.insert("hub", claims(&["198.51.100.20/32"], false, &[]));
+        let mut inner = claims(&["10.77.0.0/16"], false, &[]);
+        inner.related = vec!["hub".into()];
+        reg.insert("inner", inner);
+        let err = reg.claim_dynamic("hub", ip("10.77.1.30")).unwrap_err();
+        assert!(err.message.contains("inside 10.77.0.0/16"), "{err}");
+        assert!(reg.claim_dynamic("hub", ip("203.0.113.7")).is_ok());
+        assert!(reg.claim_dynamic("inner", ip("198.51.100.20")).is_ok(), "inside the VPN it goes through");
+
+        // Routed before the chained VPN connected: lost to it.
+        let mut reg = Registry::default();
+        reg.insert("hub", claims(&["198.51.100.20/32"], false, &[]));
+        reg.claim_dynamic("hub", ip("10.77.1.30")).unwrap();
+        reg.claim_dynamic("hub", ip("203.0.113.7")).unwrap();
+        assert!(reg.lost_dynamic("hub").is_empty());
+        let mut inner = claims(&["10.77.0.0/16"], false, &[]);
+        inner.related = vec!["hub".into()];
+        reg.insert("inner", inner);
+        let lost: Vec<_> = reg.lost_dynamic("hub").into_iter().map(|(address, _)| address).collect();
+        assert_eq!(lost, vec![ip("10.77.1.30")]);
+        assert!(reg.lost_dynamic("inner").is_empty());
+    }
+
+    /// A VPN chained through another whose routes hold its gateway: that
+    /// host route is the other one's.
+    #[test]
+    fn the_route_to_a_chained_gateway_may_be_the_other_vpns() {
+        let mut reg = Registry::default();
+        reg.insert("hub", claims(&["198.51.100.20/32", "10.0.0.0/8"], false, &[]));
+        assert!(reg.has_route("hub", "198.51.100.20/32".parse().unwrap()));
+        assert!(!reg.has_route("hub", "10.1.2.3/32".parse().unwrap()), "covered is not the same route");
+        assert!(!reg.has_route("gone", "198.51.100.20/32".parse().unwrap()));
+    }
+
+    /// A full tunnel connected since takes no route by domain away: the
+    /// split tunnel's own routes stay more specific too.
+    #[test]
+    fn a_later_full_tunnel_takes_no_route_by_domain() {
+        let mut reg = Registry::default();
+        reg.insert("split", claims(&["192.168.50.0/24"], false, &[]));
+        reg.claim_dynamic("split", ip("203.0.113.7")).unwrap();
+        reg.insert("full", claims(&[], true, &[]));
+        assert!(reg.lost_dynamic("split").is_empty());
+        let mut corp = claims(&["10.0.0.0/8"], false, &[]);
+        corp.gateway = Some(ip("203.0.113.7"));
+        reg.insert("corp", corp);
+        assert_eq!(reg.lost_dynamic("split").len(), 1, "its gateway");
     }
 
     /// A session connecting after: an exclusion of a full tunnel inside its

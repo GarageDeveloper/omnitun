@@ -54,6 +54,9 @@ pub struct Manager {
     attach_wait: Duration,
     sessions: Mutex<HashMap<String, Session>>,
     registry: Mutex<Registry>,
+    /// Bumped when a session registers its routes or leaves: the others
+    /// hand over the routes by domain it now carries, or take back theirs.
+    claims_changed: tokio::sync::watch::Sender<u64>,
     /// State changes, for `Watch` connections.
     events: broadcast::Sender<Watched>,
     /// Fired by an accepted `Shutdown` request.
@@ -68,6 +71,7 @@ impl Manager {
             attach_wait: ATTACH_WAIT,
             sessions: Default::default(),
             registry: Default::default(),
+            claims_changed: tokio::sync::watch::channel(0).0,
             events: broadcast::channel(WATCH_QUEUE).0,
             shutdown: CancellationToken::new(),
         }
@@ -339,6 +343,7 @@ impl Manager {
         let checked = registry.check(name, &claims);
         if checked.is_ok() {
             registry.insert(name, claims);
+            self.claims_changed.send_modify(|n| *n += 1);
         }
         checked
     }
@@ -574,6 +579,7 @@ impl Runner {
         self.manager.stop_chained(&self.profile.id);
         let stable = up_at.is_some_and(|t: std::time::Instant| t.elapsed() >= STABLE_UPTIME);
         self.manager.registry.lock().unwrap().remove(&self.profile.id);
+        self.manager.claims_changed.send_modify(|n| *n += 1);
         engine.stop().await;
         {
             let mut info = self.info.lock().unwrap();
@@ -599,14 +605,25 @@ impl Runner {
         up_at: &mut Option<std::time::Instant>,
     ) -> anyhow::Result<()> {
         // A chained session reaches its gateway through the other tunnel.
-        let gateway_via = match &self.via {
-            Some(parent) => Some(
-                self.manager
+        let parent = match &self.via {
+            Some(parent) => {
+                let interface = self
+                    .manager
                     .interface_of(parent)
-                    .with_context(|| format!("{parent}, which this VPN goes through, is not connected"))?,
-            ),
+                    .with_context(|| format!("{parent}, which this VPN goes through, is not connected"))?;
+                let routes_gateway = match settings.gateway {
+                    std::net::IpAddr::V4(gateway) => {
+                        self.manager.registry.lock().unwrap().has_route(parent, ipnet::Ipv4Net::from(gateway))
+                    }
+                    std::net::IpAddr::V6(_) => false,
+                };
+                Some((interface, routes_gateway))
+            }
             None => None,
         };
+        let gateway_via = parent
+            .as_ref()
+            .map(|(interface, routes_gateway)| vpn_platform::Through { interface, routes_gateway: *routes_gateway });
         // Routes by domain relay to the resolvers in place, read before this
         // session's DNS changes them.
         let previous = if self.profile.routes_by_domain() {
@@ -618,7 +635,7 @@ impl Runner {
             Vec::new()
         };
         let device = vpn_platform::create_device(settings).context("cannot create tun interface")?;
-        let mut applied = vpn_platform::apply(&self.profile.id, &device.name, settings, gateway_via.as_deref()).await?;
+        let mut applied = vpn_platform::apply(&self.profile.id, &device.name, settings, gateway_via).await?;
         let mut proxy = self.start_proxy(&mut applied, settings, &previous).await;
         {
             let mut info = self.info.lock().unwrap();
@@ -640,6 +657,8 @@ impl Runner {
         self.client.notify(Event::Done);
 
         let claims = SessionClaims { manager: &self.manager, session: &self.profile.id };
+        let mut claims_changed = self.manager.claims_changed.subscribe();
+        claims_changed.mark_unchanged();
         let result = {
             let run = engine.run(&self.stats, &device);
             tokio::pin!(run);
@@ -679,6 +698,7 @@ impl Runner {
                         }
                     },
                     _ = expired => applied.expire_dynamic(&claims).await,
+                    Ok(()) = claims_changed.changed() => applied.sessions_changed(&claims).await,
                 }
                 let routed = applied.dynamic_entries();
                 let mut info = self.info.lock().unwrap();
@@ -762,6 +782,16 @@ impl DynamicClaims for SessionClaims<'_> {
 
     fn release(&self, address: std::net::Ipv4Addr) {
         self.manager.registry.lock().unwrap().release_dynamic(self.session, address);
+    }
+
+    fn lost(&self) -> Vec<std::net::Ipv4Addr> {
+        let lost = self.manager.registry.lock().unwrap().lost_dynamic(self.session);
+        lost.into_iter()
+            .map(|(address, conflict)| {
+                tracing::info!("no longer routed by domain: {conflict}");
+                address
+            })
+            .collect()
     }
 }
 
