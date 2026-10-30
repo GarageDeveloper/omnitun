@@ -196,6 +196,7 @@ fn convert(text: &str, base: &str, file: &str, existing: &[String]) -> anyhow::R
         routes: None,
         full_tunnel: None,
         split_routes: Vec::new(),
+        extra_routes: Vec::new(),
         dns_domains: Vec::new(),
         excluded_domains: Vec::new(),
         allow_route_overlap: false,

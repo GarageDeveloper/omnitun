@@ -281,6 +281,24 @@ pub struct Session {
     pub via: Option<String>,
     /// Addresses routed by domain now.
     pub dynamic_routes: u32,
+    /// What the gateway announced, before the profile's own choices.
+    pub announced: Option<Announced>,
+}
+
+/// The routing a gateway announced.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct Announced {
+    /// All traffic.
+    pub full_tunnel: bool,
+    pub routes: Vec<String>,
+    pub dns_domains: Vec<String>,
+}
+
+impl From<vpn_core::ipc::Announced> for Announced {
+    fn from(a: vpn_core::ipc::Announced) -> Self {
+        let printable = |list: Vec<String>| list.iter().map(|s| vpn_client::printable(s)).collect();
+        Self { full_tunnel: a.full_tunnel, routes: printable(a.routes), dns_domains: printable(a.dns_domains) }
+    }
 }
 
 impl From<SessionInfo> for Session {
@@ -302,6 +320,7 @@ impl From<SessionInfo> for Session {
             failure: s.failure.map(Into::into),
             via: s.via,
             dynamic_routes: s.dynamic_routes.try_into().unwrap_or(u32::MAX),
+            announced: s.announced.map(Into::into),
         }
     }
 }

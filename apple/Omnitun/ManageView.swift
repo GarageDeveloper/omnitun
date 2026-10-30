@@ -713,7 +713,8 @@ struct ProfileEditor: View {
                 if form.kind == .ipsec {
                     IpsecAdvancedTab(form: $form).tabItem { Text("Advanced") }
                 }
-                NetworkTab(form: $form, others: model.profiles.filter { $0.id != original }.map { ($0.id, $0.name) })
+                NetworkTab(form: $form, others: model.profiles.filter { $0.id != original }.map { ($0.id, $0.name) },
+                           announced: original.flatMap(Settings.announced(for:)))
                     .tabItem { Text("Network") }
             }
             .padding(.horizontal)
@@ -1907,6 +1908,8 @@ private struct NetworkTab: View {
     @Binding var form: ProfileForm
     /// The other VPNs (id, name), to chain through.
     let others: [(String, String)]
+    /// What the gateway announced at the last connection.
+    let announced: GatewayAnnouncement?
 
     /// Ticked VPNs keep the order they were ticked in: the first is the
     /// one brought up when none is.
@@ -1919,47 +1922,200 @@ private struct NetworkTab: View {
 
     private func name(_ id: String) -> String { others.first { $0.0 == id }?.1 ?? id }
 
-    private var ownRoutes: Binding<Bool> {
-        Binding(get: { form.routes != nil }, set: { form.routes = $0 ? (form.routes ?? []) : nil })
+    /// The VPN's networks while split mode is not offered, kept for when it
+    /// is again.
+    @State private var parked: [ListEntry] = []
+    /// Split mode offered, its list still empty.
+    @State private var offering = false
+
+    /// One list of networks for the VPN, whatever the mode: its own
+    /// networks (`routes`), or those added to the gateway's
+    /// (`extra_routes`), of a split tunnel; the networks of split mode
+    /// (`split_routes`) otherwise.
+    private var networks: Binding<[ListEntry]> {
+        Binding(get: {
+            form.tunnelMode == .split ? (form.routes ?? form.extraRoutes) : form.splitRoutes
+        }, set: { list in
+            if form.tunnelMode != .split {
+                form.splitRoutes = list
+            } else if form.routes != nil {
+                form.routes = list
+            } else {
+                form.extraRoutes = list
+            }
+        })
     }
 
-    private var routes: Binding<[ListEntry]> {
-        Binding(get: { form.routes ?? [] }, set: { form.routes = $0 })
+    /// Changing the mode keeps the list.
+    private var mode: Binding<TunnelMode> {
+        Binding(get: { form.tunnelMode }, set: { new in
+            let old = form.tunnelMode
+            guard new != old else { return }
+            if new == .split {
+                let list = form.splitRoutes.isEmpty ? parked : form.splitRoutes
+                // Networks already added to the gateway's stay so.
+                if form.extraRoutes.isEmpty {
+                    form.routes = list
+                } else {
+                    form.routes = nil
+                    form.extraRoutes = merged(form.extraRoutes, list)
+                }
+                form.splitRoutes = []
+            } else if old == .split {
+                let list = form.routes ?? form.extraRoutes
+                form.routes = nil
+                form.extraRoutes = []
+                if !list.isEmpty {
+                    form.splitRoutes = list
+                    offering = true
+                }
+            }
+            form.tunnelMode = new
+        })
+    }
+
+    private var addGateway: Binding<Bool> {
+        Binding(get: { form.routes == nil }, set: { add in
+            if add {
+                form.extraRoutes = merged(form.routes ?? [], form.extraRoutes)
+                form.routes = nil
+            } else {
+                form.routes = form.extraRoutes
+                form.extraRoutes = []
+            }
+        })
+    }
+
+    private var offerSplit: Binding<Bool> {
+        Binding(get: { offering || !form.splitRoutes.isEmpty }, set: { on in
+            offering = on
+            if on {
+                if form.splitRoutes.isEmpty { form.splitRoutes = parked }
+            } else {
+                parked = form.splitRoutes
+                form.splitRoutes = []
+            }
+        })
+    }
+
+    private func merged(_ a: [ListEntry], _ b: [ListEntry]) -> [ListEntry] {
+        a + b.filter { entry in !a.contains { $0.value == entry.value } }
+    }
+
+    private var modeCaption: LocalizedStringKey {
+        switch form.tunnelMode {
+        case .automatic: "The networks the gateway announces, or all traffic if it asks for it."
+        case .full: "All traffic, except the domains kept outside."
+        case .split: "A split tunnel at every connection: the list below, the rest of the traffic outside."
+        }
+    }
+
+    private var outsideTitle: LocalizedStringKey {
+        form.tunnelMode == .automatic ? "Outside the VPN, if the gateway sends everything" : "Outside the VPN"
+    }
+
+    private var outsideCaption: LocalizedStringKey {
+        form.tunnelMode == .automatic
+            ? "Used only when the gateway asks for all traffic; otherwise they are outside already. Resolved by the DNS in place before the VPN, and reached directly (video calls, say). Public addresses only."
+            : "Resolved by the DNS in place before the VPN, and reached directly (video calls, say). Public addresses only."
+    }
+
+    private var networksCaption: some View {
+        Text("A network (10.1.0.0/16), a single address, or a domain: *.corp.example for every name under it, routed as they are resolved.")
+            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func caption(_ text: LocalizedStringKey) -> some View {
+        Text(text).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder private var announcedSection: some View {
+        Section("Announced by the gateway") {
+            if let announced {
+                Text("Last connection, \(announced.at.formatted(date: .abbreviated, time: .shortened))")
+                    .font(.caption).foregroundStyle(.secondary)
+                if announced.fullTunnel {
+                    LabeledContent("All traffic") { Text("default route").foregroundStyle(.secondary) }
+                }
+                ForEach(announced.routes.prefix(50), id: \.self) { route in
+                    LabeledContent { Text("network").foregroundStyle(.secondary) } label: {
+                        Text(verbatim: route).font(.body.monospaced())
+                    }
+                }
+                if announced.routes.count > 50 {
+                    Text("and \(announced.routes.count - 50) more").foregroundStyle(.secondary)
+                }
+                ForEach(announced.dnsDomains, id: \.self) { domain in
+                    LabeledContent { Text("DNS domain").foregroundStyle(.secondary) } label: {
+                        Text(verbatim: domain).font(.body.monospaced())
+                    }
+                }
+                if !announced.fullTunnel && announced.routes.isEmpty && announced.dnsDomains.isEmpty {
+                    Text("Nothing").foregroundStyle(.secondary)
+                }
+            } else {
+                Text("Shown after a first connection.").foregroundStyle(.secondary)
+            }
+            caption("Read only: the gateway decides, at every connection. To set your own networks, choose “Only these networks”; to send everything whatever it says, “Everything through the VPN”.")
+        }
     }
 
     var body: some View {
         Form {
-            Picker("Traffic", selection: $form.tunnelMode) {
-                Text("As the gateway decides").tag(TunnelMode.automatic)
-                Text("Everything through the VPN").tag(TunnelMode.full)
-                Text("Only the VPN's networks").tag(TunnelMode.split)
+            Section {
+                Picker("Traffic", selection: mode) {
+                    Text("As the gateway decides").tag(TunnelMode.automatic)
+                    Text("Everything through the VPN").tag(TunnelMode.full)
+                    Text("Only these networks").tag(TunnelMode.split)
+                }
+                .pickerStyle(.radioGroup)
+                caption(modeCaption)
             }
-            if form.kind == .openVpn {
-                VStack(alignment: .leading, spacing: 4) {
-                    NotedList(title: "Additional networks through the VPN", entries: $form.extraRoutes, kind: .network)
-                    Text("Added to the networks the server announces, like the route lines of an OpenVPN file.")
-                        .font(.caption).foregroundStyle(.secondary)
+            if form.tunnelMode == .automatic {
+                announcedSection
+            }
+            if form.tunnelMode == .split {
+                Section {
+                    VStack(alignment: .leading, spacing: 4) {
+                        NotedList(title: "Networks through the VPN", entries: networks, kind: .network)
+                        networksCaption
+                    }
+                    Toggle("Add the networks the gateway announces", isOn: addGateway)
+                    caption("Off: only this list. On: this list on top of what the gateway announces.")
+                }
+                if !form.splitRoutes.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        NotedList(title: "Networks in split mode", entries: $form.splitRoutes, kind: .network)
+                        caption("The menu also offers to connect in split mode, with these networks instead.")
+                    }
+                }
+            } else {
+                Section {
+                    VStack(alignment: .leading, spacing: 4) {
+                        NotedList(title: outsideTitle, entries: $form.excludedDomains, kind: .pattern)
+                        caption(outsideCaption)
+                    }
+                    Toggle("Also offer split mode", isOn: offerSplit)
+                    caption("The menu offers “Connect in Split Mode”: only these networks, for that connection.")
+                    if offerSplit.wrappedValue {
+                        VStack(alignment: .leading, spacing: 4) {
+                            NotedList(title: "Networks through the VPN", entries: networks, kind: .network)
+                            caption("One list for the VPN: the same as in “Only these networks”. Changing the mode keeps it.")
+                        }
+                    }
+                }
+                if !form.extraRoutes.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        NotedList(title: "Added to the gateway's networks", entries: $form.extraRoutes, kind: .network)
+                        caption(form.tunnelMode == .full
+                                ? "Unused while everything goes through the VPN."
+                                : "Added when the gateway announces networks, like the route lines of an OpenVPN file.")
+                    }
                 }
             }
-            Toggle("Use my own networks instead of the gateway's", isOn: ownRoutes)
-            if form.routes != nil {
-                NotedList(title: "Networks", entries: routes, kind: .network)
+            Section {
+                NotedList(title: "DNS domains resolved through this VPN", entries: $form.dnsDomains, kind: .domain)
             }
-            VStack(alignment: .leading, spacing: 4) {
-                NotedList(title: "Networks in split mode", entries: $form.splitRoutes, kind: .network)
-                Text("The menu then also offers to connect this VPN in split mode: only these networks go through it, the rest of the traffic does not. Add the DNS domains below, or the VPN's DNS servers are not used.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-            Text("A network list may also hold domains (*.corp-saas.com for every name under it): their addresses go through the VPN as they are resolved.")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            if form.tunnelMode != .split {
-                VStack(alignment: .leading, spacing: 4) {
-                    NotedList(title: "Outside the VPN", entries: $form.excludedDomains, kind: .pattern)
-                    Text("When the VPN takes all traffic: the names under these domains are resolved by the DNS in place before the VPN, and their addresses reached directly (video calls, say). Public addresses only.")
-                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            NotedList(title: "DNS domains resolved through this VPN", entries: $form.dnsDomains, kind: .domain)
             if !others.isEmpty {
                 Section("Connect Through") {
                     ForEach(others, id: \.0) { id, name in
@@ -1977,12 +2133,14 @@ private struct NetworkTab: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
-            Toggle("Allow networks that overlap another VPN's", isOn: $form.allowRouteOverlap)
-            Text("Without it, a VPN that would take traffic from another one is not connected.")
-                .font(.caption).foregroundStyle(.secondary)
-            Toggle("Company VPN: never at the same time as another VPN", isOn: $form.exclusive)
-            Text("Before it connects, the other VPNs are disconnected, after asking you. While it is up, the others wait.")
-                .font(.caption).foregroundStyle(.secondary)
+            Section {
+                Toggle("Allow networks that overlap another VPN's", isOn: $form.allowRouteOverlap)
+                Text("Without it, a VPN that would take traffic from another one is not connected.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Company VPN: never at the same time as another VPN", isOn: $form.exclusive)
+                Text("Before it connects, the other VPNs are disconnected, after asking you. While it is up, the others wait.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
     }

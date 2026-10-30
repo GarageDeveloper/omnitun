@@ -157,8 +157,6 @@ pub struct ProfileForm {
     pub compression: OpenVpnCompression,
     /// Data channel rekeying interval in seconds, 0 for never.
     pub reneg_sec: u32,
-    /// Networks added to those the server pushes.
-    pub extra_routes: Vec<ListEntry>,
     // L2TP: the PPP authentications accepted
     pub ppp_mschapv2: bool,
     pub ppp_chap: bool,
@@ -191,6 +189,8 @@ pub struct ProfileForm {
     pub tunnel_mode: TunnelMode,
     /// The networks of a connection in split mode; empty for none.
     pub split_routes: Vec<ListEntry>,
+    /// Networks added to those the gateway pushes.
+    pub extra_routes: Vec<ListEntry>,
     pub dns_domains: Vec<ListEntry>,
     /// Kept outside a full tunnel.
     pub excluded_domains: Vec<ListEntry>,
@@ -321,6 +321,7 @@ impl ProfileForm {
             Some(routes) => Some(noted_networks(routes)?),
         };
         profile.split_routes = noted_networks(&self.split_routes)?;
+        profile.extra_routes = noted_networks(&self.extra_routes)?;
         profile.full_tunnel = match self.tunnel_mode {
             TunnelMode::Automatic => None,
             TunnelMode::Full => Some(true),
@@ -404,7 +405,6 @@ impl ProfileForm {
             OpenVpnCompression::StubV2 => Compression::StubV2,
         };
         p.reneg_sec = self.reneg_sec;
-        p.extra_routes = noted_networks(&self.extra_routes)?;
         Ok(())
     }
 
@@ -873,7 +873,6 @@ impl From<&Profile> for ProfileForm {
             data_ciphers: openvpn.data_ciphers.clone(),
             compression: OpenVpnCompression::None,
             reneg_sec: openvpn.reneg_sec,
-            extra_routes: Vec::new(),
             ppp_mschapv2: true,
             ppp_chap: true,
             // It does not authenticate the server: only when asked for.
@@ -889,12 +888,15 @@ impl From<&Profile> for ProfileForm {
             local_public_key: None,
             client_certificate: None,
             routes: profile.routes.as_deref().map(entries),
+            // The profile's own networks make a split tunnel.
             tunnel_mode: match profile.full_tunnel {
+                None if profile.routes.is_some() => TunnelMode::Split,
                 None => TunnelMode::Automatic,
                 Some(true) => TunnelMode::Full,
                 Some(false) => TunnelMode::Split,
             },
             split_routes: entries(&profile.split_routes),
+            extra_routes: entries(&profile.extra_routes),
             dns_domains: entries(&profile.dns_domains),
             excluded_domains: entries(&profile.excluded_domains),
             allow_route_overlap: profile.allow_route_overlap,
@@ -990,7 +992,6 @@ impl From<&Profile> for ProfileForm {
                     Compression::StubV2 => OpenVpnCompression::StubV2,
                 };
                 form.reneg_sec = p.reneg_sec;
-                form.extra_routes = entries(&p.extra_routes);
             }
             ProtocolConfig::FortiSsl(FortiSslProfile {
                 host,
@@ -1411,6 +1412,24 @@ mod tests {
         assert_eq!(form.dns_domains[0].note, "Intranet");
         let saved = form.to_profile(Some(&base)).unwrap();
         assert_eq!((saved.split_routes.clone(), saved.dns_domains.clone()), (base.split_routes, base.dns_domains));
+    }
+
+    #[test]
+    fn routing_of_any_protocol() {
+        let base: Profile = toml::from_str(
+            "name = \"paris\"\nprotocol = \"forti-ssl\"\nhost = \"vpn.example.com\"\n\
+             extra_routes = [\"10.20.0.0/16\", \"*.corp.example\"]",
+        )
+        .unwrap();
+        let form = ProfileForm::from(&base);
+        assert_eq!((form.tunnel_mode, form.extra_routes.len()), (TunnelMode::Automatic, 2));
+        let saved = form.to_profile(Some(&base)).unwrap();
+        assert_eq!(saved.extra_routes, base.extra_routes, "networks added to the gateway's, whatever the protocol");
+        let own: Profile = toml::from_str(
+            "name = \"paris\"\nprotocol = \"forti-ssl\"\nhost = \"vpn.example.com\"\nroutes = [\"10.1.0.0/16\"]",
+        )
+        .unwrap();
+        assert_eq!(ProfileForm::from(&own).tunnel_mode, TunnelMode::Split, "its own networks: a split tunnel");
     }
 
     #[test]

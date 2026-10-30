@@ -284,7 +284,7 @@ impl Redactor {
             self.known.push((account, "<account>".into()));
         }
         // A routed domain's base also masks the names under it.
-        let routed = [profile.routes.as_deref().unwrap_or_default(), &profile.split_routes, profile.extra_routes()]
+        let routed = [profile.routes.as_deref().unwrap_or_default(), &profile.split_routes, &profile.extra_routes]
             .into_iter()
             .flat_map(vpn_core::destination::domains)
             .chain(profile.excluded_domains.iter().map(|d| &d.value))
