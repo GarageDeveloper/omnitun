@@ -10,10 +10,12 @@ use anyhow::Context;
 use plist::{Dictionary, Value};
 
 mod macos;
+mod openvpn_connect;
 mod ovpn;
 mod viscosity;
 mod wireguard;
 pub use macos::{MACOS_NETWORK_PREFERENCES, macos_vpns};
+pub use openvpn_connect::{OPENVPN_CONNECT_DIR, openvpn_connect};
 pub use ovpn::{MAX_SIZE as OPENVPN_MAX_SIZE, openvpn};
 pub use viscosity::{VISCOSITY_LIBRARY, viscosity};
 pub use wireguard::{WireGuardImport, is_wireguard, new_private_key, public_key, wireguard};
@@ -277,6 +279,20 @@ fn name_or(display: &str, fallback: &str) -> String {
     if name.is_empty() { fallback.into() } else { name }
 }
 
+/// The name of the profile among `existing` that the imported `toml`
+/// stands for already: same protocol, same server and port, whatever its
+/// name. A server shared by two VPNs on purpose matches too: only a hint.
+pub fn duplicate_of(toml: &str, existing: &[vpn_core::Profile]) -> Option<String> {
+    let file: vpn_core::ProfileFile = toml::from_str(toml).ok()?;
+    let same = |a: &vpn_core::ProtocolConfig, b: &vpn_core::ProtocolConfig| {
+        let ((host_a, port_a), (host_b, port_b)) = (a.endpoint(), b.endpoint());
+        a.name() == b.name() && port_a == port_b && host_a.eq_ignore_ascii_case(host_b)
+    };
+    file.profiles
+        .iter()
+        .find_map(|new| existing.iter().find(|old| same(&new.protocol, &old.protocol)).map(|old| old.name.clone()))
+}
+
 fn header(display: &str, kind: &str) -> String {
     let display: String = display.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
     format!("# Imported from FortiClient: \"{display}\" ({kind})\n[[profile]]\n")
@@ -395,6 +411,28 @@ mod tests {
         assert!(ssl.save_password && ssl.description.is_none());
         let needs_psk: Vec<_> = imported.iter().filter(|i| i.needs_psk).map(|i| i.name.as_str()).collect();
         assert_eq!(needs_psk, ["Branch IPsec"]);
+    }
+
+    #[test]
+    fn finds_the_profile_an_import_duplicates() {
+        let existing: ProfileFile = toml::from_str(
+            "[[profile]]\nname = \"Colt\"\nprotocol = \"ipsec\"\ngateway = \"203.0.113.68\"\n\
+             [[profile]]\nname = \"Jaguar\"\nprotocol = \"forti-ssl\"\nhost = \"VPN.example.org\"\nport = 4443\n\
+             [[profile]]\nname = \"Other port\"\nprotocol = \"forti-ssl\"\nhost = \"vpn.example.org\"\nport = 443\n",
+        )
+        .unwrap();
+        let imported = import(SAMPLE, "duplicates");
+        let duplicates: Vec<(&str, Option<String>)> =
+            imported.iter().map(|i| (i.name.as_str(), duplicate_of(&i.toml, &existing.profiles))).collect();
+        assert_eq!(
+            duplicates,
+            [("Branch IPsec", Some("Colt".into())), ("HQ SSL", Some("Jaguar".into()))],
+            "same protocol, server (any case) and port"
+        );
+        // The same server through another protocol is another VPN.
+        let ssl_only = &existing.profiles[1..];
+        assert_eq!(duplicate_of(&imported[0].toml, ssl_only), None);
+        assert_eq!(duplicate_of("not toml", &existing.profiles), None);
     }
 
     /// An old gateway's 3DES and group 2 are imported with the legacy

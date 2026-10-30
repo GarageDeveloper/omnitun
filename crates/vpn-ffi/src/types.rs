@@ -383,6 +383,8 @@ pub struct ImportedProfile {
     pub needs_password: bool,
     /// Why it cannot be imported (then `toml` is empty).
     pub refused: Option<String>,
+    /// The name of a profile that has the same server already.
+    pub duplicate_of: Option<String>,
 }
 
 impl From<vpn_client::import::Found> for ImportedProfile {
@@ -405,6 +407,7 @@ impl From<vpn_client::import::Found> for ImportedProfile {
                     needs_psk: i.needs_psk,
                     needs_password,
                     refused: None,
+                    duplicate_of: None,
                 }
             }
             Err(e) => Self {
@@ -414,6 +417,7 @@ impl From<vpn_client::import::Found> for ImportedProfile {
                 needs_psk: false,
                 needs_password: false,
                 refused: Some(format!("{e:#}")),
+                duplicate_of: None,
             },
         }
     }

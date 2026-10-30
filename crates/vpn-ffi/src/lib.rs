@@ -130,6 +130,17 @@ fn runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
+/// `imported` with the profile each one stands for already, if any.
+fn marked(imported: Vec<ImportedProfile>, existing: &[vpn_core::Profile]) -> Vec<ImportedProfile> {
+    imported
+        .into_iter()
+        .map(|mut i| {
+            i.duplicate_of = vpn_client::import::duplicate_of(&i.toml, existing);
+            i
+        })
+        .collect()
+}
+
 #[derive(uniffi::Object)]
 pub struct Client {
     store: Arc<ProfileStore>,
@@ -229,61 +240,84 @@ impl Client {
 
     /// Reads FortiClient's profiles (macOS); nothing is written.
     pub fn import_forticlient(&self, path: Option<String>) -> Result<Vec<ImportedProfile>, ClientError> {
+        let existing = self.store.load()?;
         let path = path.map(PathBuf::from).unwrap_or_else(|| vpn_client::import::FORTICLIENT_PLIST.into());
-        Ok(vpn_client::import::forticlient(&path)?
-            .into_iter()
-            .map(|i| ImportedProfile {
-                name: i.name,
-                toml: i.toml,
-                notes: i.notes,
-                needs_psk: i.needs_psk,
-                needs_password: false,
-                refused: None,
-            })
-            .collect())
+        Ok(marked(
+            vpn_client::import::forticlient(&path)?
+                .into_iter()
+                .map(|i| ImportedProfile {
+                    name: i.name,
+                    toml: i.toml,
+                    notes: i.notes,
+                    needs_psk: i.needs_psk,
+                    needs_password: false,
+                    refused: None,
+                    duplicate_of: None,
+                })
+                .collect(),
+            &existing,
+        ))
     }
 
     /// Reads an OpenVPN configuration (.ovpn, .conf) and the files it
     /// names; nothing is written. The profile is renamed if its name is
     /// taken.
     pub fn import_openvpn(&self, path: String) -> Result<Vec<ImportedProfile>, ClientError> {
-        let existing: Vec<String> = self.store.load()?.into_iter().map(|p| p.name).collect();
-        let imported = vpn_client::import::openvpn(std::path::Path::new(&path), &existing)?;
+        let existing = self.store.load()?;
+        let names: Vec<String> = existing.iter().map(|p| p.name.clone()).collect();
+        let imported = vpn_client::import::openvpn(std::path::Path::new(&path), &names)?;
         let file: vpn_core::ProfileFile = toml::from_str(&imported.toml).map_err(anyhow::Error::from)?;
         let needs_password =
             file.profiles.iter().any(|p| matches!(&p.protocol, ProtocolConfig::OpenVpn(o) if o.auth_user_pass));
-        Ok(vec![ImportedProfile {
-            name: imported.name,
-            toml: imported.toml,
-            notes: imported.notes,
-            needs_psk: false,
-            needs_password,
-            refused: None,
-        }])
+        Ok(marked(
+            vec![ImportedProfile {
+                name: imported.name,
+                toml: imported.toml,
+                notes: imported.notes,
+                needs_psk: false,
+                needs_password,
+                refused: None,
+                duplicate_of: None,
+            }],
+            &existing,
+        ))
     }
 
     /// Viscosity's connections (its library when `path` is None, or an
     /// exported `.visc` folder); those that cannot be imported say why.
     pub fn import_viscosity(&self, path: Option<String>) -> Result<Vec<ImportedProfile>, ClientError> {
-        let existing: Vec<String> = self.store.load()?.into_iter().map(|p| p.name).collect();
-        let found = vpn_client::import::viscosity(path.as_deref().map(std::path::Path::new), &existing)?;
-        Ok(found.into_iter().map(ImportedProfile::from).collect())
+        let existing = self.store.load()?;
+        let names: Vec<String> = existing.iter().map(|p| p.name.clone()).collect();
+        let found = vpn_client::import::viscosity(path.as_deref().map(std::path::Path::new), &names)?;
+        Ok(marked(found.into_iter().map(ImportedProfile::from).collect(), &existing))
+    }
+
+    /// OpenVPN Connect's profiles (its folder when `path` is None); those
+    /// that cannot be imported say why.
+    pub fn import_openvpn_connect(&self, path: Option<String>) -> Result<Vec<ImportedProfile>, ClientError> {
+        let existing = self.store.load()?;
+        let names: Vec<String> = existing.iter().map(|p| p.name.clone()).collect();
+        let found = vpn_client::import::openvpn_connect(path.as_deref().map(std::path::Path::new), &names)?;
+        Ok(marked(found.into_iter().map(ImportedProfile::from).collect(), &existing))
     }
 
     /// The VPNs of macOS's System Settings (`path`: another network
     /// configuration file, for tests); those that cannot be imported say why.
     pub fn import_macos(&self, path: Option<String>) -> Result<Vec<ImportedProfile>, ClientError> {
-        let existing: Vec<String> = self.store.load()?.into_iter().map(|p| p.name).collect();
-        let found = vpn_client::import::macos_vpns(path.as_deref().map(std::path::Path::new), &existing)?;
-        Ok(found.into_iter().map(ImportedProfile::from).collect())
+        let existing = self.store.load()?;
+        let names: Vec<String> = existing.iter().map(|p| p.name.clone()).collect();
+        let found = vpn_client::import::macos_vpns(path.as_deref().map(std::path::Path::new), &names)?;
+        Ok(marked(found.into_iter().map(ImportedProfile::from).collect(), &existing))
     }
 
     /// What adding the WireGuard configuration at `path` would give; its
     /// keys stay out of it.
     pub fn import_wireguard(&self, path: String) -> Result<ImportedProfile, ClientError> {
-        let existing: Vec<String> = self.store.load()?.into_iter().map(|p| p.name).collect();
-        let import = vpn_client::import::wireguard(std::path::Path::new(&path), &existing)?;
+        let existing = self.store.load()?;
+        let names: Vec<String> = existing.iter().map(|p| p.name.clone()).collect();
+        let import = vpn_client::import::wireguard(std::path::Path::new(&path), &names)?;
         let i = import.imported;
+        let duplicate_of = vpn_client::import::duplicate_of(&i.toml, &existing);
         Ok(ImportedProfile {
             name: i.name,
             toml: i.toml,
@@ -291,6 +325,7 @@ impl Client {
             needs_psk: false,
             needs_password: false,
             refused: None,
+            duplicate_of,
         })
     }
 

@@ -328,6 +328,12 @@
 "Viscosity's passwords stay in its own Keychain items. A password typed here is saved in the Keychain; otherwise it is asked at the first connection." = "Les mots de passe de Viscosity restent dans ses propres éléments du Trousseau. Un mot de passe saisi ici est enregistré dans le Trousseau ; sinon il vous sera demandé à la première connexion.";
 "Import from Viscosity" = "Importer depuis Viscosity";
 "From Viscosity…" = "Depuis Viscosity…";
+"Import from OpenVPN Connect" = "Importer depuis OpenVPN Connect";
+"From OpenVPN Connect…" = "Depuis OpenVPN Connect…";
+"OpenVPN Connect Profiles Found" = "Profils OpenVPN Connect trouvés";
+"No OpenVPN Connect profile on this Mac." = "Aucun profil OpenVPN Connect sur ce Mac.";
+"OpenVPN Connect's passwords stay in its own Keychain items. A password typed here is saved in the Keychain; otherwise it is asked at the first connection." = "Les mots de passe d’OpenVPN Connect restent dans ses propres éléments du Trousseau. Un mot de passe saisi ici est enregistré dans le Trousseau ; sinon il vous sera demandé à la première connexion.";
+"Same server as %@, already added" = "Même serveur que %@, déjà présent";
 "Cannot rename “%@”" = "Impossible de renommer « %@ »";
 "Cannot duplicate “%@”" = "Impossible de dupliquer « %@ »";
 "The saved secrets of “%@” were not copied" = "Les secrets enregistrés de « %@ » n'ont pas été copiés";

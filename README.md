@@ -38,8 +38,8 @@ Beyond connecting:
 
 On macOS, a menu bar app (English and French) creates, imports and runs
 the VPNs; `omnitunctl` does the same from a terminal, on macOS and Linux.
-It imports the VPNs of FortiClient, Viscosity, System Settings (Cisco
-IPSec and L2TP), `.ovpn` files and WireGuard `.conf` files.
+It imports the VPNs of FortiClient, Viscosity, OpenVPN Connect, System
+Settings (Cisco IPSec and L2TP), `.ovpn` files and WireGuard `.conf` files.
 
 > Omnitun is an independent project. It is not affiliated with or endorsed
 > by Fortinet, Cisco, OpenVPN Inc., Jason A. Donenfeld (WireGuard) or any

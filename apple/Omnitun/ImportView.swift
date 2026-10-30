@@ -8,13 +8,14 @@ import VPNClientCore
 
 /// Where an import reads the profiles of another VPN client.
 enum ImportSource {
-    case fortiClient, viscosity, macOS
+    case fortiClient, viscosity, openVpnConnect, macOS
 
     /// The import window's key.
     var window: String {
         switch self {
         case .fortiClient: "import"
         case .viscosity: "import-viscosity"
+        case .openVpnConnect: "import-openvpn-connect"
         case .macOS: "import-macos"
         }
     }
@@ -23,6 +24,7 @@ enum ImportSource {
         switch self {
         case .fortiClient: "FortiClient Profiles Found"
         case .viscosity: "Viscosity Connections Found"
+        case .openVpnConnect: "OpenVPN Connect Profiles Found"
         case .macOS: "macOS VPNs Found"
         }
     }
@@ -31,6 +33,7 @@ enum ImportSource {
         switch self {
         case .fortiClient: "No FortiClient profile on this Mac."
         case .viscosity: "No Viscosity connection on this Mac."
+        case .openVpnConnect: "No OpenVPN Connect profile on this Mac."
         case .macOS: "No VPN in System Settings that can be imported."
         }
     }
@@ -41,6 +44,8 @@ enum ImportSource {
             "FortiClient's passwords and pre-shared keys cannot be read. A pre-shared key typed here is saved in the Keychain; the others are asked at the first connection."
         case .viscosity:
             "Viscosity's passwords stay in its own Keychain items. A password typed here is saved in the Keychain; otherwise it is asked at the first connection."
+        case .openVpnConnect:
+            "OpenVPN Connect's passwords stay in its own Keychain items. A password typed here is saved in the Keychain; otherwise it is asked at the first connection."
         case .macOS:
             "The shared secrets and passwords of System Settings stay in the System keychain. Those typed here are saved in your Keychain; the others are asked at the first connection."
         }
@@ -70,6 +75,9 @@ struct ImportView: View {
     /// By source; one source failing does not hide the others.
     @State private var errors: [ImportSource: String] = [:]
     @State private var loaded = false
+    /// The sections' height: the list takes it, within bounds, so that the
+    /// window grows with what `load` finds.
+    @State private var listHeight: CGFloat = 0
 
     private var known: Set<String> { Set(model.profiles.map(\.name)) }
     private var window: String { setup ? Windows.setupKey : sources[0].window }
@@ -95,8 +103,9 @@ struct ImportView: View {
                         ForEach(shown, id: \.self) { source in section(source) }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { listHeight = $0 }
                 }
-                .frame(minHeight: 120, maxHeight: setup ? 420 : 320)
+                .frame(height: min(max(listHeight, 120), setup ? 420 : 320))
             }
             HStack {
                 if setup {
@@ -150,6 +159,8 @@ struct ImportView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 } else if exists {
                     Text("Already added").font(.caption).foregroundStyle(.secondary)
+                } else if let other = profile.duplicateOf {
+                    Text("Same server as \(other), already added").font(.caption).foregroundStyle(.secondary)
                 }
                 ForEach(profile.notes, id: \.self) { note in
                     Text(note).font(.caption).foregroundStyle(.secondary)
@@ -197,6 +208,7 @@ struct ImportView: View {
                 let profiles = switch source {
                 case .fortiClient: try model.client.importForticlient(path: nil)
                 case .viscosity: try model.client.importViscosity(path: nil)
+                case .openVpnConnect: try model.client.importOpenvpnConnect(path: nil)
                 case .macOS: try model.client.importMacos(path: nil)
                 }
                 found += profiles.map { Found(source: source, profile: $0) }
@@ -204,9 +216,12 @@ struct ImportView: View {
                 errors[source] = describe(error)
             }
         }
-        // The first of each name not added yet.
+        // The first of each name not added yet, unless its server is: it
+        // may be the same VPN under another name.
         var names = known
-        chosen = Set(found.filter { $0.profile.refused == nil && names.insert($0.profile.name).inserted }.map(\.id))
+        chosen = Set(found.filter {
+            $0.profile.refused == nil && $0.profile.duplicateOf == nil && names.insert($0.profile.name).inserted
+        }.map(\.id))
         loaded = true
     }
 

@@ -146,6 +146,12 @@ final class Windows {
         }
     }
 
+    func showOpenVpnConnectImport(model: AppModel) {
+        show(ImportSource.openVpnConnect.window, title: String(localized: "Import from OpenVPN Connect")) {
+            ImportView(model: model, sources: [.openVpnConnect])
+        }
+    }
+
     static let setupKey = "setup"
 
     /// The first-launch assistant: what other VPN apps of this Mac hold,
@@ -153,7 +159,7 @@ final class Windows {
     func showSetup(model: AppModel) {
         Settings.offeredImport = true
         show(Self.setupKey, title: String(localized: "Welcome to \(brand.product)")) {
-            ImportView(model: model, sources: [.fortiClient, .viscosity, .macOS], setup: true)
+            ImportView(model: model, sources: [.fortiClient, .viscosity, .openVpnConnect, .macOS], setup: true)
         }
     }
 
