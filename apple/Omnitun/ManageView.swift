@@ -515,6 +515,7 @@ struct ManageView: View {
                         Button("OpenVPN or WireGuard File (.ovpn, .conf)…") { Windows.shared.importOpenVpn(model: model) }
                         Button("From FortiClient…") { Windows.shared.showImport(model: model) }
                         Button("From Viscosity…") { Windows.shared.showViscosityImport(model: model) }
+                        Button("From OpenVPN Connect…") { Windows.shared.showOpenVpnConnectImport(model: model) }
                         Button("From System Settings…") { Windows.shared.showMacImport(model: model) }
                     }
                     .fixedSize()

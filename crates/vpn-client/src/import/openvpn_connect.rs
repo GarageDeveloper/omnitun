@@ -34,6 +34,7 @@ pub fn openvpn_connect(path: Option<&Path>, existing: &[String]) -> anyhow::Resu
         .collect();
     // Ids are the import times, in milliseconds.
     files.sort_by_key(|(id, _)| (id.parse::<u64>().unwrap_or(u64::MAX), id.clone()));
+    let skipped = files.len().saturating_sub(MAX_PROFILES);
     files.truncate(MAX_PROFILES);
     // Without its names, the profiles are still worth offering.
     let names = names(&dir.join("config.json")).unwrap_or_default();
@@ -48,6 +49,13 @@ pub fn openvpn_connect(path: Option<&Path>, existing: &[String]) -> anyhow::Resu
             taken.push(imported.name.clone());
         }
         out.push(Found { display, result });
+    }
+    // Said, not silently dropped: the most recent are the ones left out.
+    if skipped > 0 {
+        out.push(Found {
+            display: format!("{skipped} more"),
+            result: Err(anyhow::anyhow!("not read: at most {MAX_PROFILES} profiles are imported at a time")),
+        });
     }
     Ok(out)
 }
@@ -98,7 +106,11 @@ fn names(config: &Path) -> anyhow::Result<HashMap<String, String>> {
             let shown = [entry.profile_display_name, entry.name]
                 .into_iter()
                 .flatten()
-                .map(|n| n.chars().filter(|c| !c.is_control()).take(128).collect::<String>().trim().to_owned())
+                .map(|n| {
+                    let n: String =
+                        n.chars().filter(|c| !c.is_control() && !vpn_core::is_invisible(*c)).take(128).collect();
+                    n.trim().to_owned()
+                })
                 .find(|n| !n.is_empty())?;
             Some((id, shown))
         })
@@ -164,6 +176,32 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].result.as_ref().unwrap().name, "1740075380760");
+    }
+
+    #[test]
+    fn says_when_profiles_are_left_out() {
+        let ids: Vec<String> = (0..MAX_PROFILES as u64 + 2).map(|i| (1_740_000_000_000 + i).to_string()).collect();
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let dir = folder("many", &ids, None);
+        let found = openvpn_connect(Some(&dir), &[]).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(found.len(), MAX_PROFILES + 1);
+        let last = found.last().unwrap();
+        assert_eq!(last.display, "2 more");
+        let Err(e) = &last.result else { panic!("a profile left out is not imported") };
+        assert!(format!("{e:#}").contains("at most 64"));
+    }
+
+    #[test]
+    fn names_without_invisible_characters() {
+        let dir = folder(
+            "invisible",
+            &["1740075380760"],
+            Some(serde_json::json!({ "1740075380760": { "profileDisplayName": "Ro\u{202e}aming\u{200b}" } })),
+        );
+        let found = openvpn_connect(Some(&dir), &[]).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(found[0].display, "Roaming");
     }
 
     #[test]

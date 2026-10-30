@@ -172,6 +172,7 @@ enum ImportSource {
     /// OpenVPN Connect's profiles: its folder, or another of the same
     /// layout.
     OpenvpnConnect {
+        #[arg(value_hint = ValueHint::DirPath)]
         path: Option<PathBuf>,
         /// Append to the profiles file instead of printing.
         #[arg(long)]

@@ -146,6 +146,12 @@ final class Windows {
         }
     }
 
+    func showOpenVpnConnectImport(model: AppModel) {
+        show(ImportSource.openVpnConnect.window, title: String(localized: "Import from OpenVPN Connect")) {
+            ImportView(model: model, sources: [.openVpnConnect])
+        }
+    }
+
     static let setupKey = "setup"
 
     /// The first-launch assistant: what other VPN apps of this Mac hold,
