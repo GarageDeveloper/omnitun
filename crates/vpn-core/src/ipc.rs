@@ -134,6 +134,9 @@ pub enum Event {
         sessions: Vec<SessionInfo>,
     },
     Done,
+    /// To watchers: the daemon is stopping (an update, a restart). The
+    /// sessions it closes next were not ended by their users.
+    Stopping,
     Error {
         message: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]

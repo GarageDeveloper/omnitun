@@ -468,6 +468,10 @@ impl Client {
                             }
                             sessions.sort_by(|a, b| a.name.cmp(&b.name));
                         }
+                        Event::Stopping => {
+                            observer.stopping();
+                            continue;
+                        }
                         Event::Error { message, failure } => {
                             return Err(vpn_core::failure(failure.unwrap_or(FailureKind::Other), message));
                         }
@@ -509,6 +513,9 @@ pub trait ConnectionDelegate: Send + Sync {
 pub trait SessionObserver: Send + Sync {
     fn sessions(&self, sessions: Vec<Session>);
     fn changed(&self, change: StateChange);
+    /// The daemon is stopping (an update, a restart): the sessions that end
+    /// next were not ended by their users.
+    fn stopping(&self);
     /// The daemon went away or refused; subscribe again later.
     fn stopped(&self, error: Option<ClientError>);
 }

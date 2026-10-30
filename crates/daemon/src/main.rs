@@ -181,6 +181,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     tracing::info!("shutting down, closing all sessions");
+    manager.stopping();
     // Each engine gets a few seconds to say goodbye; past the deadline the
     // daemon exits anyway, well before launchd or systemd would kill it,
     // and the next start removes what is left.
@@ -248,7 +249,7 @@ impl Drop for Slot {
 }
 
 /// Optional capabilities announced in `Hello`.
-const FEATURES: &[&str] = &["watch", "shutdown", "trust_certificate", "failure_kinds", "prompt_socket"];
+const FEATURES: &[&str] = &["watch", "shutdown", "trust_certificate", "failure_kinds", "prompt_socket", "stopping"];
 
 fn failed(e: anyhow::Error) -> Event {
     Event::Error { message: format!("{e:#}"), failure: Some(vpn_core::failure::kind_of(&e)) }

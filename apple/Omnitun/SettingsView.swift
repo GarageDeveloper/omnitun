@@ -67,6 +67,7 @@ private struct AboutView: View {
 private struct GeneralSettings: View {
     @State private var openAtLogin = LoginItem.isEnabled
     @State private var disconnectOnQuit = Settings.disconnectOnQuit
+    @State private var reconnectAfterUpdate = Settings.reconnectAfterUpdate
     @State private var notifyConnected = Settings.notifyConnected
     @State private var notifyFailures = Settings.notifyFailures
     @State private var language = Settings.language
@@ -84,6 +85,8 @@ private struct GeneralSettings: View {
                     .onChange(of: disconnectOnQuit) { _, on in Settings.disconnectOnQuit = on }
                 Text("Without the app, a code or a browser login cannot be asked again when a VPN reconnects.")
                     .font(.caption).foregroundStyle(.secondary)
+                Toggle("Reconnect VPNs after an update", isOn: $reconnectAfterUpdate)
+                    .onChange(of: reconnectAfterUpdate) { _, on in Settings.reconnectAfterUpdate = on }
                 if Updates.shared.available {
                     Toggle("Check for updates every day", isOn: $checkUpdates)
                         .onChange(of: checkUpdates) { _, on in Updates.shared.checksAutomatically = on }

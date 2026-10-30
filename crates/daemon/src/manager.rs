@@ -100,7 +100,8 @@ impl Default for Manager {
 
 #[derive(Clone)]
 struct Watched {
-    owner: u32,
+    /// `None`: for every watcher.
+    owner: Option<u32>,
     event: Event,
 }
 
@@ -261,6 +262,12 @@ impl Manager {
 
     /// Closes every session at once: the service manager kills the daemon
     /// if stopping takes too long, so teardowns must not queue up.
+    /// Tells every watcher that the sessions are about to close because the
+    /// daemon stops: clients bring them back after an update.
+    pub fn stopping(&self) {
+        let _ = self.events.send(Watched { owner: None, event: Event::Stopping });
+    }
+
     pub async fn disconnect_all(&self) {
         let tasks: Vec<_> = {
             let mut sessions = self.sessions.lock().unwrap();
@@ -295,7 +302,7 @@ impl Manager {
                     _ = link.closed() => return,
                 };
                 match watched {
-                    Ok(w) if uid == 0 || w.owner == uid => {
+                    Ok(w) if uid == 0 || w.owner.is_none_or(|owner| owner == uid) => {
                         if !link.send(w.event) {
                             return;
                         }
@@ -436,7 +443,7 @@ impl Runner {
             None => tracing::info!(session = self.profile.name, "{state:?}"),
         }
         let event = Event::State { id: self.profile.id.clone(), state, detail, failure, retry };
-        let _ = self.manager.events.send(Watched { owner: self.owner, event: event.clone() });
+        let _ = self.manager.events.send(Watched { owner: Some(self.owner), event: event.clone() });
         self.client.notify(event);
     }
 
@@ -1224,6 +1231,20 @@ mod tests {
         assert!(timeout(Duration::from_millis(200), theirs_rx.recv()).await.is_err(), "another user's session leaked");
     }
 
+    #[tokio::test]
+    async fn every_watcher_hears_that_the_daemon_stops() {
+        let m = Arc::new(Manager::default());
+        let (mine, mut mine_rx) = client();
+        let (theirs, mut theirs_rx) = client();
+        m.watch(1000, mine);
+        m.watch(1001, theirs);
+        assert!(matches!(next_event(&mut mine_rx).await, Event::Status { .. }));
+        assert!(matches!(next_event(&mut theirs_rx).await, Event::Status { .. }));
+        m.stopping();
+        assert!(matches!(next_event(&mut mine_rx).await, Event::Stopping));
+        assert!(matches!(next_event(&mut theirs_rx).await, Event::Stopping));
+    }
+
     #[test]
     fn the_prompt_directory_must_be_private_to_root() {
         use std::os::unix::fs::PermissionsExt;
@@ -1596,7 +1617,7 @@ mod tests {
         fake_session(&m, "paris", 1000);
         for i in 0..WATCH_QUEUE + 10 {
             let event = Event::Warning { message: i.to_string() };
-            let _ = m.events.send(Watched { owner: 1000, event });
+            let _ = m.events.send(Watched { owner: Some(1000), event });
         }
         let Some(Event::Status { sessions }) = timeout(Duration::from_secs(2), rx.recv()).await.unwrap() else {
             panic!("expected the status first")

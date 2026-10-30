@@ -262,7 +262,11 @@ async fn connect_one(
                 });
             }
             Event::Error { message, failure } => return Err(crate::daemon::error(message, failure)),
-            Event::Prompt { .. } | Event::OpenUrl { .. } | Event::Status { .. } | Event::Hello { .. } => {}
+            Event::Prompt { .. }
+            | Event::OpenUrl { .. }
+            | Event::Status { .. }
+            | Event::Hello { .. }
+            | Event::Stopping => {}
         }
     }
 }

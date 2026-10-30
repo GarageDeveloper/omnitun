@@ -27,6 +27,7 @@ override the system language.
 ```sh
 apple/build-bindings.sh              # Swift bindings + universal Rust library
 swift run --package-path apple Smoke # checks the bindings
+swift test --package-path apple      # the app's unit tests
 swift build --package-path apple     # the app alone
 apple/package.sh                     # apple/dist/Omnitun.app and Omnitun-<version>.pkg
 ```
@@ -47,6 +48,14 @@ The app checks the `appcast.xml` of the latest GitHub Release of
 builds for another repository) and offers the new version; the package is
 installed only if the user accepts, with an administrator password. Menu
 “Check for Updates…”, setting in Settings › General.
+
+Installing stops the service, which closes the tunnels. The app then
+connects again the VPNs that were up, the same way (directly or through
+their chain, in split mode or not), unless “Reconnect VPNs after an update”
+is off. It keeps only their ids and options in its preferences, never a
+secret; the service's `stopping` event tells it the sessions that close
+next were not ended by their users. A quit or a crash without an update
+connects nothing.
 
 ```sh
 apple/release.sh             # apple/dist/release/: notarized package, signed appcast.xml; publishes nothing

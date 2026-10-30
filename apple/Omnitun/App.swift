@@ -81,6 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         statusMenu = StatusMenu(model: model)
         model.start()
+        Updates.shared.willInstall = { [weak model] in model?.holdRecord() }
         Updates.shared.start()
         for url in pendingFiles { open(url, model: model) }
         pendingFiles = []
@@ -129,6 +130,17 @@ enum Settings {
     static var disconnectOnQuit: Bool {
         get { defaults.object(forKey: "disconnectOnQuit") as? Bool ?? true }
         set { defaults.set(newValue, forKey: "disconnectOnQuit") }
+    }
+
+    static var reconnectAfterUpdate: Bool {
+        get { defaults.object(forKey: "reconnectAfterUpdate") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "reconnectAfterUpdate") }
+    }
+
+    /// The VPNs up at the last look, to connect again after an update.
+    static var upSessions: UpSessions? {
+        get { defaults.data(forKey: "upSessions").flatMap { try? JSONDecoder().decode(UpSessions.self, from: $0) } }
+        set { defaults.set(newValue.flatMap { try? JSONEncoder().encode($0) }, forKey: "upSessions") }
     }
 
     static var notifyConnected: Bool {
@@ -183,6 +195,20 @@ enum Settings {
 
     /// Set while restarting the app, which must not disconnect the VPNs.
     @MainActor static var relaunching = false
+}
+
+/// The VPNs that were up, how they were connected, and which version of
+/// the app saw them up and when: only ids and options, never a secret.
+struct UpSessions: Codable, Equatable {
+    struct Entry: Codable, Equatable {
+        var id: String
+        var direct: Bool
+        var split: Bool
+    }
+
+    var version: String
+    var at: Date
+    var sessions: [Entry]
 }
 
 /// The routing a gateway announced, and when.

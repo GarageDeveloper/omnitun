@@ -72,5 +72,6 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: apple/build-bindings.sh
       - run: swift build --package-path apple --product Omnitun
+      - run: swift test --package-path apple
       # The bindings, without the app or a running service.
       - run: swift run --package-path apple Smoke

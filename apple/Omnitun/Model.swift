@@ -35,6 +35,13 @@ final class AppModel: ObservableObject {
 
     func secretsDidChange() { secretsChanged += 1 }
 
+    /// The VPNs to connect again once the service answers: those up when
+    /// the previous version stopped for an update.
+    private var resuming: [UpSessions.Entry]?
+    /// The service is stopping or the app is being updated: the sessions
+    /// closing now are to come back, so what is up is no longer recorded.
+    private var stopping = false
+
     private var subscription: VPNClientCore.Subscription?
     private var watchRetry: Task<Void, Never>?
 
@@ -54,6 +61,14 @@ final class AppModel: ObservableObject {
     func start() {
         Notifier.shared.setUp()
         reloadProfiles()
+        resuming = Self.toResume(Settings.upSessions, version: Self.version, now: Date())
+        if resuming != nil {
+            // A service that never answers: nothing comes back later.
+            Task {
+                try? await Task.sleep(for: .seconds(120))
+                resuming = nil
+            }
+        }
         watch()
     }
 
@@ -121,6 +136,8 @@ final class AppModel: ObservableObject {
 
     private func watch() {
         watchRetry?.cancel()
+        // A new service: what it reports is recorded again.
+        stopping = false
         subscription = client.watch(observer: Observer(model: self))
         refreshService()
     }
@@ -145,6 +162,11 @@ final class AppModel: ObservableObject {
             retries[id] = nil
         }
         if case .running = service {} else { refreshService() }
+        if let entries = resuming {
+            resuming = nil
+            resume(entries)
+        }
+        recordUp()
     }
 
     fileprivate func changed(_ change: StateChange) {
@@ -183,6 +205,66 @@ final class AppModel: ObservableObject {
             try? await Task.sleep(for: .seconds(5))
             if !Task.isCancelled { watch() }
         }
+    }
+
+    // MARK: Reconnecting after an update
+
+    private static let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+
+    /// What to connect again at launch: the VPNs a previous version saw up
+    /// shortly before it stopped. A crash or a quit without an update
+    /// connects nothing.
+    nonisolated static func toResume(_ up: UpSessions?, version: String?, now: Date) -> [UpSessions.Entry]? {
+        guard let up, let version, up.version != version, !up.sessions.isEmpty,
+              now.timeIntervalSince(up.at) < 15 * 60, now >= up.at else { return nil }
+        return up.sessions
+    }
+
+    /// Records the VPNs up now, unless the service is stopping.
+    private func recordUp() {
+        guard !stopping else { return }
+        guard Settings.reconnectAfterUpdate, let version = Self.version else {
+            Settings.upSessions = nil
+            return
+        }
+        let up = sessions.values
+            .filter { [.connected, .reconnecting].contains($0.state) }
+            .map { session in
+                let options = lastOptions[session.id]
+                    ?? (session.via == nil && !(profile(session.id)?.via.isEmpty ?? true), isSplit(session.id))
+                return UpSessions.Entry(id: session.id, direct: options.direct, split: options.split)
+            }
+            .sorted { $0.id < $1.id }
+        let old = Settings.upSessions
+        guard old?.sessions != up || old?.version != version else { return }
+        Settings.upSessions = UpSessions(version: version, at: Date(), sessions: up)
+    }
+
+    /// Keeps the record as it is while the sessions close, dated now.
+    func holdRecord() {
+        stopping = true
+        if var up = Settings.upSessions {
+            up.at = Date()
+            Settings.upSessions = up
+        }
+    }
+
+    private func resume(_ entries: [UpSessions.Entry]) {
+        let todo = Self.resumable(entries, known: Set(profiles.map(\.id)), via: { [weak self] in self?.profile($0)?.via ?? [] })
+            .filter { !isOn($0.id) }
+        guard !todo.isEmpty else { return }
+        Notifier.shared.post(
+            title: String(localized: "Reconnecting after the update"),
+            body: todo.map { displayName($0.id) }.formatted(.list(type: .and)))
+        for entry in todo { connect(entry.id, direct: entry.direct, split: entry.split) }
+    }
+
+    /// The entries to connect, profiles that still exist only: a VPN that
+    /// another one goes through comes back with it.
+    nonisolated static func resumable(_ entries: [UpSessions.Entry], known: Set<String>, via: (String) -> [String]) -> [UpSessions.Entry] {
+        let present = entries.filter { known.contains($0.id) }
+        let chained = Set(present.filter { !$0.direct }.flatMap { via($0.id) })
+        return present.filter { !chained.contains($0.id) }
     }
 
     // MARK: Actions
@@ -431,6 +513,10 @@ private final class Observer: SessionObserver, @unchecked Sendable {
 
     func changed(change: StateChange) {
         DispatchQueue.main.async { MainActor.assumeIsolated { self.model?.changed(change) } }
+    }
+
+    func stopping() {
+        DispatchQueue.main.async { MainActor.assumeIsolated { self.model?.holdRecord() } }
     }
 
     func stopped(error: ClientError?) {
