@@ -928,13 +928,13 @@ mod tests {
         );
     }
 
-    /// `*.r4u.be` included with `r4u.be` as the tunnel's search domain: the
+    /// `*.example.net` included with `example.net` as the tunnel's search domain: the
     /// proxy takes it, and what is under it.
     #[test]
     fn the_proxy_takes_the_tunnels_domains_under_its_own() {
-        let domains = ["r4u.be".to_owned(), "eu.r4u.be".to_owned(), "corp.example".to_owned()];
-        assert_eq!(super::not_taken(&domains, &["r4u.be".into()]), [&domains[2]]);
-        assert_eq!(super::not_taken(&domains, &["app.r4u.be".into()]).len(), 3, "a narrower one takes nothing");
+        let domains = ["example.net".to_owned(), "eu.example.net".to_owned(), "corp.example".to_owned()];
+        assert_eq!(super::not_taken(&domains, &["example.net".into()]), [&domains[2]]);
+        assert_eq!(super::not_taken(&domains, &["app.example.net".into()]).len(), 3, "a narrower one takes nothing");
         assert_eq!(super::not_taken(&domains, &[]).len(), 3);
     }
 
