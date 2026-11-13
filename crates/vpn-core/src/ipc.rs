@@ -11,10 +11,15 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::auto_disconnect::Planned;
 use crate::{FailureKind, Profile, Prompt, brand};
 
 /// Bumped on incompatible changes; both sides refuse a different version.
 pub const PROTOCOL_VERSION: u32 = 3;
+
+/// The client feature and daemon capability of automatic disconnection:
+/// `Expiring` events and `Postpone` requests.
+pub const AUTO_DISCONNECT: &str = "auto_disconnect";
 
 pub fn socket_path() -> String {
     std::env::var(brand::SOCKET_ENV).unwrap_or_else(|_| brand::default_socket())
@@ -44,6 +49,11 @@ pub enum Request {
         /// e.g. "omnitunctl", "Omnitun.app".
         client: String,
         version: String,
+        /// Events the client understands beyond those of the protocol
+        /// version (`auto_disconnect`): an older client, which would fail
+        /// on them, is not sent them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
     },
     Connect {
         profile: Box<Profile>,
@@ -66,6 +76,12 @@ pub enum Request {
     /// Keep the connection open and receive `State` events for every
     /// session of the caller, after an initial `Status`.
     Watch,
+    /// Puts off the automatic disconnection of a session: the time
+    /// connected starts again, a time of day moves an hour later.
+    /// `id`: the session's profile id.
+    Postpone {
+        id: String,
+    },
     /// Disconnect everything and exit, so the service manager restarts the
     /// daemon (after an update). Root, or the owner of every session.
     Shutdown,
@@ -75,11 +91,12 @@ pub enum Request {
 impl std::fmt::Debug for Request {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Request::Hello { protocol, client, version } => f
+            Request::Hello { protocol, client, version, features } => f
                 .debug_struct("Hello")
                 .field("protocol", protocol)
                 .field("client", client)
                 .field("version", version)
+                .field("features", features)
                 .finish(),
             Request::Connect { profile, via } => {
                 f.debug_struct("Connect").field("profile", profile).field("via", via).finish()
@@ -87,6 +104,7 @@ impl std::fmt::Debug for Request {
             Request::Watch => f.write_str("Watch"),
             Request::Shutdown => f.write_str("Shutdown"),
             Request::Disconnect { id } => f.debug_struct("Disconnect").field("id", id).finish(),
+            Request::Postpone { id } => f.debug_struct("Postpone").field("id", id).finish(),
             Request::Status => f.write_str("Status"),
             Request::Answer { id, value } => {
                 f.debug_struct("Answer").field("id", id).field("value", &value.as_ref().map(|_| "<redacted>")).finish()
@@ -132,6 +150,13 @@ pub enum Event {
     },
     Status {
         sessions: Vec<SessionInfo>,
+    },
+    /// To watchers: session `id` disconnects by itself soon, unless
+    /// postponed (`Postpone`) or, for idleness, the user comes back.
+    /// Sent to clients that announced the `auto_disconnect` feature only.
+    Expiring {
+        id: String,
+        planned: Planned,
     },
     Done,
     /// To watchers: the daemon is stopping (an update, a restart). The
@@ -224,6 +249,9 @@ pub struct SessionInfo {
     /// What the gateway announced, before the profile's own choices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub announced: Option<Announced>,
+    /// When the session disconnects by itself, if its profile says so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_disconnect: Option<Planned>,
 }
 
 /// The routing a gateway announced.

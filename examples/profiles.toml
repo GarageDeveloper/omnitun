@@ -46,3 +46,8 @@ full_tunnel = true
 split_routes = ["10.20.0.0/16", { net = "192.168.30.12/32", note = "Printers" }, { domain = "*.office-saas.example", note = "CRM" }]
 dns_domains = [{ domain = "office.example", note = "Intranet" }]
 excluded_domains = [{ domain = "*.zoom.us", note = "Video calls" }]
+# Disconnect by itself, whichever comes first (H:MM each, all optional):
+# after 9 hours connected, after an hour without keyboard or mouse input
+# (macOS), or at 19:30. Warned 5 minutes before; `omnitunctl postpone
+# office` or the notification's button puts it off.
+auto_disconnect = { after = "9:00", idle = "1:00", at = "19:30" }

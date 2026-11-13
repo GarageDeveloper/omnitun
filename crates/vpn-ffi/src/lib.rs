@@ -405,6 +405,12 @@ impl Client {
         Ok(on_runtime(async move { Daemon::open(CLIENT).await?.disconnect(&id).await }).await?)
     }
 
+    /// Puts off the automatic disconnection of session `id`: the time
+    /// connected starts again, a time of day moves an hour later.
+    pub async fn postpone(&self, id: String) -> Result<(), ClientError> {
+        Ok(on_runtime(async move { Daemon::open(CLIENT).await?.postpone(&id).await }).await?)
+    }
+
     /// Closes every session and restarts the service.
     pub async fn shutdown(&self) -> Result<(), ClientError> {
         Ok(on_runtime(async { Daemon::open(CLIENT).await?.shutdown().await }).await?)
@@ -472,6 +478,12 @@ impl Client {
                             observer.stopping();
                             continue;
                         }
+                        Event::Expiring { id, planned } => {
+                            observer.expiring(id.clone(), planned.into());
+                            if let Some(session) = sessions.iter_mut().find(|s| s.id == id) {
+                                session.auto_disconnect = Some(planned);
+                            }
+                        }
                         Event::Error { message, failure } => {
                             return Err(vpn_core::failure(failure.unwrap_or(FailureKind::Other), message));
                         }
@@ -516,6 +528,9 @@ pub trait SessionObserver: Send + Sync {
     /// The daemon is stopping (an update, a restart): the sessions that end
     /// next were not ended by their users.
     fn stopping(&self);
+    /// Session `id` disconnects by itself soon, unless postponed
+    /// (`Client::postpone`) or, when idle, the user comes back.
+    fn expiring(&self, id: String, planned: PlannedDisconnect);
     /// The daemon went away or refused; subscribe again later.
     fn stopped(&self, error: Option<ClientError>);
 }
@@ -657,6 +672,8 @@ impl From<&vpn_core::Profile> for ProfileSummary {
                 .iter()
                 .map(|e| forms::ListEntry { value: e.value.to_string(), note: e.note.clone().unwrap_or_default() })
                 .collect(),
+            postponable_disconnect: p.auto_disconnect.enabled
+                && (p.auto_disconnect.after.is_some() || p.auto_disconnect.at.is_some()),
         }
     }
 }

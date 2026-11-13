@@ -202,6 +202,7 @@ fn convert(text: &str, base: &str, file: &str, existing: &[String]) -> anyhow::R
         allow_route_overlap: false,
         via: Vec::new(),
         exclusive: false,
+        auto_disconnect: Default::default(),
     };
     if core.name != base {
         notes.push(format!("a VPN named {base} exists already: imported as {}", core.name));

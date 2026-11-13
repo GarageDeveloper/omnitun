@@ -34,8 +34,15 @@ func editMenu() -> NSMenu {
     edit.addItem(withTitle: String(localized: "Select All"), action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
     let close = NSMenu(title: String(localized: "Window"))
     close.addItem(withTitle: String(localized: "Close"), action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+    // Shown while a window makes the app a regular one (⌘-Tab).
+    let app = NSMenu(title: brand.product)
+    app.addItem(withTitle: String(localized: "Hide \(brand.product)"), action: #selector(NSApplication.hide(_:)),
+                keyEquivalent: "h")
+    app.addItem(.separator())
+    app.addItem(withTitle: String(localized: "Quit \(brand.product)"), action: #selector(NSApplication.terminate(_:)),
+                keyEquivalent: "q")
     let main = NSMenu()
-    for menu in [NSMenu(title: brand.product), edit, close] {
+    for menu in [app, edit, close] {
         let item = NSMenuItem()
         item.submenu = menu
         main.addItem(item)

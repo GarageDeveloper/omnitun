@@ -11,6 +11,7 @@
 "Manage VPNs…" = "Gérer les VPN…";
 "Settings…" = "Réglages…";
 "Quit %@" = "Quitter %@";
+"Hide %@" = "Masquer %@";
 "About %@" = "À propos de %@";
 "Connecting…" = "Connexion…";
 "Reconnecting (attempt %u/%u)…" = "Reconnexion (essai %u/%u)…";
@@ -476,3 +477,30 @@
 "Added to the gateway's networks" = "Ajoutés aux réseaux de la passerelle";
 "Unused while everything goes through the VPN." = "Inutilisés tant que tout passe par le VPN.";
 "Added when the gateway announces networks, like the route lines of an OpenVPN file." = "Ajoutés quand la passerelle annonce des réseaux, comme les lignes route d'un fichier OpenVPN.";
+
+/* Automatic disconnection */
+"After being connected for" = "Après une connexion de";
+"After no keyboard or mouse activity for" = "Après une inactivité clavier et souris de";
+"At" = "À";
+"Schedule" = "Horaires";
+"Disconnect automatically" = "Déconnecter automatiquement";
+"Even with the app closed: the service disconnects. You are warned 5 minutes before and can postpone." = "Même quand l'app est fermée : c'est le service qui déconnecte. Vous êtes prévenu 5 minutes avant et pouvez prolonger.";
+"Limits" = "Limites";
+"Reconnections after a drop do not start the time again. Postponing starts it again." = "Les reconnexions après une coupure ne relancent pas le décompte. Prolonger le relance.";
+"Network traffic does not count: it never stops. Using the computer again keeps the VPN up." = "Le trafic réseau ne compte pas : il ne s'arrête jamais. Utiliser à nouveau l'ordinateur garde le VPN.";
+"The first time after connecting. Postponing moves it an hour later." = "La première fois après la connexion. Prolonger la recule d'une heure.";
+"Choose at least one limit." = "Choisissez au moins une limite.";
+"Hours" = "Heures";
+"Minutes" = "Minutes";
+"Postpone" = "Prolonger";
+"Postpone Automatic Disconnection" = "Reporter la déconnexion automatique";
+"ends at %@" = "fin à %@";
+"%@ disconnects soon" = "%@ va se déconnecter";
+"Connected for %@: it disconnects at %@." = "Connecté depuis %@ : déconnexion à %@.";
+"It disconnects at %@, as planned." = "Déconnexion à %@, comme prévu.";
+"No activity for a while: it disconnects at %@ unless you use the computer." = "Aucune activité depuis un moment : déconnexion à %@, sauf si vous utilisez l'ordinateur.";
+"%@ disconnected automatically" = "%@ déconnecté automatiquement";
+"Connected for %@, as its settings say." = "Connecté depuis %@, comme le prévoient ses réglages.";
+"No activity for %@, as its settings say." = "Aucune activité depuis %@, comme le prévoient ses réglages.";
+"It is %@, as its settings say." = "Il est %@, comme le prévoient ses réglages.";
+"%@ disconnects as planned" = "%@ se déconnectera comme prévu";

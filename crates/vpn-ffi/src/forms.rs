@@ -201,6 +201,18 @@ pub struct ProfileForm {
     pub folder: Option<String>,
     /// A company VPN: never up at the same time as another VPN.
     pub exclusive: bool,
+    /// Automatic disconnection, each `H:MM` or empty for none: after this
+    /// long connected, after this long without keyboard or mouse input,
+    /// at this time of day. Switched off: kept, not applied.
+    pub disconnect_enabled: bool,
+    pub disconnect_after: String,
+    pub disconnect_idle: String,
+    pub disconnect_at: String,
+}
+
+/// An `H:MM` limit as the form shows it; empty for none.
+fn text_of(limit: Option<vpn_core::HourMinute>) -> String {
+    limit.map(|l| l.to_string()).unwrap_or_default()
 }
 
 impl ProfileForm {
@@ -337,6 +349,18 @@ impl ProfileForm {
         profile.allow_route_overlap = self.allow_route_overlap;
         profile.via = dedup(clean_list(&self.via));
         profile.exclusive = self.exclusive;
+        let limit = |text: &str, what: &str| -> anyhow::Result<Option<vpn_core::HourMinute>> {
+            let text = text.trim();
+            (!text.is_empty())
+                .then(|| text.parse().with_context(|| format!("automatic disconnection {what}")))
+                .transpose()
+        };
+        profile.auto_disconnect = vpn_core::AutoDisconnect {
+            enabled: self.disconnect_enabled,
+            after: limit(&self.disconnect_after, "after a time connected")?,
+            idle: limit(&self.disconnect_idle, "when idle")?,
+            at: limit(&self.disconnect_at, "at a time of day")?,
+        };
         // "Clients / Acme" means Clients/Acme.
         profile.folder = text(&self.folder)
             .map(|f| f.split('/').map(str::trim).filter(|n| !n.is_empty()).collect::<Vec<_>>().join("/"));
@@ -903,6 +927,10 @@ impl From<&Profile> for ProfileForm {
             via: profile.via.clone(),
             folder: profile.folder.clone(),
             exclusive: profile.exclusive,
+            disconnect_enabled: profile.auto_disconnect.enabled,
+            disconnect_after: text_of(profile.auto_disconnect.after),
+            disconnect_idle: text_of(profile.auto_disconnect.idle),
+            disconnect_at: text_of(profile.auto_disconnect.at),
         };
         match &profile.protocol {
             ProtocolConfig::WireGuard(p) => {
@@ -1081,6 +1109,35 @@ mod tests {
         assert_eq!((p.client_cert.as_deref(), p.client_certificate.clone()), (None, Some("cd".repeat(32))));
         saved.validate().unwrap();
         assert_eq!(ProfileForm::from(&saved).client_certificate, Some("cd".repeat(32)));
+    }
+
+    #[test]
+    fn automatic_disconnection_in_the_form() {
+        let base: Profile = toml::from_str(
+            "name = \"paris\"\nprotocol = \"forti-ssl\"\nhost = \"vpn.example.com\"\n\
+             auto_disconnect = { after = \"8:00\", at = \"19:30\" }",
+        )
+        .unwrap();
+        let mut form = ProfileForm::from(&base);
+        assert!(form.disconnect_enabled);
+        assert_eq!((&*form.disconnect_after, &*form.disconnect_idle, &*form.disconnect_at), ("8:00", "", "19:30"));
+        form.disconnect_after = String::new();
+        form.disconnect_idle = " 0:45 ".into();
+        let profile = form.to_profile(Some(&base)).unwrap();
+        assert_eq!(profile.auto_disconnect.after, None);
+        assert_eq!(profile.auto_disconnect.idle, Some(vpn_core::HourMinute::new(0, 45)));
+        assert_eq!(profile.auto_disconnect.at, Some(vpn_core::HourMinute::new(19, 30)));
+        // Switched off: the limits are kept, not applied.
+        form.disconnect_enabled = false;
+        let off = form.to_profile(Some(&base)).unwrap();
+        assert!(!off.auto_disconnect.is_active() && off.auto_disconnect.idle.is_some());
+        assert!(!ProfileForm::from(&off).disconnect_enabled);
+        form.disconnect_enabled = true;
+        form.disconnect_at = "25:00".into();
+        assert!(form.to_profile(Some(&base)).is_err(), "not a time of day");
+        form.disconnect_at = "7h".into();
+        let error = form.to_profile(Some(&base)).unwrap_err();
+        assert!(format!("{error:#}").contains("at a time of day"), "{error:#}");
     }
 
     #[test]

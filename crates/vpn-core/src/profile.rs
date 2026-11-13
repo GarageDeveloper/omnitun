@@ -62,6 +62,10 @@ pub struct Profile {
     /// it goes through excepted. The app offers to disconnect the others.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub exclusive: bool,
+    /// When the session ends by itself: after a time connected or idle,
+    /// or at a time of day.
+    #[serde(default, skip_serializing_if = "crate::AutoDisconnect::is_empty")]
+    pub auto_disconnect: crate::AutoDisconnect,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -460,6 +464,7 @@ impl Profile {
         if port == 0 {
             anyhow::bail!("invalid server port 0");
         }
+        self.auto_disconnect.validate()?;
         if let ProtocolConfig::FortiSsl(FortiSslProfile { auth: FortiSslAuth::Saml { port }, .. }) = &self.protocol
             && *port < MIN_SAML_PORT
         {

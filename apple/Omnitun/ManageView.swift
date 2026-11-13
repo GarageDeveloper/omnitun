@@ -717,6 +717,7 @@ struct ProfileEditor: View {
                 NetworkTab(form: $form, others: model.profiles.filter { $0.id != original }.map { ($0.id, $0.name) },
                            announced: original.flatMap(Settings.announced(for:)))
                     .tabItem { Text("Network") }
+                ScheduleTab(form: $form).tabItem { Text("Schedule") }
             }
             .padding(.horizontal)
             footer
@@ -2147,3 +2148,111 @@ private struct NetworkTab: View {
     }
 }
 
+
+/// Automatic disconnection: a switch for the whole, then each limit, the
+/// first one reached disconnecting. Limits switched off are kept.
+private struct ScheduleTab: View {
+    @Binding var form: ProfileForm
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Disconnect automatically", isOn: $form.disconnectEnabled)
+                caption("Even with the app closed: the service disconnects. You are warned 5 minutes before and can postpone.")
+            }
+            Section("Limits") {
+                limit("After being connected for", text: $form.disconnectAfter, initial: "8:00") {
+                    DurationField(text: $form.disconnectAfter)
+                }
+                caption("Reconnections after a drop do not start the time again. Postponing starts it again.")
+                limit("After no keyboard or mouse activity for", text: $form.disconnectIdle, initial: "1:00") {
+                    DurationField(text: $form.disconnectIdle)
+                }
+                caption("Network traffic does not count: it never stops. Using the computer again keeps the VPN up.")
+                limit("At", text: $form.disconnectAt, initial: "19:00") {
+                    DatePicker("At", selection: timeOfDay, displayedComponents: .hourAndMinute).labelsHidden()
+                }
+                caption("The first time after connecting. Postponing moves it an hour later.")
+                if form.disconnectEnabled && noLimit {
+                    Label("Choose at least one limit.", systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+            }
+            .disabled(!form.disconnectEnabled)
+        }
+        .formStyle(.grouped)
+    }
+
+    private var noLimit: Bool {
+        form.disconnectAfter.isEmpty && form.disconnectIdle.isEmpty && form.disconnectAt.isEmpty
+    }
+
+    /// A limit's checkbox, and its value once checked; unchecked, the
+    /// limit is removed.
+    private func limit(_ title: LocalizedStringKey, text: Binding<String>, initial: String,
+                       @ViewBuilder value: () -> some View) -> some View {
+        let on = Binding(get: { !text.wrappedValue.trimmingCharacters(in: .whitespaces).isEmpty },
+                         set: { text.wrappedValue = $0 ? initial : "" })
+        return HStack {
+            Toggle(title, isOn: on).toggleStyle(.checkbox)
+            Spacer()
+            if on.wrappedValue { value() }
+        }
+    }
+
+    /// The time of day of `disconnectAt`, as today's date for the picker.
+    private var timeOfDay: Binding<Date> {
+        Binding(get: {
+            let (h, m) = HourMinute.parse(form.disconnectAt) ?? (19, 0)
+            return Calendar.current.date(bySettingHour: h, minute: m, second: 0, of: Date()) ?? Date()
+        }, set: { date in
+            let c = Calendar.current.dateComponents([.hour, .minute], from: date)
+            form.disconnectAt = HourMinute.text(c.hour ?? 0, c.minute ?? 0)
+        })
+    }
+
+    private func caption(_ text: LocalizedStringKey) -> some View {
+        Text(text).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// `H:MM` text, as the profile writes it.
+private enum HourMinute {
+    static func parse(_ text: String) -> (Int, Int)? {
+        let parts = text.trimmingCharacters(in: .whitespaces).split(separator: ":")
+        guard parts.count == 2, let h = Int(parts[0]), let m = Int(parts[1]) else { return nil }
+        return (h, m)
+    }
+
+    static func text(_ hours: Int, _ minutes: Int) -> String {
+        String(format: "%d:%02d", hours, minutes)
+    }
+}
+
+/// A duration in hours and minutes, never empty.
+private struct DurationField: View {
+    @Binding var text: String
+
+    private var parts: (Int, Int) { HourMinute.parse(text) ?? (0, 0) }
+
+    private var hours: Binding<Int> {
+        Binding(get: { parts.0 }, set: { text = HourMinute.text(min(max($0, 0), 999), parts.1) })
+    }
+
+    private var minutes: Binding<Int> {
+        Binding(get: { parts.1 }, set: { text = HourMinute.text(parts.0, min(max($0, 0), 59)) })
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            TextField("Hours", value: hours, format: .number).labelsHidden().frame(width: 44)
+                .multilineTextAlignment(.trailing)
+            Stepper("Hours", value: hours, in: 0...999).labelsHidden()
+            Text("h")
+            TextField("Minutes", value: minutes, format: .number).labelsHidden().frame(width: 36)
+                .multilineTextAlignment(.trailing)
+            Stepper("Minutes", value: minutes, in: 0...59, step: 5).labelsHidden()
+            Text("min")
+        }
+    }
+}

@@ -266,6 +266,7 @@ async fn connect_one(
             | Event::OpenUrl { .. }
             | Event::Status { .. }
             | Event::Hello { .. }
+            | Event::Expiring { .. }
             | Event::Stopping => {}
         }
     }
@@ -552,6 +553,7 @@ mod tests {
             dynamic_routes: 0,
             routed_by_domain: Vec::new(),
             announced: None,
+            auto_disconnect: None,
         };
         let (company, lab, home) = (named("company", true), named("lab", false), named("home", false));
         let profiles = [company.clone(), lab.clone(), home.clone()];

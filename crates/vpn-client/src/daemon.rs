@@ -30,7 +30,12 @@ impl Daemon {
         let mut daemon =
             Self { lines: BufReader::new(read).lines(), write, version: String::new(), features: Vec::new() };
         daemon
-            .send(&Request::Hello { protocol: PROTOCOL_VERSION, client: client.into(), version: vpn_core::version() })
+            .send(&Request::Hello {
+                protocol: PROTOCOL_VERSION,
+                client: client.into(),
+                version: vpn_core::version(),
+                features: vec![vpn_core::ipc::AUTO_DISCONNECT.into()],
+            })
             .await?;
         match daemon.next().await? {
             Event::Hello { version, features, .. } => {
@@ -94,6 +99,14 @@ impl Daemon {
     /// `id`: the session's profile id.
     pub async fn disconnect(self, id: &str) -> anyhow::Result<()> {
         self.until_done(Request::Disconnect { id: id.to_owned() }).await
+    }
+
+    /// Puts off the automatic disconnection of session `id`.
+    pub async fn postpone(self, id: &str) -> anyhow::Result<()> {
+        if !self.supports(vpn_core::ipc::AUTO_DISCONNECT) {
+            bail!("{} {} cannot postpone a disconnection; restart it after the update", brand::DAEMON, self.version);
+        }
+        self.until_done(Request::Postpone { id: id.to_owned() }).await
     }
 
     /// Closes every session and stops the daemon (its service manager

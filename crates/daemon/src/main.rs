@@ -2,6 +2,7 @@
 //! create tun interfaces and change routes and DNS; users drive it with
 //! `omnitunctl` through a Unix socket restricted to one group.
 
+mod autodisconnect;
 mod dnsproxy;
 mod engine;
 mod logfile;
@@ -249,7 +250,15 @@ impl Drop for Slot {
 }
 
 /// Optional capabilities announced in `Hello`.
-const FEATURES: &[&str] = &["watch", "shutdown", "trust_certificate", "failure_kinds", "prompt_socket", "stopping"];
+const FEATURES: &[&str] = &[
+    "watch",
+    "shutdown",
+    "trust_certificate",
+    "failure_kinds",
+    "prompt_socket",
+    "stopping",
+    vpn_core::ipc::AUTO_DISCONNECT,
+];
 
 fn failed(e: anyhow::Error) -> Event {
     Event::Error { message: format!("{e:#}"), failure: Some(vpn_core::failure::kind_of(&e)) }
@@ -279,6 +288,8 @@ async fn serve(stream: UnixStream, manager: Arc<Manager>) -> anyhow::Result<()> 
     let mut buf = zeroize::Zeroizing::new(String::new());
     let mut greeted = false;
     let mut watching = false;
+    // What the client said it understands, in its hello.
+    let mut client_features = Vec::new();
     loop {
         buf.zeroize();
         let mut limited = (&mut lines).take(MAX_LINE as u64);
@@ -309,7 +320,7 @@ async fn serve(stream: UnixStream, manager: Arc<Manager>) -> anyhow::Result<()> 
         // The version check comes first, so an outdated client or daemon
         // fails clearly instead of misreading messages.
         if !greeted {
-            let Request::Hello { protocol, client, version } = request else {
+            let Request::Hello { protocol, client, version, features } = request else {
                 link.send(Event::error("the first request must be hello"));
                 break;
             };
@@ -322,8 +333,9 @@ async fn serve(stream: UnixStream, manager: Arc<Manager>) -> anyhow::Result<()> 
                 )));
                 break;
             }
-            tracing::debug!("client uid={uid}: {client} {version}");
+            tracing::debug!("client uid={uid}: {client} {version} {features:?}");
             greeted = true;
+            client_features = features;
             link.send(Event::Hello {
                 protocol: PROTOCOL_VERSION,
                 version: vpn_core::version(),
@@ -338,12 +350,17 @@ async fn serve(stream: UnixStream, manager: Arc<Manager>) -> anyhow::Result<()> 
                 Ok(()) => Event::Done,
                 Err(e) => failed(e),
             }),
+            Request::Postpone { id } => Some(match manager.postpone(&id, uid) {
+                Ok(()) => Event::Done,
+                Err(e) => failed(e),
+            }),
             Request::Status => Some(Event::Status { sessions: manager.status(uid) }),
             Request::Answer { .. } => Some(Event::error("answers go to the session's prompt socket")),
             Request::Watch if watching => Some(Event::error("this connection is already watching")),
             Request::Watch => {
                 watching = true;
-                manager.watch(uid, link.clone());
+                let expiring = client_features.iter().any(|f| f == vpn_core::ipc::AUTO_DISCONNECT);
+                manager.watch(uid, link.clone(), expiring);
                 None
             }
             Request::Shutdown => Some(if manager.may_shutdown(uid) {
