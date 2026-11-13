@@ -59,6 +59,7 @@ final class AppModel: ObservableObject {
     func profile(_ id: String) -> ProfileSummary? { profiles.first { $0.id == id } }
 
     func start() {
+        Notifier.shared.onPostpone = { [weak self] id in self?.postpone(id) }
         Notifier.shared.setUp()
         reloadProfiles()
         resuming = Self.toResume(Settings.upSessions, version: Self.version, now: Date())
@@ -171,6 +172,14 @@ final class AppModel: ObservableObject {
 
     fileprivate func changed(_ change: StateChange) {
         retries[change.id] = change.retry
+        if [.disconnected, .failed].contains(change.state) { Notifier.shared.removeExpiring(id: change.id) }
+        // Ended by the service, not by the user: its profile's limit.
+        if change.state == .disconnected, change.detail != nil {
+            let planned = sessions[change.id]?.autoDisconnect
+            Notifier.shared.post(title: String(localized: "\(displayName(change.id)) disconnected automatically"),
+                                 body: planned.map(Self.reason) ?? change.detail ?? "")
+            return
+        }
         if change.state == .connecting || change.state == .connected { failures[change.id] = nil }
         // An interactive connection reports its own outcome.
         guard flows[change.id] == nil else { return }
@@ -188,6 +197,42 @@ final class AppModel: ObservableObject {
             Notifier.shared.post(title: String(localized: "\(name) disconnected"), body: change.failure.map(label) ?? change.detail ?? "")
         default:
             break
+        }
+    }
+
+    /// Warns that `id` disconnects soon, as its profile says.
+    fileprivate func expiring(_ id: String, _ planned: PlannedDisconnect) {
+        let time = Date(timeIntervalSince1970: TimeInterval(planned.at)).formatted(date: .omitted, time: .shortened)
+        let body = switch planned.criterion {
+        case .after: String(localized: "Connected for \(planned.limit): it disconnects at \(time).")
+        case .at: String(localized: "It disconnects at \(time), as planned.")
+        case .idle: String(localized: "No activity for a while: it disconnects at \(time) unless you use the computer.")
+        }
+        Notifier.shared.postExpiring(id: id, title: String(localized: "\(displayName(id)) disconnects soon"),
+                                     body: body, canPostpone: planned.criterion != .idle)
+        objectWillChange.send()
+    }
+
+    /// Why a session was disconnected automatically, for people.
+    nonisolated static func reason(_ planned: PlannedDisconnect) -> String {
+        switch planned.criterion {
+        case .after: String(localized: "Connected for \(planned.limit), as its settings say.")
+        case .idle: String(localized: "No activity for \(planned.limit), as its settings say.")
+        case .at: String(localized: "It is \(planned.limit), as its settings say.")
+        }
+    }
+
+    /// Puts off `id`'s automatic disconnection.
+    func postpone(_ id: String) {
+        Notifier.shared.removeExpiring(id: id)
+        Task {
+            do {
+                try await client.postpone(id: id)
+            } catch {
+                Notifier.shared.post(title: String(localized: "\(displayName(id)) disconnects as planned"),
+                                     body: describe(error))
+            }
+            pollSessions()
         }
     }
 
@@ -209,7 +254,13 @@ final class AppModel: ObservableObject {
 
     // MARK: Reconnecting after an update
 
-    private static let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+    /// Version and build: a package of the same version built again (a
+    /// test build) is an update too.
+    private static let version: String? = {
+        let info = Bundle.main.infoDictionary
+        guard let short = info?["CFBundleShortVersionString"] as? String else { return nil }
+        return (info?["CFBundleVersion"] as? String).map { "\(short) (\($0))" } ?? short
+    }()
 
     /// What to connect again at launch: the VPNs a previous version saw up
     /// shortly before it stopped. A crash or a quit without an update
@@ -517,6 +568,10 @@ private final class Observer: SessionObserver, @unchecked Sendable {
 
     func stopping() {
         DispatchQueue.main.async { MainActor.assumeIsolated { self.model?.holdRecord() } }
+    }
+
+    func expiring(id: String, planned: PlannedDisconnect) {
+        DispatchQueue.main.async { MainActor.assumeIsolated { self.model?.expiring(id, planned) } }
     }
 
     func stopped(error: ClientError?) {

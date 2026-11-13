@@ -83,6 +83,7 @@ impl L2tpProfile {
             allow_route_overlap: false,
             via: Vec::new(),
             exclusive: false,
+            auto_disconnect: Default::default(),
         };
         ipsec.validate()
     }

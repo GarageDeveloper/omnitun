@@ -17,6 +17,7 @@ use vpn_core::ipc::{Event, Retry, RoutedByDomain, SessionInfo, SessionState};
 use vpn_core::{FailureKind, Profile, ProtocolConfig, TunnelSettings, TunnelStats, failure};
 use vpn_platform::{Claims, Conflict, DynamicClaims, Registry};
 
+use crate::autodisconnect::{self, Schedule};
 use crate::dnsproxy::{DnsProxy, Plan};
 use crate::engine::{Launcher, RemoteEngine};
 use crate::prompter::{ClientLink, SessionClient};
@@ -43,6 +44,9 @@ const MAX_MTU: u16 = 9000;
 /// A tunnel that stayed up this long resets the reconnect counter.
 const STABLE_UPTIME: Duration = Duration::from_secs(60);
 const WATCH_QUEUE: usize = 256;
+/// An idle deadline drifts from one tick to the next by the time `ioreg`
+/// took: within this, it is the same one.
+const TICK_SLACK: u64 = 60;
 /// How long an engine's first question waits for the client to attach to
 /// the prompt socket.
 const ATTACH_WAIT: Duration = Duration::from_secs(10);
@@ -128,6 +132,8 @@ struct Session {
     info: Arc<Mutex<SessionInfo>>,
     stats: Arc<TunnelStats>,
     task: Option<JoinHandle<()>>,
+    /// Its automatic disconnection, if its profile has one.
+    schedule: Arc<Mutex<Schedule>>,
 }
 
 impl Manager {
@@ -206,6 +212,7 @@ impl Manager {
             dynamic_routes: 0,
             routed_by_domain: Vec::new(),
             announced: None,
+            auto_disconnect: None,
         }));
         // The engine asks the owner's client directly, on this socket.
         let prompt_socket = vpn_core::ipc::prompt_socket_path(&self.control_socket, &profile.id);
@@ -223,6 +230,7 @@ impl Manager {
 
         let cancel = CancellationToken::new();
         let stats = Arc::new(TunnelStats::default());
+        let schedule = Arc::new(Mutex::new(Schedule::default()));
         let runner = Runner {
             manager: self.clone(),
             owner,
@@ -235,9 +243,11 @@ impl Manager {
             prompt_socket,
             prompt_file,
             via,
+            schedule: schedule.clone(),
+            ended_by: Arc::default(),
         };
         let task = tokio::spawn(runner.run(engine));
-        sessions.insert(profile.id, Session { owner, cancel, info, stats, task: Some(task) });
+        sessions.insert(profile.id, Session { owner, cancel, info, stats, task: Some(task), schedule });
         Ok(())
     }
 
@@ -257,6 +267,23 @@ impl Manager {
             let _ = task.await;
         }
         self.forget(id, &info);
+        Ok(())
+    }
+
+    /// Puts off the automatic disconnection of a session; `uid` must own
+    /// it unless it is root.
+    pub fn postpone(&self, id: &str, uid: u32) -> anyhow::Result<()> {
+        let sessions = self.sessions.lock().unwrap();
+        let session =
+            sessions.get(id).filter(|s| uid == 0 || s.owner == uid).with_context(|| format!("{id} is not active"))?;
+        let mut info = session.info.lock().unwrap();
+        let planned = info.auto_disconnect.with_context(|| format!("{} has no disconnection planned", info.name))?;
+        if !session.schedule.lock().unwrap().postpone(&planned, now()) {
+            bail!("{} disconnects when idle: using the computer is enough to stay connected", info.name);
+        }
+        tracing::info!(session = info.name, "automatic disconnection postponed");
+        // Planned again at the next tick.
+        info.auto_disconnect = None;
         Ok(())
     }
 
@@ -289,7 +316,8 @@ impl Manager {
 
     /// Sends the current sessions, then every state change of `uid`'s
     /// sessions (all of them for root), until the client goes away.
-    pub fn watch(self: &Arc<Self>, uid: u32, link: ClientLink) {
+    /// `expiring`: the client understands `Expiring` events.
+    pub fn watch(self: &Arc<Self>, uid: u32, link: ClientLink, expiring: bool) {
         let mut rx = self.events.subscribe();
         if !link.send(Event::Status { sessions: self.status(uid) }) {
             return;
@@ -302,6 +330,7 @@ impl Manager {
                     _ = link.closed() => return,
                 };
                 match watched {
+                    Ok(Watched { event: Event::Expiring { .. }, .. }) if !expiring => {}
                     Ok(w) if uid == 0 || w.owner.is_none_or(|owner| owner == uid) => {
                         if !link.send(w.event) {
                             return;
@@ -405,6 +434,10 @@ struct Runner {
     prompt_file: Option<FileId>,
     /// The session this one is chained through.
     via: Option<String>,
+    schedule: Arc<Mutex<Schedule>>,
+    /// Why the session was ended without its user, if it was: its last
+    /// state says so.
+    ended_by: Arc<Mutex<Option<String>>>,
 }
 
 /// Why a connection attempt ended.
@@ -447,13 +480,20 @@ impl Runner {
         self.client.notify(event);
     }
 
+    /// Disconnected by its user, or by itself.
+    fn disconnected(&self) {
+        let reason = self.ended_by.lock().unwrap().take();
+        self.set_state(SessionState::Disconnected, reason);
+    }
+
     async fn run(self, mut engine: RemoteEngine) {
+        let deadlines = self.profile.auto_disconnect.is_active().then(|| tokio::spawn(self.deadlines()));
         let mut attempt = 0;
         loop {
             let first = attempt == 0 && self.info.lock().unwrap().connected_since.is_none();
             match self.attempt(&mut engine, first).await {
                 Outcome::Cancelled => {
-                    self.set_state(SessionState::Disconnected, None);
+                    self.disconnected();
                     break;
                 }
                 Outcome::Failed(e) => {
@@ -492,13 +532,16 @@ impl Runner {
                     );
                     tokio::select! {
                         _ = self.cancel.cancelled() => {
-                            self.set_state(SessionState::Disconnected, None);
+                            self.disconnected();
                             break;
                         }
                         _ = tokio::time::sleep(delay) => {}
                     }
                 }
             }
+        }
+        if let Some(deadlines) = deadlines {
+            deadlines.abort();
         }
         self.client.detach();
         engine.kill().await;
@@ -516,6 +559,55 @@ impl Runner {
                     sessions.remove(&name);
                 }
             });
+        }
+    }
+
+    /// Watches the session's automatic disconnection: plans it once the
+    /// tunnel has been up, warns the user's clients before, and ends the
+    /// session when it is due. Runs until the session ends.
+    fn deadlines(&self) -> impl Future<Output = ()> + Send + 'static {
+        let rule = self.profile.auto_disconnect.clone();
+        let (manager, owner, id, name) =
+            (self.manager.clone(), self.owner, self.profile.id.clone(), self.profile.name.clone());
+        let (info, schedule, cancel, ended_by) =
+            (self.info.clone(), self.schedule.clone(), self.cancel.clone(), self.ended_by.clone());
+        async move {
+            if rule.idle.is_some() && autodisconnect::user_idle_secs().await.is_none() {
+                tracing::warn!(session = name, "idle time cannot be read here: no disconnection when idle");
+            }
+            let mut tick = tokio::time::interval(autodisconnect::TICK);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // The deadline the user was last warned of.
+            let mut warned: Option<u64> = None;
+            loop {
+                tick.tick().await;
+                let Some(connected) = info.lock().unwrap().connected_since else { continue };
+                let idle = match rule.idle {
+                    Some(_) => autodisconnect::user_idle_secs().await,
+                    None => None,
+                };
+                let now = now();
+                let planned = {
+                    let mut schedule = schedule.lock().unwrap();
+                    schedule.start(&rule, connected);
+                    schedule.clock(now, idle).and_then(|clock| rule.next(&clock))
+                };
+                info.lock().unwrap().auto_disconnect = planned;
+                let Some(planned) = planned else { continue };
+                if now >= planned.at {
+                    let reason = autodisconnect::reason(&planned);
+                    tracing::info!(session = name, "{reason}");
+                    *ended_by.lock().unwrap() = Some(reason);
+                    cancel.cancel();
+                    return;
+                }
+                // Once per deadline; an idle one moves a little each tick.
+                if now >= planned.warning_at() && warned.is_none_or(|w| w.abs_diff(planned.at) > TICK_SLACK) {
+                    warned = Some(planned.at);
+                    let event = Event::Expiring { id: id.clone(), planned };
+                    let _ = manager.events.send(Watched { owner: Some(owner), event });
+                }
+            }
         }
     }
 
@@ -1168,13 +1260,21 @@ mod tests {
             dynamic_routes: 0,
             routed_by_domain: Vec::new(),
             announced: None,
+            auto_disconnect: None,
         };
         let stats = Arc::new(TunnelStats::default());
         stats.record_rx(100);
         stats.record_tx(40);
         m.sessions.lock().unwrap().insert(
             test_id(name),
-            Session { owner, cancel: cancel.clone(), info: Arc::new(Mutex::new(info)), stats, task: None },
+            Session {
+                owner,
+                cancel: cancel.clone(),
+                info: Arc::new(Mutex::new(info)),
+                stats,
+                task: None,
+                schedule: Arc::default(),
+            },
         );
         cancel
     }
@@ -1217,8 +1317,8 @@ mod tests {
         let m = Arc::new(Manager::default());
         let (mine, mut mine_rx) = client();
         let (theirs, mut theirs_rx) = client();
-        m.watch(1000, mine);
-        m.watch(1001, theirs);
+        m.watch(1000, mine, true);
+        m.watch(1001, theirs, true);
         assert!(matches!(next_event(&mut mine_rx).await, Event::Status { sessions } if sessions.is_empty()));
         assert!(matches!(next_event(&mut theirs_rx).await, Event::Status { .. }));
 
@@ -1236,8 +1336,8 @@ mod tests {
         let m = Arc::new(Manager::default());
         let (mine, mut mine_rx) = client();
         let (theirs, mut theirs_rx) = client();
-        m.watch(1000, mine);
-        m.watch(1001, theirs);
+        m.watch(1000, mine, true);
+        m.watch(1001, theirs, true);
         assert!(matches!(next_event(&mut mine_rx).await, Event::Status { .. }));
         assert!(matches!(next_event(&mut theirs_rx).await, Event::Status { .. }));
         m.stopping();
@@ -1612,7 +1712,7 @@ mod tests {
     async fn a_lagging_watcher_gets_the_status_again() {
         let m = Arc::new(Manager::default());
         let (tx, mut rx) = mpsc::channel(2 * WATCH_QUEUE);
-        m.watch(1000, ClientLink::new(tx));
+        m.watch(1000, ClientLink::new(tx), true);
         assert!(matches!(rx.recv().await, Some(Event::Status { .. })));
         fake_session(&m, "paris", 1000);
         for i in 0..WATCH_QUEUE + 10 {
@@ -1822,5 +1922,55 @@ mod tests {
             .map(|i| ipnet::Ipv4Net::new(Ipv4Addr::from(0x0a00_0000 + (i << 8)), 24).unwrap())
             .collect();
         assert!(apply_profile(&profile, s).is_err());
+    }
+
+    #[tokio::test]
+    async fn expiring_events_go_to_clients_that_understand_them() {
+        let m = Arc::new(Manager::default());
+        let (new, mut new_rx) = client();
+        let (old, mut old_rx) = client();
+        m.watch(1000, new, true);
+        m.watch(1000, old, false);
+        assert!(matches!(next_event(&mut new_rx).await, Event::Status { .. }));
+        assert!(matches!(next_event(&mut old_rx).await, Event::Status { .. }));
+        let planned = vpn_core::auto_disconnect::Planned {
+            at: 1,
+            criterion: vpn_core::auto_disconnect::Criterion::After,
+            limit: "8:00".parse().unwrap(),
+        };
+        let event = Event::Expiring { id: test_id("paris"), planned };
+        let _ = m.events.send(Watched { owner: Some(1000), event });
+        m.stopping();
+        assert!(matches!(next_event(&mut new_rx).await, Event::Expiring { .. }));
+        assert!(matches!(next_event(&mut new_rx).await, Event::Stopping));
+        assert!(matches!(next_event(&mut old_rx).await, Event::Stopping), "an older client would fail on it");
+    }
+
+    #[tokio::test]
+    async fn only_the_owner_postpones_and_idleness_is_not_postponed() {
+        use vpn_core::auto_disconnect::{AutoDisconnect, Criterion, Planned};
+        let m = Manager::default();
+        let _cancel = fake_session(&m, "paris", 1000);
+        assert!(m.postpone(&test_id("paris"), 1000).is_err(), "nothing planned");
+
+        let rule = AutoDisconnect { after: Some("8:00".parse().unwrap()), ..Default::default() };
+        let plan = |criterion| Planned { at: 1_000 + 8 * 3600, criterion, limit: "8:00".parse().unwrap() };
+        {
+            let sessions = m.sessions.lock().unwrap();
+            let session = &sessions[&test_id("paris")];
+            session.schedule.lock().unwrap().start(&rule, 1_000);
+            session.info.lock().unwrap().auto_disconnect = Some(plan(Criterion::After));
+        }
+        assert!(m.postpone(&test_id("paris"), 1001).is_err(), "another user's session");
+        m.postpone(&test_id("paris"), 1000).unwrap();
+        let sessions = m.sessions.lock().unwrap();
+        let session = &sessions[&test_id("paris")];
+        assert_eq!(session.info.lock().unwrap().auto_disconnect, None, "planned again at the next tick");
+        let after_from = session.schedule.lock().unwrap().clock(0, None).unwrap().after_from;
+        assert!(after_from > 1_000, "the time connected starts again");
+
+        session.info.lock().unwrap().auto_disconnect = Some(plan(Criterion::Idle));
+        drop(sessions);
+        assert!(m.postpone(&test_id("paris"), 0).is_err());
     }
 }

@@ -2,6 +2,7 @@
 //! settings handed to the platform layer, connection profiles and the
 //! prompt interface used for interactive authentication.
 
+pub mod auto_disconnect;
 pub mod brand;
 
 /// The commit built, given by apple/package.sh (`OMNITUN_COMMIT`); absent
@@ -31,6 +32,7 @@ pub mod prompt;
 pub mod settings;
 pub mod wireguard;
 
+pub use auto_disconnect::{AutoDisconnect, HourMinute};
 pub use destination::{Destination, DomainPattern};
 pub use engine::{Engine, PacketIo, SessionContext, TunnelStats};
 pub use failure::{CertificateInfo, Failure, FailureExt, FailureKind, failure};

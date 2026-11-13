@@ -283,6 +283,41 @@ pub struct Session {
     pub dynamic_routes: u32,
     /// What the gateway announced, before the profile's own choices.
     pub announced: Option<Announced>,
+    /// When it disconnects by itself, if its profile says so.
+    pub auto_disconnect: Option<PlannedDisconnect>,
+}
+
+/// Which limit of the profile disconnects a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum AutoDisconnectCriterion {
+    /// The time connected.
+    After,
+    /// The time without keyboard or mouse input.
+    Idle,
+    /// A time of day.
+    At,
+}
+
+/// An automatic disconnection to come.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct PlannedDisconnect {
+    /// Unix time.
+    pub at: u64,
+    pub criterion: AutoDisconnectCriterion,
+    /// The profile's limit, `H:MM`.
+    pub limit: String,
+}
+
+impl From<vpn_core::auto_disconnect::Planned> for PlannedDisconnect {
+    fn from(p: vpn_core::auto_disconnect::Planned) -> Self {
+        use vpn_core::auto_disconnect::Criterion;
+        let criterion = match p.criterion {
+            Criterion::After => AutoDisconnectCriterion::After,
+            Criterion::Idle => AutoDisconnectCriterion::Idle,
+            Criterion::At => AutoDisconnectCriterion::At,
+        };
+        Self { at: p.at, criterion, limit: p.limit.to_string() }
+    }
 }
 
 /// The routing a gateway announced.
@@ -321,6 +356,7 @@ impl From<SessionInfo> for Session {
             via: s.via,
             dynamic_routes: s.dynamic_routes.try_into().unwrap_or(u32::MAX),
             announced: s.announced.map(Into::into),
+            auto_disconnect: s.auto_disconnect.map(Into::into),
         }
     }
 }
@@ -359,6 +395,9 @@ pub struct ProfileSummary {
     pub exclusive: bool,
     /// The networks of a connection in split mode; empty: no split mode.
     pub split_routes: Vec<crate::ListEntry>,
+    /// It disconnects by itself after a time connected or at a time of
+    /// day: the menu offers to postpone it.
+    pub postponable_disconnect: bool,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]

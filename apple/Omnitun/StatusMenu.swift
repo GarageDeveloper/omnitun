@@ -16,6 +16,8 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     /// The other ways to connect a VPN ("Connect Directly"…), and "Disconnect
     /// All": enabled by the sessions, which change while the menu is open.
     private var alternatives: [(item: NSMenuItem, id: String)] = []
+    /// "Postpone Automatic Disconnection", enabled while one is planned.
+    private var postpones: [(item: NSMenuItem, id: String)] = []
     private var disconnectAllItem: NSMenuItem?
     private var unavailableItem: NSMenuItem?
     private var header: NSMenuItem?
@@ -50,6 +52,7 @@ final class StatusMenu: NSObject, NSMenuDelegate {
             row.setEnabled(serviceAvailable)
         }
         for (item, id) in alternatives { item.isEnabled = serviceAvailable && !model.isOn(id) }
+        for (item, id) in postpones { item.isEnabled = serviceAvailable && canPostpone(id) }
         disconnectAllItem?.isEnabled = canDisconnectAll
         showServiceState()
         for folder in folders { label(folder.item, name: folder.name, ids: folder.ids) }
@@ -157,6 +160,7 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         rows = [:]
         folders = []
         alternatives = []
+        postpones = []
 
         let header = NSMenuItem()
         header.attributedTitle = headerTitle()
@@ -238,7 +242,10 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     }
 
     private func addRow(_ id: String, to target: NSMenu) {
-        let row = VPNRow { [weak self] on in self?.model.toggle(id, on: on) }
+        let row = VPNRow(onToggle: { [weak self] on in self?.model.toggle(id, on: on) }, onSettings: { [weak self] in
+            self?.menu.cancelTracking()
+            self?.afterMenu { Windows.shared.showManage(model: $0, profile: id) }
+        })
         row.update(from: model, id: id)
         row.setEnabled(serviceAvailable)
         let item = NSMenuItem()
@@ -268,6 +275,24 @@ final class StatusMenu: NSObject, NSMenuDelegate {
             target.addItem(split)
             alternatives.append((split, id))
         }
+        // Listed for every VPN that disconnects by itself, enabled once
+        // the disconnection is planned.
+        if let profile = model.profile(id), profile.postponableDisconnect {
+            let postpone = action(String(localized: "Postpone Automatic Disconnection"), #selector(postpone(_:)),
+                                  symbol: "clock.arrow.circlepath")
+            postpone.representedObject = id
+            postpone.indentationLevel = 2
+            postpone.isEnabled = serviceAvailable && canPostpone(id)
+            target.addItem(postpone)
+            postpones.append((postpone, id))
+        }
+    }
+
+    /// Up, with a disconnection planned that a request can put off.
+    private func canPostpone(_ id: String) -> Bool {
+        guard let session = model.sessions[id], session.state == .connected,
+              let planned = session.autoDisconnect else { return false }
+        return planned.criterion != .idle
     }
 
     /// `symbol`: every action has an icon, so that the menu reads as one
@@ -285,6 +310,10 @@ final class StatusMenu: NSObject, NSMenuDelegate {
 
     @objc private func connectSplit(_ sender: NSMenuItem) {
         if let id = sender.representedObject as? String { model.connect(id, split: true) }
+    }
+
+    @objc private func postpone(_ sender: NSMenuItem) {
+        if let id = sender.representedObject as? String { model.postpone(id) }
     }
 
     @objc private func disconnectAll() { Task { await model.disconnectAll() } }
@@ -306,27 +335,35 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     @objc private func quit() { NSApp.terminate(nil) }
 }
 
-/// A VPN in the menu: state dot, name, one line of detail, and a switch.
+/// A VPN in the menu: state dot, name, one line of detail, a switch, and
+/// a gear that opens its settings.
 final class VPNRow: NSView {
     private let dot = NSImageView()
     private let title = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
     private let toggle = MenuSwitch()
+    private let gear = PressableImage()
     private let onToggle: (Bool) -> Void
+    private let onSettings: () -> Void
 
-    init(onToggle: @escaping (Bool) -> Void) {
+    init(onToggle: @escaping (Bool) -> Void, onSettings: @escaping () -> Void) {
         self.onToggle = onToggle
+        self.onSettings = onSettings
         super.init(frame: NSRect(x: 0, y: 0, width: 320, height: 44))
         title.font = .menuFont(ofSize: NSFont.systemFontSize)
         detail.font = .menuFont(ofSize: NSFont.smallSystemFontSize)
         detail.textColor = .secondaryLabelColor
         detail.lineBreakMode = .byTruncatingTail
         toggle.onPress = { [weak self] in self?.flip() }
+        gear.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: String(localized: "Settings"))
+        gear.contentTintColor = .secondaryLabelColor
+        gear.toolTip = String(localized: "Settings")
+        gear.onPress = onSettings
         let text = NSStackView(views: [title, detail])
         text.orientation = .vertical
         text.alignment = .leading
         text.spacing = 1
-        for view in [dot, text, toggle] as [NSView] {
+        for view in [dot, text, gear, toggle] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
@@ -338,7 +375,10 @@ final class VPNRow: NSView {
             text.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 8),
             text.centerYAnchor.constraint(equalTo: centerYAnchor),
             text.trailingAnchor.constraint(lessThanOrEqualTo: toggle.leadingAnchor, constant: -10),
-            toggle.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            toggle.trailingAnchor.constraint(equalTo: gear.leadingAnchor, constant: -10),
+            gear.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            gear.centerYAnchor.constraint(equalTo: centerYAnchor),
+            gear.widthAnchor.constraint(equalToConstant: 16),
             toggle.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
@@ -354,12 +394,21 @@ final class VPNRow: NSView {
     /// Clicking anywhere on the row, the switch included, flips the switch;
     /// so does releasing on it after a drag from the menu bar icon, as for
     /// any menu entry.
-    override func mouseUp(with event: NSEvent) { flip() }
+    /// The gear (with some margin around it) opens the VPN's settings.
+    override func mouseUp(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if gear.frame.insetBy(dx: -5, dy: -8).contains(point) {
+            onSettings()
+        } else {
+            flip()
+        }
+    }
 
     /// Clicks go to the row, but VoiceOver's pointer finds the switch.
     override func accessibilityHitTest(_ point: NSPoint) -> Any? {
         guard let window else { return super.accessibilityHitTest(point) }
         let local = convert(window.convertPoint(fromScreen: point), from: nil)
+        if gear.frame.contains(local) { return gear }
         return toggle.frame.contains(local) ? toggle : super.accessibilityHitTest(point)
     }
 
@@ -391,6 +440,12 @@ final class VPNRow: NSView {
                 if let address = session.address { parts.append(address) }
                 parts.append("↓ \(bytes(session.rxBytes)) ↑ \(bytes(session.txBytes))")
                 if let since = session.connectedSince { parts.append(duration(since: since)) }
+                // An idle deadline moves with every input: not worth showing.
+                if let planned = session.autoDisconnect, planned.criterion != .idle {
+                    let time = Date(timeIntervalSince1970: TimeInterval(planned.at))
+                        .formatted(date: .omitted, time: .shortened)
+                    parts.append(String(localized: "ends at \(time)"))
+                }
                 return (parts.joined(separator: " · "), .systemGreen)
             case .connecting:
                 return (String(localized: "Connecting…"), .systemOrange)
@@ -416,6 +471,17 @@ final class VPNRow: NSView {
             return ("\(kind) · \(String(localized: "via \(through)"))", .tertiaryLabelColor)
         }
         return ("\(kind) · \(profile.host)", .tertiaryLabelColor)
+    }
+}
+
+/// The gear of a VPN row: the row takes its clicks, VoiceOver presses it.
+final class PressableImage: NSImageView {
+    var onPress: (() -> Void)?
+
+    override func accessibilityRole() -> NSAccessibility.Role? { .button }
+    override func accessibilityPerformPress() -> Bool {
+        onPress?()
+        return true
     }
 }
 

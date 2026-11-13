@@ -65,6 +65,8 @@ final class Windows {
     /// The settings window's tab, so that an open window can be switched.
     private let settingsTab = SettingsView.Selection()
     private var guards: [String: CloseGuard] = [:]
+    /// The editor of the open "Manage VPNs" window, to show another VPN in.
+    private weak var manageEditing: ProfileEditing?
 
     /// One window per kind (settings, welcome, import), brought forward if open.
     func show<Content: View>(_ key: String, title: String, resizable: Bool = false,
@@ -82,7 +84,22 @@ final class Windows {
         guards[key] = shouldClose.map(CloseGuard.init)
         window.delegate = guards[key]
         named[key] = window
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: window, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.updateActivationPolicy(closing: window) }
+        }
+        updateActivationPolicy()
         bringForward(window)
+    }
+
+    /// While one of these windows is open, the app is a regular one, in the
+    /// Dock and in ⌘-Tab: a window gone behind another app can be found
+    /// again. With none, it is back to the menu bar only.
+    private func updateActivationPolicy(closing: NSWindow? = nil) {
+        let open = named.values.contains { $0 !== closing && ($0.isVisible || $0.isMiniaturized) }
+        let policy: NSApplication.ActivationPolicy = open || closing == nil ? .regular : .accessory
+        if NSApp.activationPolicy() != policy { NSApp.setActivationPolicy(policy) }
     }
 
     func close(_ key: String) {
@@ -107,7 +124,13 @@ final class Windows {
 
     /// `profile`: shown in the editor, when the window opens.
     func showManage(model: AppModel, profile: String? = nil) {
+        if let window = named["manage"], window.isVisible || window.isMiniaturized, let editing = manageEditing {
+            bringForward(window)
+            if let profile, profile != editing.selection { editing.leave { editing.select(profile) } }
+            return
+        }
         let editing = ProfileEditing(model: model)
+        manageEditing = editing
         if let profile { editing.select(profile) }
         show("manage", title: String(localized: "Manage VPNs"), resizable: true, shouldClose: editing.shouldClose) {
             ManageView(model: model, editing: editing)

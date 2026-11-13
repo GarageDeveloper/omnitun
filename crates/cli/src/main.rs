@@ -52,6 +52,12 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
+    /// Put off the automatic disconnection of sessions: the time connected
+    /// starts again, a time of day moves an hour later.
+    Postpone {
+        #[arg(value_name = "PROFILE", required = true)]
+        names: Vec<String>,
+    },
     /// Show active sessions.
     Status {
         #[arg(long)]
@@ -295,6 +301,13 @@ async fn main() -> anyhow::Result<()> {
             for (id, name) in targets {
                 daemon().await?.disconnect(&id).await?;
                 println!("{name}: disconnected");
+            }
+        }
+        Command::Postpone { names } => {
+            for key in names {
+                let profile = store.find(&key)?;
+                daemon().await?.postpone(&profile.id).await?;
+                println!("{}: automatic disconnection postponed", profile.name);
             }
         }
         Command::Status { json } => {
@@ -645,6 +658,15 @@ fn print_status(sessions: &[SessionInfo]) {
                 .as_ref()
                 .map_or(String::new(), |(at, why)| format!("; last drop {} ago: {}", ago(*at), printable(why)));
             row("drops", format!("{} reconnection attempt(s){last}", s.reconnects));
+        }
+        if let Some(planned) = &s.auto_disconnect {
+            use vpn_core::auto_disconnect::Criterion;
+            let why = match planned.criterion {
+                Criterion::After => format!("{} connected", planned.limit),
+                Criterion::Idle => format!("{} without activity", planned.limit),
+                Criterion::At => format!("at {}", planned.limit),
+            };
+            row("disconnects", format!("in {} ({why})", elapsed(planned.at.saturating_sub(now))));
         }
         if let Some(detail) = &s.detail
             && s.state != SessionState::Connected

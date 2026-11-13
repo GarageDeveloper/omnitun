@@ -592,6 +592,7 @@ fn convert(config: &Config, text: &str, notes: &mut Vec<String>) -> anyhow::Resu
         allow_route_overlap: false,
         via: Vec::new(),
         exclusive: false,
+        auto_disconnect: Default::default(),
     })
 }
 
