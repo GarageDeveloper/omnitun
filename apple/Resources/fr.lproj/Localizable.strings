@@ -378,6 +378,7 @@
 "Version %@" = "Version %@";
 "A VPN client for FortiGate SSL VPN, IPsec, OpenVPN, L2TP and WireGuard, several at a time." = "Un client VPN pour le VPN SSL FortiGate, IPsec, OpenVPN, L2TP et WireGuard, plusieurs à la fois.";
 "Free software: use, change and share it under the MIT license or the Apache License 2.0, as you prefer." = "Logiciel libre : utilisez-le, modifiez-le et partagez-le selon la licence MIT ou la licence Apache 2.0, au choix.";
+"Source Code on GitHub" = "Code source sur GitHub";
 "MIT License" = "Licence MIT";
 "Apache License 2.0" = "Licence Apache 2.0";
 "OpenVPN or WireGuard File (.ovpn, .conf)…" = "Fichier OpenVPN ou WireGuard (.ovpn, .conf)…";
