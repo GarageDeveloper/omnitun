@@ -146,11 +146,18 @@ impl AppliedConfig {
             // Keep the encrypted transport itself off every tunnel.
             let mut routes = GATEWAY_ROUTES.lock().await;
             if let std::collections::hash_map::Entry::Vacant(entry) = routes.entry(gateway) {
+                // A gateway on the uplink's own network (a server on the
+                // LAN) is reached directly: through the router, its answers
+                // may never come back.
+                let uplink = match on_link(&uplink, gateway).await {
+                    true => Uplink { gateway: None, interface: uplink.interface.clone() },
+                    false => uplink.clone(),
+                };
                 // Never take ownership of a host route someone else installed.
                 add_route(Ipv4Net::from(gateway), &Via::Physical(uplink.clone()))
                     .await
                     .with_context(|| format!("cannot add host route to gateway {gateway}"))?;
-                entry.insert((0, uplink.clone()));
+                entry.insert((0, uplink));
             }
             routes.get_mut(&gateway).expect("inserted above").0 += 1;
             drop(routes);
@@ -415,6 +422,54 @@ async fn uplink() -> anyhow::Result<Uplink> {
         gateway: after("via").and_then(|g| g.parse().ok()),
         interface: after("dev").context("default route has no device")?.to_owned(),
     })
+}
+
+/// Whether `address` is on the network of the uplink's interface: the
+/// interface's own route there goes through no router. A failed lookup
+/// keeps the router.
+#[cfg(target_os = "macos")]
+async fn on_link(uplink: &Uplink, address: Ipv4Addr) -> bool {
+    if uplink.gateway.is_none() {
+        return false;
+    }
+    let address = address.to_string();
+    match cmd::run("/sbin/route", &["-n", "get", "-ifscope", &uplink.interface, &address]).await {
+        Ok(out) => macos_on_link(&out),
+        Err(e) => {
+            tracing::debug!("cannot look up the route to {address}: {e:#}");
+            false
+        }
+    }
+}
+
+/// `route get`'s answer names a route through a router with its
+/// `GATEWAY` flag.
+#[cfg(any(target_os = "macos", test))]
+fn macos_on_link(out: &str) -> bool {
+    out.lines()
+        .filter_map(|l| l.trim().strip_prefix("flags:"))
+        .any(|flags| !flags.trim().trim_matches(['<', '>']).split(',').any(|f| f == "GATEWAY"))
+}
+
+#[cfg(target_os = "linux")]
+async fn on_link(uplink: &Uplink, address: Ipv4Addr) -> bool {
+    if uplink.gateway.is_none() {
+        return false;
+    }
+    let address = address.to_string();
+    match cmd::run("ip", &["-4", "route", "get", &address, "oif", &uplink.interface]).await {
+        Ok(out) => linux_on_link(&out),
+        Err(e) => {
+            tracing::debug!("cannot look up the route to {address}: {e:#}");
+            false
+        }
+    }
+}
+
+/// `ip route get`'s answer names the router after `via`.
+#[cfg(any(target_os = "linux", test))]
+fn linux_on_link(out: &str) -> bool {
+    out.lines().next().is_some_and(|l| !l.is_empty() && !l.split_whitespace().any(|w| w == "via"))
 }
 
 fn physical(net: Ipv4Net, uplink: &Uplink) -> journal::Entry {
@@ -909,6 +964,21 @@ use windows::*;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gateway_on_the_link() {
+        let lan = "   route to: 192.168.0.20\ndestination: 192.168.0.0\n       mask: 255.255.255.0\n  \
+                   interface: en0\n      flags: <UP,DONE,CLONING,STATIC>\n";
+        let remote = "   route to: 1.1.1.1\ndestination: default\n    gateway: 192.168.0.1\n  \
+                      interface: en0\n      flags: <UP,GATEWAY,DONE,STATIC,PRCLONING,GLOBAL>\n";
+        assert!(super::macos_on_link(lan));
+        assert!(!super::macos_on_link(remote));
+        assert!(!super::macos_on_link(""));
+
+        assert!(super::linux_on_link("192.168.0.20 dev eth0 src 192.168.0.3 uid 0\n    cache\n"));
+        assert!(!super::linux_on_link("1.1.1.1 via 192.168.0.1 dev eth0 src 192.168.0.3 uid 0\n    cache\n"));
+        assert!(!super::linux_on_link(""));
+    }
+
     #[test]
     fn resolvers_in_place() {
         let scutil = "DNS configuration\n\nresolver #1\n  search domain[0] : localdomain\n  \
