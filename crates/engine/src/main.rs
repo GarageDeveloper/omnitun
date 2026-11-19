@@ -153,6 +153,9 @@ async fn main() -> anyhow::Result<()> {
     };
     if args.first().map(String::as_str) == Some("--dns-proxy") {
         use std::os::windows::io::FromRawSocket;
+        // Winsock starts with the first socket the standard library makes;
+        // inherited ones are used before that otherwise (WSANOTINITIALISED).
+        drop(std::net::UdpSocket::bind(("127.0.0.1", 0)));
         // SAFETY: sockets this process inherited, bound by the daemon,
         // owned from now on.
         let (udp, tcp) = unsafe {
