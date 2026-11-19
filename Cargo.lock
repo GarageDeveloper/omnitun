@@ -3662,6 +3662,7 @@ dependencies = [
  "tracing",
  "tun-rs",
  "vpn-core",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3705,6 +3706,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vpn-core",
+ "vpn-platform",
  "zeroize",
 ]
 

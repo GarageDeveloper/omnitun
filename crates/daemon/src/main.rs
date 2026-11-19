@@ -160,6 +160,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("listening on {} (group {})", args.socket, args.group);
     #[cfg(unix)]
     logfile::spawn_rotation();
+    vpn_platform::prepare_runtime_dir()?;
     vpn_platform::cleanup_stale().await;
     manager::prepare_prompt_dir(&vpn_core::ipc::prompt_socket_dir(&args.socket))?;
     let manager = Arc::new(Manager::new(launcher, args.socket.clone()));

@@ -20,6 +20,8 @@ pub struct TunInterface {
 /// configures routes and DNS on `name` and hands the descriptor over.
 pub struct TunDevice {
     pub name: String,
+    /// Windows: read by the packet relay to the engine (not written yet).
+    #[cfg_attr(windows, allow(dead_code))]
     device: tun_rs::SyncDevice,
 }
 
@@ -32,17 +34,29 @@ impl TunDevice {
 
 /// Creates the interface for a session's settings, without moving packets.
 pub fn create_device(settings: &TunnelSettings) -> anyhow::Result<TunDevice> {
-    let device =
-        DeviceBuilder::new().ipv4(settings.address, 32, Some(settings.address)).mtu(settings.mtu).build_sync()?;
+    let device = builder(settings)?.build_sync()?;
     Ok(TunDevice { name: device.name()?, device })
 }
 
 /// Creates the interface for a session and returns the engine side of the
 /// packet channels. Pumps stop when `cancel` fires or a channel closes.
 pub fn create(settings: &TunnelSettings, cancel: CancellationToken) -> anyhow::Result<(TunInterface, PacketIo)> {
-    let device =
-        DeviceBuilder::new().ipv4(settings.address, 32, Some(settings.address)).mtu(settings.mtu).build_async()?;
+    let device = builder(settings)?.build_async()?;
     bridge(device, settings.mtu, cancel)
+}
+
+/// A point-to-point interface with the tunnel's address. On Windows, a
+/// Wintun adapter: the destination would be a default route's gateway
+/// there, and `wintun.dll` is the one next to this program.
+fn builder(settings: &TunnelSettings) -> anyhow::Result<DeviceBuilder> {
+    let peer = if cfg!(windows) { None } else { Some(settings.address) };
+    let builder = DeviceBuilder::new().ipv4(settings.address, 32, peer).mtu(settings.mtu);
+    #[cfg(windows)]
+    let builder = {
+        let dll = std::env::current_exe()?.with_file_name("wintun.dll");
+        builder.wintun_file(dll.display().to_string()).description(vpn_core::brand::PRODUCT)
+    };
+    Ok(builder)
 }
 
 /// Moves packets for an interface received from the daemon (engine side).

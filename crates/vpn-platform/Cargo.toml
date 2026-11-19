@@ -17,3 +17,15 @@ tun-rs = { version = "2.8", features = ["async_tokio"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", features = ["socket", "uio", "fs"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Registry",
+] }

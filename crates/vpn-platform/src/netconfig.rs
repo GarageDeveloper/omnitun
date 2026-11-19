@@ -10,8 +10,10 @@ use anyhow::{Context, bail};
 use ipnet::{Ipv4Net, Ipv6Net};
 use vpn_core::TunnelSettings;
 
+#[cfg(unix)]
+use crate::cmd;
 use crate::dynamic::{self, Direction, DynamicRoutes};
-use crate::{cmd, journal};
+use crate::journal;
 
 /// Gateway host routes are shared by sessions talking to the same gateway:
 /// count of sessions, and the uplink the route was added through. Held
@@ -773,10 +775,7 @@ pub async fn current_resolvers(ignore: &[String]) -> anyhow::Result<Vec<SocketAd
     #[cfg(target_os = "linux")]
     let servers = link_resolvers_linux(&cmd::run("resolvectl", &["dns"]).await?, ignore);
     #[cfg(windows)]
-    let servers: Vec<SocketAddr> = {
-        let _ = ignore;
-        windows::unsupported()?
-    };
+    let servers = windows::current_resolvers(ignore).await?;
     if servers.is_empty() {
         bail!("no DNS server in use");
     }
@@ -904,73 +903,9 @@ async fn cleanup_stale_dns() {
 async fn cleanup_stale_dns() {}
 
 #[cfg(windows)]
-use windows::*;
-
-/// Windows: routes through the IP Helper API, DNS on the interface and in
-/// the NRPT. Not written yet: every change fails, so a session cannot start.
+mod windows;
 #[cfg(windows)]
-mod windows {
-    use super::*;
-
-    pub(super) fn unsupported<T>() -> anyhow::Result<T> {
-        bail!("routes and DNS are not supported on Windows yet")
-    }
-
-    pub(super) async fn uplink() -> anyhow::Result<Uplink> {
-        unsupported()
-    }
-
-    pub(super) async fn os_add_route(_net: Ipv4Net, _via: &Via) -> anyhow::Result<()> {
-        unsupported()
-    }
-
-    pub(super) async fn os_delete_route(_net: Ipv4Net, _via: &Via) -> anyhow::Result<()> {
-        unsupported()
-    }
-
-    pub(super) async fn ipv6_capable(_interface: &str) -> anyhow::Result<()> {
-        unsupported()
-    }
-
-    pub(super) async fn block_ipv6(_net: Ipv6Net, _interface: &str) -> anyhow::Result<()> {
-        unsupported()
-    }
-
-    pub(super) async fn unblock_ipv6(_net: Ipv6Net, _interface: &str) -> anyhow::Result<()> {
-        unsupported()
-    }
-
-    pub(super) async fn set_dns(_session: &str, _interface: &str, _settings: &TunnelSettings) -> anyhow::Result<()> {
-        unsupported()
-    }
-
-    pub(super) async fn clear_dns(_session: &str, _interface: &str) -> anyhow::Result<()> {
-        unsupported()
-    }
-
-    pub(super) async fn set_proxy_dns(
-        _session: &str,
-        _interface: &str,
-        _settings: &TunnelSettings,
-        _port: u16,
-        _domains: &[String],
-    ) -> anyhow::Result<()> {
-        unsupported()
-    }
-
-    pub(super) async fn clear_proxy_dns(
-        _session: &str,
-        _interface: &str,
-        _settings: &TunnelSettings,
-        _restore: bool,
-    ) -> anyhow::Result<()> {
-        unsupported()
-    }
-
-    pub(super) async fn flush_dns_cache() {}
-
-    pub(super) async fn cleanup_stale_dns() {}
-}
+use windows::*;
 
 #[cfg(test)]
 mod tests {
