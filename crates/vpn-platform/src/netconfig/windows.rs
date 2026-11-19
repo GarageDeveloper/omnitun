@@ -182,19 +182,19 @@ fn route_row(net: Ipv4Net, via: &Via) -> anyhow::Result<MIB_IPFORWARD_ROW2> {
         Via::Interface(alias) => (index_of(alias)?, Ipv4Addr::UNSPECIFIED),
         Via::Physical(Uplink { gateway, interface }) => {
             let index = interface.parse().with_context(|| format!("bad interface index {interface}"))?;
-            // A destination on the uplink's own network (a gateway on the
-            // LAN) is reached directly, not through the router.
-            let next_hop = if on_link(index, net.addr()) { None } else { *gateway };
-            (index, next_hop.unwrap_or(Ipv4Addr::UNSPECIFIED))
+            (index, gateway.unwrap_or(Ipv4Addr::UNSPECIFIED))
         }
     };
     Ok(row(IpAddr::V4(net.addr()), net.prefix_len(), index, next_hop.into()))
 }
 
-/// Whether `address` is on the network of interface `index`: its best
-/// route there has no next hop. A host route this module added on the link
-/// says the same, so a route is deleted as it was added.
-fn on_link(index: u32, address: Ipv4Addr) -> bool {
+/// Whether `address` is on the network of the uplink's interface: its
+/// best route there has no next hop.
+pub(super) async fn on_link(uplink: &Uplink, address: Ipv4Addr) -> bool {
+    if uplink.gateway.is_none() {
+        return false;
+    }
+    let Ok(index) = uplink.interface.parse::<u32>() else { return false };
     let destination = sockaddr(IpAddr::V4(address));
     let (mut best, mut source) = (MIB_IPFORWARD_ROW2::default(), SOCKADDR_INET::default());
     // SAFETY: valid pointers for the call's duration.
