@@ -9,6 +9,8 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod manage;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -200,15 +202,29 @@ fn sessions(state: tauri::State<'_, Shared>) -> Vec<SessionInfo> {
 }
 
 /// Brings `id` up; returns once the daemon took it over, or with why not.
+/// `direct`: without the VPNs it is chained through; `split`: only its
+/// split mode networks.
 #[tauri::command]
-async fn connect(app: AppHandle, state: tauri::State<'_, Shared>, id: String) -> Result<(), String> {
+async fn connect(
+    app: AppHandle,
+    state: tauri::State<'_, Shared>,
+    id: String,
+    direct: Option<bool>,
+    split: Option<bool>,
+) -> Result<(), String> {
     let store = store()?;
     let profile = store.find(&id).map_err(|e| format!("{e:#}"))?;
     let name = profile.name.clone();
     let window = Window { app: app.clone(), state: state.inner().clone(), profile: Mutex::new(name.clone()) };
-    let connected = vpn_client::connect_with(profile, &store, CLIENT, &window, ConnectOptions::default())
-        .await
-        .map_err(|e| format!("{e:#}"))?;
+    let connected = vpn_client::connect_with(
+        profile,
+        &store,
+        CLIENT,
+        &window,
+        ConnectOptions { direct: direct.unwrap_or(false), split: split.unwrap_or(false) },
+    )
+    .await
+    .map_err(|e| format!("{e:#}"))?;
     if connected.signs() {
         // The key stays here: this process signs while the session needs it.
         let task = tokio::spawn(connected.signing());
@@ -250,21 +266,36 @@ fn trust(state: tauri::State<'_, Shared>, id: u64, decision: String) {
     }
 }
 
-/// Opens the profiles file in Notepad (created empty if missing).
+/// Opens the profiles window, on profile `id` if given. Async: on Windows,
+/// a window built from a synchronous command blocks its webview.
 #[tauri::command]
-fn edit_profiles() -> Result<(), String> {
-    let store = store()?;
-    let path = store.path().to_owned();
-    if !path.exists() {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        }
-        std::fs::write(&path, "# Omnitun profiles: see the README for the fields of each protocol.\n")
-            .map_err(|e| e.to_string())?;
+async fn open_manager(app: AppHandle, id: Option<String>) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("manage") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+        let _ = app.emit_to("manage", "select", id);
+        return Ok(());
     }
-    let editor = if cfg!(windows) { "notepad" } else { "open" };
-    std::process::Command::new(editor).arg(&path).spawn().map_err(|e| e.to_string())?;
+    let url = match &id {
+        Some(id) => format!("manage.html#{id}"),
+        None => "manage.html".to_owned(),
+    };
+    tauri::WebviewWindowBuilder::new(&app, "manage", tauri::WebviewUrl::App(url.into()))
+        .title(tr("Manage VPNs", "Gérer les VPN"))
+        .inner_size(980.0, 680.0)
+        .min_inner_size(760.0, 480.0)
+        .build()
+        .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// The profiles changed in the profiles window: the main window and the
+/// tray menu read them again.
+#[tauri::command]
+fn profiles_changed(app: AppHandle, state: tauri::State<'_, Shared>) {
+    let _ = app.emit_to("main", "profiles-changed", ());
+    refresh_tray(&app, &state);
 }
 
 #[tauri::command]
@@ -380,10 +411,18 @@ fn newer(a: &str, b: &str) -> bool {
     parse(a) > parse(b)
 }
 
-/// The icon's menu: the profiles (checked when up), the window, Quit.
+/// `en`, or `fr` when Windows speaks French (as the windows do).
+fn tr(en: &'static str, fr: &'static str) -> &'static str {
+    let french = sys_locale::get_locale().is_some_and(|l| l.to_ascii_lowercase().starts_with("fr"));
+    if french { fr } else { en }
+}
+
+/// The icon's menu: the window, the profiles window, the profiles (checked
+/// when up), Quit.
 fn tray_menu(app: &AppHandle, state: &State) -> tauri::Result<Menu<tauri::Wry>> {
     let menu = Menu::new(app)?;
     menu.append(&MenuItem::with_id(app, "open", "Omnitun…", true, None::<&str>)?)?;
+    menu.append(&MenuItem::with_id(app, "manage", tr("Manage VPNs…", "Gérer les VPN…"), true, None::<&str>)?)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     let up: Vec<String> = state
         .sessions
@@ -407,10 +446,10 @@ fn tray_menu(app: &AppHandle, state: &State) -> tauri::Result<Menu<tauri::Wry>> 
                 )?)?;
             }
         }
-        _ => menu.append(&MenuItem::with_id(app, "none", "No profile", false, None::<&str>)?)?,
+        _ => menu.append(&MenuItem::with_id(app, "none", tr("No profile", "Aucun profil"), false, None::<&str>)?)?,
     }
     menu.append(&PredefinedMenuItem::separator(app)?)?;
-    menu.append(&MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?)?;
+    menu.append(&MenuItem::with_id(app, "quit", tr("Quit", "Quitter"), true, None::<&str>)?)?;
     Ok(menu)
 }
 
@@ -430,6 +469,7 @@ fn main() {
     let state: Shared = Arc::default();
     let hidden = std::env::args().any(|a| a == "--hidden");
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![
             profiles,
@@ -438,7 +478,33 @@ fn main() {
             disconnect,
             answer,
             trust,
-            edit_profiles,
+            open_manager,
+            profiles_changed,
+            manage::profile_summaries,
+            manage::profile_form,
+            manage::new_profile_form,
+            manage::save_profile,
+            manage::stored_secrets,
+            manage::remove_profile,
+            manage::move_profile,
+            manage::duplicate_profile,
+            manage::export_profile,
+            manage::read_vpnprofile,
+            manage::replace_trusted_certificate,
+            manage::identities,
+            manage::wireguard_public_key,
+            manage::new_wireguard_private_key,
+            manage::certificate_file,
+            manage::certificate_names,
+            manage::read_text,
+            manage::proposals_as_text,
+            manage::proposals_as_choices,
+            manage::entry_error,
+            manage::parse_list,
+            manage::import_preview,
+            manage::add_imported,
+            manage::add_wireguard,
+            manage::is_wireguard_config,
             update,
             open_releases,
             version
@@ -457,6 +523,12 @@ fn main() {
                         let id = event.id().as_ref().to_owned();
                         match id.as_str() {
                             "open" => show(app),
+                            "manage" => {
+                                let app = app.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    let _ = open_manager(app, None).await;
+                                });
+                            }
                             "quit" => app.exit(0),
                             _ => {
                                 let Some(profile) = id.strip_prefix("p:") else { return };
@@ -472,7 +544,7 @@ fn main() {
                                     let result = if up {
                                         disconnect(state, profile).await
                                     } else {
-                                        connect(app.clone(), state, profile).await
+                                        connect(app.clone(), state, profile, None, None).await
                                     };
                                     if let Err(e) = result {
                                         let _ = app.emit("error", e);

@@ -8,8 +8,9 @@ const { listen } = window.__TAURI__.event;
 
 const STRINGS = {
   en: {
-    edit: "Edit profiles",
-    empty: "No profile yet: add one with Edit profiles, or import with omnitunctl import.",
+    edit: "Manage VPNs",
+    settings: "Settings",
+    empty: "No VPN yet: create or import one with Manage VPNs.",
     connect: "Connect",
     disconnect: "Disconnect",
     cancel: "Cancel",
@@ -37,8 +38,9 @@ const STRINGS = {
     pinned: "Certificate saved in the profile.",
   },
   fr: {
-    edit: "Modifier les profils",
-    empty: "Aucun profil : ajoutez-en avec Modifier les profils, ou importez-les avec omnitunctl import.",
+    edit: "Gérer les VPN",
+    settings: "Réglages",
+    empty: "Aucun VPN : créez-en ou importez-en avec Gérer les VPN.",
     connect: "Connecter",
     disconnect: "Déconnecter",
     cancel: "Annuler",
@@ -123,6 +125,7 @@ function render() {
         el("span", { class: `dot ${state}` }),
         el("span", { class: "name", title: p.name }, p.name),
         el("span", { class: "protocol" }, s && state !== "connected" ? t(state) : p.protocol),
+        el("button", { class: "gear", title: t("settings"), onclick: () => invoke("open_manager", { id: p.id }) }, "⚙"),
         button));
     if (s && state === "connected") {
       const now = Date.now() / 1000;
@@ -255,7 +258,8 @@ function askTrust(view) {
 
 async function main() {
   for (const node of document.querySelectorAll("[data-i18n]")) node.textContent = t(node.dataset.i18n);
-  document.getElementById("edit").addEventListener("click", () => invoke("edit_profiles").catch((e) => banner(String(e))));
+  document.getElementById("edit").addEventListener("click", () => invoke("open_manager", { id: null }).catch((e) => banner(String(e))));
+  await listen("profiles-changed", loadProfiles);
   document.getElementById("prompt-cancel").addEventListener("click", () => document.getElementById("prompt").close("cancel"));
   document.getElementById("update-open").addEventListener("click", () => invoke("open_releases"));
   document.getElementById("version").textContent = `Omnitun ${await invoke("version")}`;

@@ -89,3 +89,5 @@ dialog menu { display: flex; justify-content: flex-end; gap: 8px; padding: 0; ma
 .muted { color: var(--muted); font-size: 12px; }
 .mono { font-family: Consolas, ui-monospace, monospace; word-break: break-all; }
 .small { font-size: 11px; }
+button.gear { border: none; background: none; padding: 2px 4px; color: var(--muted); font-size: 15px; }
+button.gear:hover { color: var(--accent); }

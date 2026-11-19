@@ -21,6 +21,10 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 vpn-core = { path = "../../crates/vpn-core" }
 vpn-client = { path = "../../crates/vpn-client" }
+# The editor's form and checks, as the macOS app uses them.
+vpn-ffi = { path = "../../crates/vpn-ffi", features = ["serde"] }
+tauri-plugin-dialog = "2"
+sys-locale = "0.3"
 tauri = { version = "2", features = ["tray-icon"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

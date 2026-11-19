@@ -1,0 +1,34 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Omnitun</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="manage.css">
+  <script src="manage.js" defer></script>
+</head>
+<body class="manage">
+  <div id="split">
+    <aside id="sidebar">
+      <div id="tree" tabindex="0"></div>
+      <div id="bar">
+        <button id="add" title="" aria-haspopup="menu">+</button>
+        <button id="remove" title="">−</button>
+        <span class="spacer"></span>
+        <button id="import" aria-haspopup="menu"></button>
+      </div>
+    </aside>
+    <section id="detail"></section>
+  </div>
+  <div id="menu" class="popup" role="menu" hidden></div>
+  <dialog id="modal">
+    <form method="dialog">
+      <p id="modal-title" class="profile"></p>
+      <div id="modal-text" class="modal-text"></div>
+      <div id="modal-body"></div>
+      <menu id="modal-buttons"></menu>
+    </form>
+  </dialog>
+</body>
+</html>
