@@ -22,7 +22,8 @@ static VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(vpn_core:
 #[derive(Parser)]
 #[command(version = VERSION.as_str(), about = "Omnitun command line: connect, disconnect and configure VPNs")]
 struct Cli {
-    /// Profiles file (default: ~/.config/omnitun/profiles.toml).
+    /// Profiles file (default: profiles.toml in ~/.config/omnitun, or
+    /// %APPDATA%\omnitun on Windows).
     #[arg(long, global = true, value_hint = ValueHint::FilePath)]
     config: Option<PathBuf>,
     #[command(subcommand)]
@@ -70,15 +71,17 @@ enum Command {
         #[arg(long)]
         names: bool,
     },
-    /// List the Keychain certificates usable for IPsec authentication (the
-    /// SHA-256 goes in a profile's client_certificate).
+    /// List the certificates usable for authentication: the macOS Keychain's,
+    /// or those of the Windows personal certificate store (the SHA-256 goes
+    /// in a profile's client_certificate).
     Identities,
     /// Import profiles from another VPN client.
     Import {
         #[command(subcommand)]
         source: ImportSource,
     },
-    /// Manage secrets stored in the keychain for a profile.
+    /// Manage secrets stored for a profile (Keychain, Secret Service, or
+    /// Windows Credential Manager).
     Secret {
         #[command(subcommand)]
         action: SecretAction,
@@ -231,7 +234,9 @@ async fn main() -> anyhow::Result<()> {
     }
     let store = ProfileStore::open(cli.config)?;
     if store.is_legacy() {
-        eprintln!("note: using {}; move it to ~/.config/{}/", store.path().display(), brand::ID);
+        let to = vpn_client::profiles::config_dir()
+            .map_or_else(|| format!("~/.config/{}", brand::ID), |d| d.display().to_string());
+        eprintln!("note: using {}; move it to {to}", store.path().display());
     }
     match cli.command {
         Command::Connect { names, direct, split } => {

@@ -14,6 +14,8 @@ pub const PROFILE: &str = "PROFILE";
 pub enum Shell {
     Bash,
     Zsh,
+    #[value(name = "powershell")]
+    PowerShell,
 }
 
 /// The completion script for `shell`.
@@ -23,6 +25,7 @@ pub fn script(shell: Shell, command: &mut clap::Command) -> anyhow::Result<Strin
     let generator = match shell {
         Shell::Bash => clap_complete::Shell::Bash,
         Shell::Zsh => clap_complete::Shell::Zsh,
+        Shell::PowerShell => clap_complete::Shell::PowerShell,
     };
     clap_complete::generate(generator, command, &name, &mut out);
     let generated = String::from_utf8(out)?;
@@ -33,7 +36,28 @@ pub fn script(shell: Shell, command: &mut clap::Command) -> anyhow::Result<Strin
     match shell {
         Shell::Bash => bash(&generated, &name, &profiles, &value_options(command)),
         Shell::Zsh => zsh(&generated, &name, &profiles),
+        Shell::PowerShell => powershell(&generated, &name, &profiles),
     }
+}
+
+/// PowerShell: each subcommand that takes a profile offers the names too
+/// (`clap_complete` lists its completions per subcommand, as
+/// `'omnitunctl;secret;set' {`). Load it from the profile:
+/// `omnitunctl completions powershell | Out-String | Invoke-Expression`.
+fn powershell(generated: &str, name: &str, profiles: &[ProfileArgument]) -> anyhow::Result<String> {
+    let mut script = generated.to_owned();
+    let mut paths: Vec<&[String]> = profiles.iter().map(|p| p.path.as_slice()).collect();
+    paths.dedup();
+    for path in paths {
+        let case = format!("'{name};{}' {{", path.join(";"));
+        let Some(at) = script.find(&case) else { bail!("no completion case {case} in the generated script") };
+        let line = format!(
+            "\n            & '{name}' profiles --names 2>$null | ForEach-Object {{ \
+             [CompletionResult]::new($_, $_, [CompletionResultType]::ParameterValue, $_) }}"
+        );
+        script.insert_str(at + case.len(), &line);
+    }
+    Ok(script)
 }
 
 /// An argument that takes a profile: the path of its subcommand, from the
@@ -256,6 +280,16 @@ mod tests {
                 ProfileArgument { path: vec!["secret".into(), "set".into()], id: "profile".into() },
             ]
         );
+    }
+
+    #[test]
+    fn powershell_offers_profiles_where_they_go() {
+        let script = script(Shell::PowerShell, &mut command()).unwrap();
+        let offers = |case: &str| {
+            let start = script.find(&format!("'tool;{case}' {{")).unwrap();
+            script[start..].lines().nth(1).unwrap().contains("profiles --names")
+        };
+        assert!(offers("secret;set"));
     }
 
     #[test]

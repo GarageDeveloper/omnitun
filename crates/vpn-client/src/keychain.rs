@@ -1,4 +1,5 @@
-//! What the user's Keychain holds besides passwords: the certificate
+//! What the user's Keychain holds besides passwords (on Windows, the
+//! certificate store, see `certstore`): the certificate
 //! authorities it trusts (MDM profiles, certificates marked "Always
 //! Trust"), handed to the engine at each connection since the sandboxed
 //! engine cannot read the Keychain; and the identities (certificate and
@@ -6,8 +7,17 @@
 //! the Keychain: the engine asks the client for each signature.
 
 use vpn_core::SignAlgorithm;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 use x509_parser::prelude::{FromDer, X509Certificate};
+
+/// Where identities and saved secrets live, as users know it.
+pub const NAME: &str = if cfg!(target_os = "macos") {
+    "Keychain"
+} else if cfg!(windows) {
+    "certificate store"
+} else {
+    "keychain"
+};
 
 /// A certificate with its private key, as offered in the editor.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,7 +36,9 @@ pub struct Identity {
 pub fn identities() -> anyhow::Result<Vec<Identity>> {
     #[cfg(target_os = "macos")]
     return Ok(macos::identities(None)?.into_iter().filter_map(|(der, _)| describe(&der)).collect());
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    return Ok(crate::certstore::identities()?.iter().filter_map(|der| describe(der)).collect());
+    #[cfg(not(any(target_os = "macos", windows)))]
     Ok(Vec::new())
 }
 
@@ -35,7 +47,9 @@ pub fn identities() -> anyhow::Result<Vec<Identity>> {
 pub fn certificate_chain(sha256: &str) -> anyhow::Result<String> {
     #[cfg(target_os = "macos")]
     return Ok(macos::chain(sha256, None)?.iter().map(|der| pem("CERTIFICATE", der)).collect());
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    return Ok(crate::certstore::chain(sha256)?.iter().map(|der| pem("CERTIFICATE", der)).collect());
+    #[cfg(not(any(target_os = "macos", windows)))]
     anyhow::bail!("client certificates come from the macOS Keychain (certificate {sha256})")
 }
 
@@ -44,7 +58,9 @@ pub fn certificate_chain(sha256: &str) -> anyhow::Result<String> {
 pub fn sign(sha256: &str, algorithm: SignAlgorithm, data: &[u8]) -> anyhow::Result<Vec<u8>> {
     #[cfg(target_os = "macos")]
     return macos::sign(sha256, algorithm, data, None);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    return crate::certstore::sign(sha256, algorithm, data);
+    #[cfg(not(any(target_os = "macos", windows)))]
     anyhow::bail!(
         "client certificates come from the macOS Keychain ({algorithm:?} with {sha256}, {} bytes)",
         data.len()
@@ -53,7 +69,7 @@ pub fn sign(sha256: &str, algorithm: SignAlgorithm, data: &[u8]) -> anyhow::Resu
 
 /// The common name, or the whole name. Many CAs put UTF-8 in
 /// TeletexString, which x509-parser reads as Latin-1.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn common_name(name: &x509_parser::x509::X509Name<'_>) -> String {
     let Some(cn) = name.iter_common_name().next() else { return name.to_string() };
     let value = cn.attr_value();
@@ -64,14 +80,14 @@ fn common_name(name: &x509_parser::x509::X509Name<'_>) -> String {
     .unwrap_or_else(|| name.to_string())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn sha256_hex(der: &[u8]) -> String {
     use sha2::Digest;
     hex::encode(sha2::Sha256::digest(der))
 }
 
 /// EKUs a VPN client certificate may carry, besides none at all.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 const VPN_USAGES: [&str; 5] = [
     "1.3.6.1.5.5.7.3.2",  // clientAuth
     "1.3.6.1.5.5.7.3.17", // ipsecIKE
@@ -80,7 +96,7 @@ const VPN_USAGES: [&str; 5] = [
     "2.5.29.37.0",        // anyExtendedKeyUsage
 ];
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn describe(der: &[u8]) -> Option<Identity> {
     let (_, cert) = X509Certificate::from_der(der).ok()?;
     if let Ok(Some(eku)) = cert.extended_key_usage() {
@@ -115,10 +131,15 @@ pub fn trusted_authorities() -> String {
         Ok(ders) => return ders.iter().map(|der| pem("CERTIFICATE", der)).collect(),
         Err(e) => tracing::warn!("cannot read the Keychain trust settings: {e:#}"),
     }
+    #[cfg(windows)]
+    match crate::certstore::trusted_authorities() {
+        Ok(ders) => return ders.iter().map(|der| pem("CERTIFICATE", der)).collect(),
+        Err(e) => tracing::warn!("cannot read the trusted roots of the certificate store: {e:#}"),
+    }
     String::new()
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 fn pem(label: &str, der: &[u8]) -> String {
     use base64::Engine;
     let body = base64::engine::general_purpose::STANDARD.encode(der);

@@ -2,6 +2,8 @@
 //! the profiles file, secrets in the OS keychain, and the conversation with
 //! `omnitund` (prompts, certificate trust, browser login).
 
+#[cfg(windows)]
+mod certstore;
 pub mod client_key;
 pub mod daemon;
 pub mod diagnostic;

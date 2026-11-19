@@ -440,6 +440,11 @@ impl ProfileStore {
     }
 }
 
+/// Where profiles go: `<config_base>/omnitun`.
+pub fn config_dir() -> Option<PathBuf> {
+    config_base().map(|base| base.join(vpn_core::brand::ID))
+}
+
 /// The per-user config directory: `$XDG_CONFIG_HOME` or `~/.config`;
 /// `%APPDATA%` on Windows.
 fn config_base() -> Option<PathBuf> {

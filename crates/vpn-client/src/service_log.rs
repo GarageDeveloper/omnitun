@@ -1,5 +1,5 @@
-//! The service's log (`/var/log/omnitund.log` and the files its rotation
-//! keeps), taken apart: local time, session, importance; runs of similar
+//! The service's log (`/var/log/omnitund.log`, on Windows in
+//! `%ProgramData%\Omnitun`, and the files its rotation keeps), taken apart: local time, session, importance; runs of similar
 //! lines condensed. Read by `omnitunctl log` and the diagnostic report.
 
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -23,7 +23,11 @@ pub struct Line {
 }
 
 pub fn path() -> String {
-    format!("/var/log/{}.log", brand::DAEMON)
+    if cfg!(windows) {
+        format!(r"{}\{}.log", brand::runtime_dir(), brand::DAEMON)
+    } else {
+        format!("/var/log/{}.log", brand::DAEMON)
+    }
 }
 
 /// The text of the current log file, with an error that says who may

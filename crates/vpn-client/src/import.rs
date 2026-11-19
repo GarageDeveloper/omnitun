@@ -97,13 +97,14 @@ fn ssl(p: &Dictionary, display: &str, name: String) -> Imported {
     if int(p, "PromptForCertificate") == Some(1) {
         writeln!(
             t,
-            "# client certificate required by FortiClient: a Keychain certificate\n\
+            "# client certificate required by FortiClient: a {} certificate\n\
              # client_certificate = \"<sha256>\" ({} identities), or PEM files\n\
              # client_cert = \"…\"\n# client_key = \"…\"",
+            crate::keychain::NAME,
             vpn_core::brand::CLI
         )
         .unwrap();
-        notes.push("client certificate: choose it in the editor (Keychain)".into());
+        notes.push(format!("client certificate: choose it in the editor ({})", crate::keychain::NAME));
     }
     writeln!(
         t,
@@ -143,7 +144,10 @@ fn ipsec(p: &Dictionary, display: &str, name: String) -> Imported {
     }
     let needs_psk = int(p, "AuthMethod").unwrap_or(0) == 0;
     if !needs_psk && version == 2 {
-        notes.push("certificate authentication: choose the client certificate in the editor (Keychain)".into());
+        notes.push(format!(
+            "certificate authentication: choose the client certificate in the editor ({})",
+            crate::keychain::NAME
+        ));
     } else if !needs_psk {
         notes.push("certificate authentication with IKEv1: not supported".into());
     }

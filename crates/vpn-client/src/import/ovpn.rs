@@ -368,11 +368,11 @@ fn convert(config: &Config, text: &str, notes: &mut Vec<String>) -> anyhow::Resu
             notes.push(format!("user name {user:?}, read from {file}"));
         }
         if lines.next().is_some_and(|l| !l.is_empty()) {
-            notes.push(
+            notes.push(format!(
                 "the password in the auth-user-pass file was not imported: it is asked at connection, or can be \
-                 saved in the Keychain"
-                    .into(),
-            );
+                 saved in the {}",
+                crate::keychain::NAME
+            ));
         }
     }
     if auth_user_pass.is_some() && username.is_none() {
@@ -386,14 +386,21 @@ fn convert(config: &Config, text: &str, notes: &mut Vec<String>) -> anyhow::Resu
     if config.has("pkcs12") {
         ensure!(
             client_cert_pem.is_some() || auth_user_pass.is_some(),
-            "PKCS#12 files (pkcs12) are not supported: add the .p12 file to your Keychain and choose its \
-             certificate in the editor, or convert it to cert and key files"
+            "PKCS#12 files (pkcs12) are not supported in profiles: add the .p12 file to your {} and choose its \
+             certificate in the editor, or convert it to cert and key files",
+            crate::keychain::NAME
         );
-        notes.push("pkcs12 is not supported: add the .p12 file to your Keychain and choose it in the editor".into());
+        notes.push(format!(
+            "pkcs12 is not supported in profiles: add the .p12 file to your {} and choose it in the editor",
+            crate::keychain::NAME
+        ));
     }
     for option in ["pkcs11-providers", "pkcs11-id", "cryptoapicert", "management-external-key"] {
         if config.has(option) {
-            notes.push(format!("{option} is not supported: choose a Keychain certificate in the editor"));
+            notes.push(format!(
+                "{option} is not supported: choose a {} certificate in the editor",
+                crate::keychain::NAME
+            ));
         }
     }
     let static_challenge = match config.last("static-challenge") {
@@ -968,7 +975,7 @@ pub(super) mod tests {
         assert!(format!("{:#}", no_ca.err().unwrap()).contains("CA"));
         let p12 =
             import("p12", &[("x.ovpn", &format!("remote vpn.example.com\npkcs12 me.p12\n<ca>\n{}</ca>", pki.ca))], &[]);
-        assert!(format!("{:#}", p12.err().unwrap()).contains("Keychain"));
+        assert!(format!("{:#}", p12.err().unwrap()).contains(crate::keychain::NAME));
     }
 
     #[test]
