@@ -18,6 +18,7 @@ impl From<anyhow::Error> for ClientError {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum FailureCode {
     Unreachable,
@@ -36,6 +37,7 @@ pub enum FailureCode {
 }
 
 /// Why something failed, with what the app needs to explain it.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct FailureInfo {
     pub code: FailureCode,
@@ -79,6 +81,7 @@ impl From<FailureKind> for FailureInfo {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct Certificate {
     pub host: String,
@@ -103,6 +106,7 @@ impl From<&CertificateInfo> for Certificate {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum PromptKind {
     /// Hidden input (password, pre-shared key).
@@ -114,6 +118,7 @@ pub enum PromptKind {
 }
 
 /// A Keychain certificate with its private key.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct KeychainIdentity {
     pub name: String,
@@ -123,6 +128,7 @@ pub struct KeychainIdentity {
     pub sha256: String,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct Prompt {
     /// `password`, `otp`, `psk`, `username`…
@@ -155,6 +161,7 @@ impl From<&vpn_core::Prompt> for Prompt {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum TrustDecision {
     Reject,
@@ -173,6 +180,7 @@ impl From<TrustDecision> for vpn_client::Trust {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum ConnectionState {
     Connecting,
@@ -196,6 +204,7 @@ impl From<SessionState> for ConnectionState {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, uniffi::Record)]
 pub struct Retry {
     pub attempt: u32,
@@ -209,6 +218,7 @@ impl From<CoreRetry> for Retry {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, uniffi::Enum)]
 pub enum Notice {
     State {
@@ -249,6 +259,7 @@ impl From<vpn_client::Notice> for Notice {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct StateChange {
     /// The session's profile id.
@@ -259,6 +270,7 @@ pub struct StateChange {
     pub retry: Option<Retry>,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct Session {
     /// The profile's id: the session's key.
@@ -288,6 +300,7 @@ pub struct Session {
 }
 
 /// Which limit of the profile disconnects a session.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum AutoDisconnectCriterion {
     /// The time connected.
@@ -299,6 +312,7 @@ pub enum AutoDisconnectCriterion {
 }
 
 /// An automatic disconnection to come.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct PlannedDisconnect {
     /// Unix time.
@@ -321,6 +335,7 @@ impl From<vpn_core::auto_disconnect::Planned> for PlannedDisconnect {
 }
 
 /// The routing a gateway announced.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct Announced {
     /// All traffic.
@@ -361,6 +376,7 @@ impl From<SessionInfo> for Session {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum AuthMethod {
     Password,
@@ -372,6 +388,7 @@ pub enum AuthMethod {
     Key,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct ProfileSummary {
     /// Stable: what sessions, secrets and chains refer to.
@@ -400,6 +417,7 @@ pub struct ProfileSummary {
     pub postponable_disconnect: bool,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct DuplicatedProfile {
     /// The copy's id.
@@ -408,6 +426,7 @@ pub struct DuplicatedProfile {
     pub secrets_error: Option<String>,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct ImportedProfile {
     pub name: String,
@@ -462,6 +481,7 @@ impl From<vpn_client::import::Found> for ImportedProfile {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct ServiceInfo {
     pub version: String,

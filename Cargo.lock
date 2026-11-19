@@ -3530,6 +3530,7 @@ dependencies = [
  "ipnet",
  "rcgen",
  "rustls-pki-types",
+ "serde",
  "thiserror",
  "tokio",
  "toml",

@@ -12,6 +12,7 @@ use vpn_core::{
 };
 use x509_parser::prelude::{FromDer, X509Certificate};
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum VpnKind {
     FortiSsl,
@@ -22,6 +23,7 @@ pub enum VpnKind {
     WireGuard,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum TunnelMode {
     /// As the gateway decides.
@@ -31,6 +33,7 @@ pub enum TunnelMode {
 }
 
 /// One OpenVPN server (`remote`).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, uniffi::Record)]
 pub struct OpenVpnServer {
     pub host: String,
@@ -38,6 +41,7 @@ pub struct OpenVpnServer {
     pub transport: OpenVpnTransport,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Enum)]
 pub enum OpenVpnTransport {
     Udp,
@@ -45,6 +49,7 @@ pub enum OpenVpnTransport {
 }
 
 /// Protection of the OpenVPN control channel by a shared static key.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Enum)]
 pub enum OpenVpnControlChannel {
     None,
@@ -54,6 +59,7 @@ pub enum OpenVpnControlChannel {
 
 /// The compression framing an OpenVPN server expects (nothing is ever
 /// compressed).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Enum)]
 pub enum OpenVpnCompression {
     None,
@@ -66,6 +72,7 @@ pub enum OpenVpnCompression {
 }
 
 /// What `verify-x509-name` compares.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Enum)]
 pub enum X509NameMatch {
     Subject,
@@ -78,12 +85,14 @@ pub enum X509NameMatch {
 /// `aes192`, `aes256`, `aes128gcm16`, `aes256gcm16`, `chacha20poly1305`,
 /// `3des`; `sha1`, `sha256`, `sha384`, `sha512`. With an AEAD cipher (AES-GCM,
 /// ChaCha20-Poly1305) the hash is the IKE PRF and is unused in phase 2.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, uniffi::Record)]
 pub struct CipherSuite {
     pub encryption: String,
     pub hash: String,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct ProfileForm {
     pub name: String,
@@ -732,6 +741,7 @@ fn clean_list(items: &[String]) -> Vec<String> {
 
 /// One line of a list in the editor: a network or a domain, and what it
 /// is for. Rows whose value is empty are dropped.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct ListEntry {
     pub value: String,
@@ -1075,6 +1085,7 @@ impl From<&Profile> for ProfileForm {
 }
 
 /// A received `.vpnprofile`, to show before adding it.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct ReceivedProfile {
     pub form: ProfileForm,
