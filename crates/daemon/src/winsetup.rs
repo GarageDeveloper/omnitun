@@ -44,8 +44,8 @@ pub fn setup(group: &str, user: &str) -> anyhow::Result<()> {
 }
 
 /// The installer's step: the group with `user` in it, and the service
-/// restarted when it fails (after 5 s, then 30 s; the count starts again
-/// after a day).
+/// restarted when it fails or a client stops it (after 2 s, 30 s, then a
+/// minute; the count starts again after a day).
 pub fn install(group: &str, user: &str) -> anyhow::Result<()> {
     setup(group, user)?;
     restart_on_failure()
