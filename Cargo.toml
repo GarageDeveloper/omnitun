@@ -19,6 +19,7 @@ vpn-wireguard = { path = "crates/vpn-wireguard" }
 vpn-tls = { path = "crates/vpn-tls" }
 vpn-client = { path = "crates/vpn-client" }
 vpn-dnsproxy = { path = "crates/vpn-dnsproxy" }
+vpn-transport = { path = "crates/vpn-transport" }
 omnitun-engine = { path = "crates/engine" }
 anyhow = "1"
 thiserror = "2"

@@ -2,18 +2,23 @@
 //! sandboxed for one session, starts its attempts, hands it the tun
 //! interface, and treats everything it says as untrusted. The user's
 //! answers go to the engine directly, on the session's prompt socket.
+//!
+//! Windows: engines are not started yet (an unprivileged process fed with
+//! packets by the daemon), so most of this is unused there.
+#![cfg_attr(windows, allow(dead_code, unused_imports))]
 
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, OwnedFd};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 use vpn_core::engine_ipc::{EngineError, FromEngine, ToEngine};
-use vpn_core::{FailureKind, Profile, TunnelSettings, TunnelStats, failure};
+use vpn_core::{FailureKind, Profile, TunnelSettings, TunnelStats, User, failure};
 use vpn_platform::TunDevice;
 use zeroize::Zeroizing;
 
@@ -27,9 +32,24 @@ const MAX_LOG_LINE: u64 = 2048;
 /// How long an engine may take to log out once asked to stop.
 const STOP_TIMEOUT: Duration = Duration::from_secs(6);
 
+/// The session's listening prompt socket, handed to its engine.
+#[cfg(unix)]
+pub type Prompts = OwnedFd;
+
+#[cfg(windows)]
+pub struct Prompts;
+
+#[cfg(windows)]
+impl Prompts {
+    pub fn try_clone(&self) -> std::io::Result<Self> {
+        Ok(Self)
+    }
+}
+
 /// How engines are started.
 pub enum Launcher {
     /// A separate process, the normal case.
+    #[cfg(unix)]
     Process {
         path: PathBuf,
         uid: u32,
@@ -37,6 +57,8 @@ pub enum Launcher {
         /// macOS: run under `sandbox-exec` with `sandbox_profile`.
         sandbox: bool,
     },
+    #[cfg(windows)]
+    Process { path: PathBuf },
     /// In this process, on a socket pair: tests, which cannot switch users.
     #[cfg(test)]
     InProcess,
@@ -47,11 +69,24 @@ impl Launcher {
     pub fn process(path: Option<PathBuf>, user: &str, sandbox: bool) -> anyhow::Result<Self> {
         let path = match path {
             Some(p) => p,
-            None => std::env::current_exe()?.with_file_name(vpn_core::brand::ENGINE),
+            None => default_path()?,
         };
         if !path.is_file() {
             bail!("engine {} not found (use --engine)", path.display());
         }
+        #[cfg(windows)]
+        {
+            let _ = (user, sandbox);
+            Ok(Self::Process { path })
+        }
+        #[cfg(unix)]
+        {
+            Self::unix_process(path, user, sandbox)
+        }
+    }
+
+    #[cfg(unix)]
+    fn unix_process(path: PathBuf, user: &str, sandbox: bool) -> anyhow::Result<Self> {
         let account = nix::unistd::User::from_name(user)?
             .with_context(|| format!("user {user} does not exist (created by the installer; use --engine-user)"))?;
         if account.uid.is_root() {
@@ -59,6 +94,11 @@ impl Launcher {
         }
         Ok(Self::Process { path, uid: account.uid.as_raw(), gid: account.gid.as_raw(), sandbox })
     }
+}
+
+/// The engine binary next to the daemon's.
+pub fn default_path() -> std::io::Result<PathBuf> {
+    Ok(std::env::current_exe()?.with_file_name(format!("{}{}", vpn_core::brand::ENGINE, std::env::consts::EXE_SUFFIX)))
 }
 
 /// What an engine may do on macOS: read the system libraries, resolve
@@ -90,6 +130,7 @@ pub fn sandbox_profile(engine: &std::path::Path) -> String {
 pub struct RemoteEngine {
     out: mpsc::Sender<ToEngine>,
     events: mpsc::Receiver<FromEngine>,
+    #[cfg(unix)]
     fds: Option<StdUnixStream>,
     child: Option<tokio::process::Child>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
@@ -111,7 +152,16 @@ impl Drop for RemoteEngine {
 impl RemoteEngine {
     /// Starts the engine of session `name`, owned by `owner`, listening for
     /// its clients on `prompts`.
-    pub fn spawn(launcher: &Launcher, name: &str, owner: u32, prompts: OwnedFd) -> anyhow::Result<Self> {
+    #[cfg(windows)]
+    pub fn spawn(_launcher: &Launcher, _name: &str, _owner: &User, _prompts: Prompts) -> anyhow::Result<Self> {
+        bail!("sessions are not supported on Windows yet")
+    }
+
+    /// Starts the engine of session `name`, owned by `owner`, listening for
+    /// its clients on `prompts`.
+    #[cfg(unix)]
+    pub fn spawn(launcher: &Launcher, name: &str, owner: &User, prompts: Prompts) -> anyhow::Result<Self> {
+        let vpn_core::UserId::Uid(owner) = owner.id else { bail!("{owner} is not a Unix user") };
         let (control, control_theirs) = StdUnixStream::pair()?;
         let (fds, fds_theirs) = StdUnixStream::pair()?;
         let mut tasks = Vec::new();
@@ -133,7 +183,7 @@ impl RemoteEngine {
             #[cfg(test)]
             Launcher::InProcess => {
                 control_theirs.set_nonblocking(true)?;
-                let control = UnixStream::from_std(control_theirs)?;
+                let control = tokio::net::UnixStream::from_std(control_theirs)?;
                 let prompts = std::os::unix::net::UnixListener::from(prompts);
                 prompts.set_nonblocking(true)?;
                 let prompts = tokio::net::UnixListener::from_std(prompts)?;
@@ -148,44 +198,8 @@ impl RemoteEngine {
             }
         };
         control.set_nonblocking(true)?;
-        let (read, mut write) = UnixStream::from_std(control)?.into_split();
-
-        let (out, mut out_rx) = mpsc::channel::<ToEngine>(16);
-        tasks.push(tokio::spawn(async move {
-            while let Some(message) = out_rx.recv().await {
-                // The first start may carry the client certificate's key.
-                let mut line = Zeroizing::new(serde_json::to_vec(&message).expect("messages serialize"));
-                line.push(b'\n');
-                if write.write_all(&line).await.is_err() {
-                    break;
-                }
-            }
-        }));
-        let (events_tx, events) = mpsc::channel::<FromEngine>(16);
-        tasks.push(tokio::spawn(async move {
-            let mut lines = BufReader::new(read);
-            loop {
-                let mut line = String::new();
-                match (&mut lines).take(MAX_ENGINE_LINE).read_line(&mut line).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) if !line.ends_with('\n') => {
-                        tracing::warn!("engine sent an oversized message; dropping it");
-                        break;
-                    }
-                    Ok(_) => match serde_json::from_str::<FromEngine>(&line) {
-                        Ok(message) => {
-                            if events_tx.send(message).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("engine sent an invalid message: {e}");
-                            break;
-                        }
-                    },
-                }
-            }
-        }));
+        let (read, write) = tokio::net::UnixStream::from_std(control)?.into_split();
+        let (out, events) = talk(read, write, &mut tasks);
         Ok(Self { out, events, fds: Some(fds), child, tasks, ended: true })
     }
 
@@ -211,6 +225,13 @@ impl RemoteEngine {
     }
 
     /// Hands the interface over and waits for the tunnel to end.
+    #[cfg(windows)]
+    pub async fn run(&mut self, _stats: &TunnelStats, _device: &TunDevice) -> anyhow::Result<()> {
+        bail!("sessions are not supported on Windows yet")
+    }
+
+    /// Hands the interface over and waits for the tunnel to end.
+    #[cfg(unix)]
     pub async fn run(&mut self, stats: &TunnelStats, device: &TunDevice) -> anyhow::Result<()> {
         self.out.send(ToEngine::Tun { name: device.name.clone() }).await.context("engine gone")?;
         let fds = self.fds.take().context("interface already being handed over")?;
@@ -281,6 +302,52 @@ impl RemoteEngine {
     }
 }
 
+/// The control channel of an engine: messages to it go out through the
+/// returned sender, and its own come in on the receiver.
+fn talk(
+    read: impl AsyncRead + Send + Unpin + 'static,
+    mut write: impl AsyncWrite + Send + Unpin + 'static,
+    tasks: &mut Vec<tokio::task::JoinHandle<()>>,
+) -> (mpsc::Sender<ToEngine>, mpsc::Receiver<FromEngine>) {
+    let (out, mut out_rx) = mpsc::channel::<ToEngine>(16);
+    tasks.push(tokio::spawn(async move {
+        while let Some(message) = out_rx.recv().await {
+            // The first start may carry the client certificate's key.
+            let mut line = Zeroizing::new(serde_json::to_vec(&message).expect("messages serialize"));
+            line.push(b'\n');
+            if write.write_all(&line).await.is_err() {
+                break;
+            }
+        }
+    }));
+    let (events_tx, events) = mpsc::channel::<FromEngine>(16);
+    tasks.push(tokio::spawn(async move {
+        let mut lines = BufReader::new(read);
+        loop {
+            let mut line = String::new();
+            match (&mut lines).take(MAX_ENGINE_LINE).read_line(&mut line).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) if !line.ends_with('\n') => {
+                    tracing::warn!("engine sent an oversized message; dropping it");
+                    break;
+                }
+                Ok(_) => match serde_json::from_str::<FromEngine>(&line) {
+                    Ok(message) => {
+                        if events_tx.send(message).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("engine sent an invalid message: {e}");
+                        break;
+                    }
+                },
+            }
+        }
+    }));
+    (out, events)
+}
+
 /// Copies a child's log into the daemon's, as an engine's: one line at a
 /// time, bounded in length and rate, control characters escaped.
 pub(crate) async fn relay_log(name: String, stderr: tokio::process::ChildStderr) {
@@ -321,6 +388,7 @@ fn ended(error: Option<EngineError>) -> anyhow::Error {
 /// Starts the engine binary as `uid` with `args`, with only its three
 /// sockets open (as 3, 4 and 5): it must not inherit other sessions' tun
 /// interfaces or clients' sockets.
+#[cfg(unix)]
 pub(crate) fn spawn(
     path: &std::path::Path,
     uid: u32,
@@ -390,7 +458,7 @@ pub(crate) fn spawn(
     Ok(child)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

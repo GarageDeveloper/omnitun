@@ -67,11 +67,15 @@ pub fn reason(planned: &Planned) -> String {
 pub fn next_time_of_day(from: u64, time: HourMinute) -> u64 {
     let local = |day_offset: i32| -> Option<u64> {
         let t = libc::time_t::try_from(from).ok()?;
-        // SAFETY: localtime_r and mktime only read and write `tm`, which
-        // lives on this stack frame; both are thread-safe.
+        // SAFETY: localtime_r (localtime_s) and mktime only read and write
+        // `tm`, which lives on this stack frame; both are thread-safe.
         unsafe {
             let mut tm: libc::tm = std::mem::zeroed();
-            if libc::localtime_r(&t, &mut tm).is_null() {
+            #[cfg(unix)]
+            let ok = !libc::localtime_r(&t, &mut tm).is_null();
+            #[cfg(windows)]
+            let ok = libc::localtime_s(&mut tm, &t) == 0;
+            if !ok {
                 return None;
             }
             tm.tm_mday += day_offset;
@@ -80,7 +84,7 @@ pub fn next_time_of_day(from: u64, time: HourMinute) -> u64 {
             tm.tm_sec = 0;
             // Whether summer time applies on that day: for mktime to say.
             tm.tm_isdst = -1;
-            u64::try_from(libc::mktime(&mut tm)).ok()
+            u64::try_from(mktime(&mut tm)).ok()
         }
     };
     match local(0) {
@@ -92,6 +96,16 @@ pub fn next_time_of_day(from: u64, time: HourMinute) -> u64 {
             if at > from { at } else { at + 86_400 }
         }),
     }
+}
+
+#[cfg(unix)]
+use libc::mktime;
+
+// The CRT's mktime is an inline function over this one.
+#[cfg(windows)]
+unsafe extern "C" {
+    #[link_name = "_mktime64"]
+    fn mktime(tm: *mut libc::tm) -> libc::time_t;
 }
 
 /// Seconds since the last keyboard or mouse input on this computer,
@@ -139,7 +153,10 @@ mod tests {
         // SAFETY: as in `next_time_of_day`.
         unsafe {
             let mut tm: libc::tm = std::mem::zeroed();
+            #[cfg(unix)]
             libc::localtime_r(&t, &mut tm);
+            #[cfg(windows)]
+            libc::localtime_s(&mut tm, &t);
             (tm.tm_hour, tm.tm_min)
         }
     }

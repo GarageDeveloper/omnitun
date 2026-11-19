@@ -1,26 +1,25 @@
-//! `omnitund`: privileged daemon that owns the tunnels. It must run as root to
-//! create tun interfaces and change routes and DNS; users drive it with
-//! `omnitunctl` through a Unix socket restricted to one group.
+//! `omnitund`: privileged daemon that owns the tunnels. It must run as root
+//! (Windows: SYSTEM or an administrator) to create tun interfaces and change
+//! routes and DNS; users drive it with `omnitunctl` through a Unix socket
+//! (Windows: a named pipe) restricted to one group.
 
 mod autodisconnect;
 mod dnsproxy;
 mod engine;
+#[cfg(unix)]
 mod logfile;
 mod manager;
 mod prompter;
 
 use std::collections::HashMap;
-use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use anyhow::Context;
 use clap::Parser;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
-use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 use vpn_core::ipc::{Event, PROTOCOL_VERSION, Request};
+use vpn_core::{User, UserId};
+use vpn_transport::{Listener, Stream};
 use zeroize::Zeroize;
 
 use crate::manager::Manager;
@@ -75,8 +74,11 @@ struct Args {
 
 /// A program run as root, and every folder above it, must be root's and
 /// writable by no one else: otherwise that user is root.
+#[cfg(unix)]
 fn root_only(path: &std::path::Path) -> anyhow::Result<()> {
     use std::os::unix::fs::MetadataExt;
+
+    use anyhow::Context;
     let path = path.canonicalize().with_context(|| format!("cannot find {}", path.display()))?;
     for p in path.ancestors() {
         let meta = std::fs::metadata(p).with_context(|| format!("cannot check {}", p.display()))?;
@@ -88,6 +90,12 @@ fn root_only(path: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Windows: the ACL of the program and its folders is not checked yet.
+#[cfg(windows)]
+fn root_only(path: &std::path::Path) -> anyhow::Result<()> {
+    anyhow::bail!("who may change {} is not checked on Windows yet", path.display())
+}
+
 /// Created by the installer; only its members may drive the daemon.
 const fn default_group() -> &'static str {
     vpn_core::brand::ID
@@ -96,6 +104,7 @@ const fn default_group() -> &'static str {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Whatever the daemon creates without an explicit mode is root's only.
+    #[cfg(unix)]
     nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o077));
     // launchd and systemd collect stderr (StandardErrorPath, journal).
     // Colors only for a terminal, not in the log file.
@@ -107,25 +116,36 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     #[cfg(target_os = "macos")]
     if args.print_engine_sandbox {
-        let engine = args.engine.clone().unwrap_or(std::env::current_exe()?.with_file_name(vpn_core::brand::ENGINE));
+        let engine = args.engine.clone().map_or_else(engine::default_path, Ok)?;
         print!("{}", engine::sandbox_profile(&engine));
         return Ok(());
     }
-    // A core dump would contain prompt answers and session keys.
-    nix::sys::resource::setrlimit(nix::sys::resource::Resource::RLIMIT_CORE, 0, 0)?;
-    // A known ceiling on descriptor numbers: engines are started with every
-    // descriptor above their own closed, up to this limit.
-    let (_, hard) = nix::sys::resource::getrlimit(nix::sys::resource::Resource::RLIMIT_NOFILE)?;
-    nix::sys::resource::setrlimit(nix::sys::resource::Resource::RLIMIT_NOFILE, hard.min(4096), hard)?;
-    if !nix::unistd::geteuid().is_root() {
-        anyhow::bail!("{} must run as root", vpn_core::brand::DAEMON);
+    #[cfg(unix)]
+    {
+        // A core dump would contain prompt answers and session keys.
+        nix::sys::resource::setrlimit(nix::sys::resource::Resource::RLIMIT_CORE, 0, 0)?;
+        // A known ceiling on descriptor numbers: engines are started with
+        // every descriptor above their own closed, up to this limit.
+        let (_, hard) = nix::sys::resource::getrlimit(nix::sys::resource::Resource::RLIMIT_NOFILE)?;
+        nix::sys::resource::setrlimit(nix::sys::resource::Resource::RLIMIT_NOFILE, hard.min(4096), hard)?;
+    }
+    if !vpn_transport::current_user()?.admin {
+        let who = if cfg!(windows) { "SYSTEM or an elevated administrator" } else { "root" };
+        anyhow::bail!("{} must run as {who}", vpn_core::brand::DAEMON);
     }
 
-    let engine_path = args.engine.clone().unwrap_or(std::env::current_exe()?.with_file_name(vpn_core::brand::ENGINE));
+    let engine_path = args.engine.clone().map_or_else(engine::default_path, Ok)?;
     for binary in [std::env::current_exe()?, engine_path] {
         if let Err(e) = root_only(&binary) {
             if !args.allow_writable_binaries {
-                anyhow::bail!("{e:#}: install it in a folder only root can write (/Library/PrivilegedHelperTools)");
+                let folder = if cfg!(windows) {
+                    "Program Files"
+                } else if cfg!(target_os = "macos") {
+                    "/Library/PrivilegedHelperTools"
+                } else {
+                    "/usr/local/sbin"
+                };
+                anyhow::bail!("{e:#}: install it in a folder only administrators can write ({folder})");
             }
             tracing::warn!("{e:#}");
         }
@@ -136,8 +156,9 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("engines run without a sandbox");
     }
     let launcher = engine::Launcher::process(args.engine.clone(), &args.engine_user, sandbox)?;
-    let listener = bind(&args.socket, &args.group)?;
+    let mut listener = Listener::bind(&args.socket, &args.group)?;
     tracing::info!("listening on {} (group {})", args.socket, args.group);
+    #[cfg(unix)]
     logfile::spawn_rotation();
     vpn_platform::cleanup_stale().await;
     manager::prepare_prompt_dir(&vpn_core::ipc::prompt_socket_dir(&args.socket))?;
@@ -145,28 +166,23 @@ async fn main() -> anyhow::Result<()> {
     let clients = Arc::new(tokio::sync::Semaphore::new(MAX_CLIENTS));
     let quotas = Arc::new(Quotas::default());
 
-    // Every catchable signal that would end the process tears the tunnels
-    // down first (SIGKILL cannot be caught: the route journal covers it).
-    let mut sigterm = signal(SignalKind::terminate())?;
-    let mut sigint = signal(SignalKind::interrupt())?;
-    let mut sighup = signal(SignalKind::hangup())?;
-    let mut sigquit = signal(SignalKind::quit())?;
+    let signals = stop_signals()?;
+    tokio::pin!(signals);
     loop {
         tokio::select! {
             accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => {
-                    let Ok(uid) = stream.peer_cred().map(|c| c.uid()) else { continue };
+                Ok((stream, user)) => {
                     let Ok(permit) = clients.clone().try_acquire_owned() else {
                         tracing::warn!("too many control connections, refusing one");
                         continue;
                     };
-                    let Some(slot) = quotas.take(uid) else {
-                        tracing::warn!("too many control connections from uid {uid}, refusing one");
+                    let Some(slot) = quotas.take(&user) else {
+                        tracing::warn!("too many control connections from {user}, refusing one");
                         continue;
                     };
                     let manager = manager.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = serve(stream, manager).await {
+                        if let Err(e) = serve(stream, user, manager).await {
                             tracing::debug!("client: {e:#}");
                         }
                         drop((permit, slot));
@@ -174,10 +190,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Err(e) => tracing::warn!("accept: {e}"),
             },
-            _ = sigterm.recv() => break,
-            _ = sigint.recv() => break,
-            _ = sighup.recv() => break,
-            _ = sigquit.recv() => break,
+            () = &mut signals => break,
             _ = manager.shutdown.cancelled() => break,
         }
     }
@@ -189,61 +202,76 @@ async fn main() -> anyhow::Result<()> {
     if tokio::time::timeout(SHUTDOWN_TIMEOUT, manager.disconnect_all()).await.is_err() {
         tracing::warn!("sessions did not close in {SHUTDOWN_TIMEOUT:?}; leaving the rest to the next start");
     }
-    let _ = std::fs::remove_file(&args.socket);
+    drop(listener);
     Ok(())
 }
 
-fn bind(path: &str, group: &str) -> anyhow::Result<UnixListener> {
-    if Path::new(path).exists() {
-        if std::os::unix::net::UnixStream::connect(path).is_ok() {
-            anyhow::bail!("another {} is already listening on {path}", vpn_core::brand::DAEMON);
+/// Every catchable signal that would end the process: the tunnels are torn
+/// down first (SIGKILL cannot be caught: the route journal covers it).
+#[cfg(unix)]
+fn stop_signals() -> anyhow::Result<impl Future<Output = ()>> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut signals = [SignalKind::terminate(), SignalKind::interrupt(), SignalKind::hangup(), SignalKind::quit()]
+        .map(signal)
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(async move {
+        let [term, int, hup, quit] = &mut signals[..] else { unreachable!() };
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = int.recv() => {}
+            _ = hup.recv() => {}
+            _ = quit.recv() => {}
         }
-        std::fs::remove_file(path)?;
-    }
-    let gid = nix::unistd::Group::from_name(group)?
-        .with_context(|| format!("group {group} does not exist (use --group)"))?
-        .gid;
-    // Create the socket with no access, then open it to root and the group.
-    let old_mask = nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o177));
-    let listener = UnixListener::bind(path);
-    nix::sys::stat::umask(old_mask);
-    let listener = listener.with_context(|| format!("cannot bind {path}"))?;
-    std::os::unix::fs::chown(path, Some(0), Some(gid.as_raw()))?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
-    Ok(listener)
+    })
+}
+
+/// The console's Ctrl+C, Ctrl+Break, closing and system shutdown.
+#[cfg(windows)]
+fn stop_signals() -> anyhow::Result<impl Future<Output = ()>> {
+    use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close, ctrl_shutdown};
+    let (mut c, mut brk, mut close, mut shutdown) = (ctrl_c()?, ctrl_break()?, ctrl_close()?, ctrl_shutdown()?);
+    Ok(async move {
+        tokio::select! {
+            _ = c.recv() => {}
+            _ = brk.recv() => {}
+            _ = close.recv() => {}
+            _ = shutdown.recv() => {}
+        }
+    })
 }
 
 /// Control connections per user: one group member cannot take every slot
 /// and lock the others out (connections that said hello have no idle
 /// timeout: a watcher or a waiting `connect` is idle).
 #[derive(Default)]
-struct Quotas(Mutex<HashMap<u32, usize>>);
+struct Quotas(Mutex<HashMap<UserId, usize>>);
 
-/// One connection of `uid`, given back when dropped.
+/// One connection of a user, given back when dropped.
 struct Slot {
     quotas: Arc<Quotas>,
-    uid: u32,
+    user: UserId,
 }
 
 impl Quotas {
-    fn take(self: &Arc<Self>, uid: u32) -> Option<Slot> {
+    fn take(self: &Arc<Self>, user: &User) -> Option<Slot> {
         let mut counts = self.0.lock().unwrap();
-        let count = counts.entry(uid).or_default();
-        if uid != 0 && *count >= MAX_CLIENTS_PER_USER {
+        let count = counts.entry(user.id.clone()).or_default();
+        if !user.admin && *count >= MAX_CLIENTS_PER_USER {
             return None;
         }
         *count += 1;
-        Some(Slot { quotas: self.clone(), uid })
+        Some(Slot { quotas: self.clone(), user: user.id.clone() })
     }
 }
 
 impl Drop for Slot {
     fn drop(&mut self) {
         let mut counts = self.quotas.0.lock().unwrap();
-        if let Some(count) = counts.get_mut(&self.uid) {
+        if let Some(count) = counts.get_mut(&self.user) {
             *count -= 1;
             if *count == 0 {
-                counts.remove(&self.uid);
+                counts.remove(&self.user);
             }
         }
     }
@@ -264,12 +292,10 @@ fn failed(e: anyhow::Error) -> Event {
     Event::Error { message: format!("{e:#}"), failure: Some(vpn_core::failure::kind_of(&e)) }
 }
 
-/// One client connection: requests in, events out.
-async fn serve(stream: UnixStream, manager: Arc<Manager>) -> anyhow::Result<()> {
-    let cred = stream.peer_cred().context("cannot identify client")?;
-    let uid = cred.uid();
-    tracing::debug!("client uid={uid} pid={:?}", cred.pid());
-    let (read, mut write) = stream.into_split();
+/// One client connection of `user`: requests in, events out.
+async fn serve(stream: Stream, user: User, manager: Arc<Manager>) -> anyhow::Result<()> {
+    tracing::debug!("client {user}");
+    let Stream { read, mut write } = stream;
     let (events_tx, mut events_rx) = mpsc::channel::<Event>(CLIENT_QUEUE);
     let link = ClientLink::new(events_tx.clone());
 
@@ -333,7 +359,7 @@ async fn serve(stream: UnixStream, manager: Arc<Manager>) -> anyhow::Result<()> 
                 )));
                 break;
             }
-            tracing::debug!("client uid={uid}: {client} {version} {features:?}");
+            tracing::debug!("client {user}: {client} {version} {features:?}");
             greeted = true;
             client_features = features;
             link.send(Event::Hello {
@@ -345,36 +371,36 @@ async fn serve(stream: UnixStream, manager: Arc<Manager>) -> anyhow::Result<()> 
         }
         let reply = match request {
             Request::Hello { .. } => Some(Event::error("hello was already sent")),
-            Request::Connect { profile, via } => manager.connect(*profile, via, link.clone(), uid).err().map(failed),
-            Request::Disconnect { id } => Some(match manager.disconnect(&id, uid).await {
+            Request::Connect { profile, via } => manager.connect(*profile, via, link.clone(), &user).err().map(failed),
+            Request::Disconnect { id } => Some(match manager.disconnect(&id, &user).await {
                 Ok(()) => Event::Done,
                 Err(e) => failed(e),
             }),
-            Request::Postpone { id } => Some(match manager.postpone(&id, uid) {
+            Request::Postpone { id } => Some(match manager.postpone(&id, &user) {
                 Ok(()) => Event::Done,
                 Err(e) => failed(e),
             }),
-            Request::Status => Some(Event::Status { sessions: manager.status(uid) }),
+            Request::Status => Some(Event::Status { sessions: manager.status(&user) }),
             Request::Answer { .. } => Some(Event::error("answers go to the session's prompt socket")),
             Request::Watch if watching => Some(Event::error("this connection is already watching")),
             Request::Watch => {
                 watching = true;
                 let expiring = client_features.iter().any(|f| f == vpn_core::ipc::AUTO_DISCONNECT);
-                manager.watch(uid, link.clone(), expiring);
+                manager.watch(&user, link.clone(), expiring);
                 None
             }
-            Request::Shutdown => Some(if manager.may_shutdown(uid) {
-                tracing::info!("shutdown requested by uid {uid}");
+            Request::Shutdown => Some(if manager.may_shutdown(&user) {
+                tracing::info!("shutdown requested by {user}");
                 manager.shutdown.cancel();
                 Event::Done
             } else {
-                Event::error("another user has active sessions; only root may stop the service")
+                Event::error("another user has active sessions; only an administrator may stop the service")
             }),
         };
         if let Some(event) = reply
             && !link.send(event)
         {
-            tracing::debug!("client uid={uid} is not reading its events, closing");
+            tracing::debug!("client {user} is not reading its events, closing");
             break;
         }
     }
@@ -394,13 +420,14 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
     async fn exchange(requests: &[serde_json::Value]) -> Vec<Event> {
-        let (ours, theirs) = UnixStream::pair().unwrap();
-        let server = tokio::spawn(serve(theirs, Arc::new(Manager::default())));
-        let (read, mut write) = ours.into_split();
+        let (ours, theirs) = Stream::pair();
+        let server = tokio::spawn(serve(theirs, User::uid(1000), Arc::new(Manager::default())));
+        let Stream { read, mut write } = ours;
         for r in requests {
             write.write_all(format!("{r}\n").as_bytes()).await.unwrap();
         }
-        drop(write);
+        // Not just dropped: the read half keeps the stream open.
+        write.shutdown().await.unwrap();
         let mut lines = BufReader::new(read).lines();
         let mut events = Vec::new();
         while let Ok(Ok(Some(line))) = tokio::time::timeout(std::time::Duration::from_secs(5), lines.next_line()).await
@@ -418,12 +445,13 @@ mod tests {
     #[test]
     fn one_user_cannot_hold_every_connection() {
         let quotas = Arc::new(Quotas::default());
-        let mine: Vec<Slot> = (0..MAX_CLIENTS_PER_USER).map(|_| quotas.take(1000).unwrap()).collect();
-        assert!(quotas.take(1000).is_none());
-        let theirs = quotas.take(1001);
-        assert!(theirs.is_some() && quotas.take(0).is_some(), "other users and root still get in");
+        let (me, them, root) = (User::uid(1000), User::uid(1001), User::uid(0));
+        let mine: Vec<Slot> = (0..MAX_CLIENTS_PER_USER).map(|_| quotas.take(&me).unwrap()).collect();
+        assert!(quotas.take(&me).is_none());
+        let theirs = quotas.take(&them);
+        assert!(theirs.is_some() && quotas.take(&root).is_some(), "other users and root still get in");
         drop(mine);
-        assert!(quotas.take(1000).is_some(), "slots come back");
+        assert!(quotas.take(&me).is_some(), "slots come back");
         drop(theirs);
         assert!(quotas.0.lock().unwrap().is_empty(), "no count left behind");
     }

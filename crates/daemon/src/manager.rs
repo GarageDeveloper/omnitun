@@ -14,7 +14,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use vpn_core::dns_ipc::FromProxy;
 use vpn_core::ipc::{Event, Retry, RoutedByDomain, SessionInfo, SessionState};
-use vpn_core::{FailureKind, Profile, ProtocolConfig, TunnelSettings, TunnelStats, failure};
+use vpn_core::{FailureKind, Profile, ProtocolConfig, TunnelSettings, TunnelStats, User, UserId, failure};
 use vpn_platform::{Claims, Conflict, DynamicClaims, Registry};
 
 use crate::autodisconnect::{self, Schedule};
@@ -25,7 +25,8 @@ use crate::prompter::{ClientLink, SessionClient};
 const MAX_RECONNECTS: u32 = 5;
 /// Sessions at once, failed ones excepted.
 const MAX_SESSIONS: usize = 16;
-/// Sessions one user may hold (root excepted), failed ones included.
+/// Sessions one user may hold (administrators excepted), failed ones
+/// included.
 const MAX_SESSIONS_PER_USER: usize = 8;
 /// A failed session stays listed this long unless dismissed.
 const FAILED_TTL: Duration = Duration::from_secs(3600);
@@ -90,11 +91,9 @@ impl Default for Manager {
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         // Short: socket paths are limited to about 100 bytes, and the
         // per-user temporary directory of macOS is long.
-        let dir = std::path::Path::new("/tmp").join(format!(
-            "otd-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
+        let tmp = if cfg!(windows) { std::env::temp_dir() } else { "/tmp".into() };
+        let dir =
+            tmp.join(format!("otd-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         std::fs::create_dir_all(&dir).unwrap();
         let control = dir.join("c.sock").display().to_string();
         prepare_prompt_dir(&vpn_core::ipc::prompt_socket_dir(&control)).unwrap();
@@ -105,7 +104,7 @@ impl Default for Manager {
 #[derive(Clone)]
 struct Watched {
     /// `None`: for every watcher.
-    owner: Option<u32>,
+    owner: Option<UserId>,
     event: Event,
 }
 
@@ -126,8 +125,9 @@ fn retry_useless(kind: &FailureKind) -> bool {
 }
 
 struct Session {
-    /// uid of the user who started it; only they (or root) may stop it.
-    owner: u32,
+    /// The user who started it; only they (or an administrator) may stop
+    /// it.
+    owner: User,
     cancel: CancellationToken,
     info: Arc<Mutex<SessionInfo>>,
     stats: Arc<TunnelStats>,
@@ -146,7 +146,7 @@ impl Manager {
         profile: Profile,
         via: Option<String>,
         client: ClientLink,
-        owner: u32,
+        owner: &User,
     ) -> anyhow::Result<()> {
         // Sessions are keyed by the profile's id: it names their sockets
         // and resolver keys; the name is only shown.
@@ -162,7 +162,7 @@ impl Manager {
         let mut sessions = self.sessions.lock().unwrap();
         match sessions.get(&profile.id) {
             // A failed session stays listed until replaced or dismissed.
-            Some(s) if s.info.lock().unwrap().state == SessionState::Failed && (owner == 0 || s.owner == owner) => {
+            Some(s) if s.info.lock().unwrap().state == SessionState::Failed && owner.may_act_for(&s.owner.id) => {
                 sessions.remove(&profile.id);
             }
             Some(_) => bail!("{} is already active", profile.name),
@@ -176,14 +176,14 @@ impl Manager {
         }
         if let Some(parent) = &via {
             let up = sessions.get(parent).is_some_and(|s| {
-                (owner == 0 || s.owner == owner) && s.info.lock().unwrap().state == SessionState::Connected
+                owner.may_act_for(&s.owner.id) && s.info.lock().unwrap().state == SessionState::Connected
             });
             if !up || *parent == profile.id {
                 let parent = sessions.get(parent).map_or(parent.clone(), |s| s.info.lock().unwrap().name.clone());
                 bail!("{parent}, which {} goes through, is not connected", profile.name);
             }
         }
-        if owner != 0 && sessions.values().filter(|s| s.owner == owner).count() >= MAX_SESSIONS_PER_USER {
+        if !owner.admin && sessions.values().filter(|s| s.owner.id == owner.id).count() >= MAX_SESSIONS_PER_USER {
             bail!("too many sessions for this user (max {MAX_SESSIONS_PER_USER}); disconnect or dismiss one");
         }
         let info = Arc::new(Mutex::new(SessionInfo {
@@ -233,7 +233,7 @@ impl Manager {
         let schedule = Arc::new(Mutex::new(Schedule::default()));
         let runner = Runner {
             manager: self.clone(),
-            owner,
+            owner: owner.clone(),
             profile: profile.clone(),
             info: info.clone(),
             client: Arc::new(SessionClient::new(client)),
@@ -247,18 +247,18 @@ impl Manager {
             ended_by: Arc::default(),
         };
         let task = tokio::spawn(runner.run(engine));
-        sessions.insert(profile.id, Session { owner, cancel, info, stats, task: Some(task), schedule });
+        sessions.insert(profile.id, Session { owner: owner.clone(), cancel, info, stats, task: Some(task), schedule });
         Ok(())
     }
 
-    /// Stops a session; `uid` must own it unless it is root.
+    /// Stops a session; `user` must own it unless an administrator.
     /// `id`: the session's profile id.
-    pub async fn disconnect(&self, id: &str, uid: u32) -> anyhow::Result<()> {
+    pub async fn disconnect(&self, id: &str, user: &User) -> anyhow::Result<()> {
         let (task, info) = {
             let mut sessions = self.sessions.lock().unwrap();
             let session = sessions
                 .get_mut(id)
-                .filter(|s| uid == 0 || s.owner == uid)
+                .filter(|s| user.may_act_for(&s.owner.id))
                 .with_context(|| format!("{id} is not active"))?;
             session.cancel.cancel();
             (session.task.take(), session.info.clone())
@@ -270,12 +270,14 @@ impl Manager {
         Ok(())
     }
 
-    /// Puts off the automatic disconnection of a session; `uid` must own
-    /// it unless it is root.
-    pub fn postpone(&self, id: &str, uid: u32) -> anyhow::Result<()> {
+    /// Puts off the automatic disconnection of a session; `user` must own
+    /// it unless an administrator.
+    pub fn postpone(&self, id: &str, user: &User) -> anyhow::Result<()> {
         let sessions = self.sessions.lock().unwrap();
-        let session =
-            sessions.get(id).filter(|s| uid == 0 || s.owner == uid).with_context(|| format!("{id} is not active"))?;
+        let session = sessions
+            .get(id)
+            .filter(|s| user.may_act_for(&s.owner.id))
+            .with_context(|| format!("{id} is not active"))?;
         let mut info = session.info.lock().unwrap();
         let planned = info.auto_disconnect.with_context(|| format!("{} has no disconnection planned", info.name))?;
         if !session.schedule.lock().unwrap().postpone(&planned, now()) {
@@ -314,15 +316,17 @@ impl Manager {
         }
     }
 
-    /// Sends the current sessions, then every state change of `uid`'s
-    /// sessions (all of them for root), until the client goes away.
+    /// Sends the current sessions, then every state change of `user`'s
+    /// sessions (all of them for an administrator), until the client goes
+    /// away.
     /// `expiring`: the client understands `Expiring` events.
-    pub fn watch(self: &Arc<Self>, uid: u32, link: ClientLink, expiring: bool) {
+    pub fn watch(self: &Arc<Self>, user: &User, link: ClientLink, expiring: bool) {
         let mut rx = self.events.subscribe();
-        if !link.send(Event::Status { sessions: self.status(uid) }) {
+        if !link.send(Event::Status { sessions: self.status(user) }) {
             return;
         }
         let manager = self.clone();
+        let user = user.clone();
         tokio::spawn(async move {
             loop {
                 let watched = tokio::select! {
@@ -331,7 +335,7 @@ impl Manager {
                 };
                 match watched {
                     Ok(Watched { event: Event::Expiring { .. }, .. }) if !expiring => {}
-                    Ok(w) if uid == 0 || w.owner.is_none_or(|owner| owner == uid) => {
+                    Ok(w) if w.owner.as_ref().is_none_or(|owner| user.may_act_for(owner)) => {
                         if !link.send(w.event) {
                             return;
                         }
@@ -339,7 +343,7 @@ impl Manager {
                     Ok(_) => {}
                     // Changes were lost: the whole state again instead.
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        if !link.send(Event::Status { sessions: manager.status(uid) }) {
+                        if !link.send(Event::Status { sessions: manager.status(&user) }) {
                             return;
                         }
                     }
@@ -349,18 +353,19 @@ impl Manager {
         });
     }
 
-    /// A shutdown disconnects everyone: only root, or a user who owns
-    /// every session, may ask for it.
-    pub fn may_shutdown(&self, uid: u32) -> bool {
-        uid == 0 || self.sessions.lock().unwrap().values().all(|s| s.owner == uid)
+    /// A shutdown disconnects everyone: only an administrator, or a user
+    /// who owns every session, may ask for it.
+    pub fn may_shutdown(&self, user: &User) -> bool {
+        user.admin || self.sessions.lock().unwrap().values().all(|s| s.owner.id == user.id)
     }
 
-    /// Sessions visible to `uid`: its own, or all of them for root.
-    pub fn status(&self, uid: u32) -> Vec<SessionInfo> {
+    /// Sessions visible to `user`: its own, or all of them for an
+    /// administrator.
+    pub fn status(&self, user: &User) -> Vec<SessionInfo> {
         let sessions = self.sessions.lock().unwrap();
         let mut list: Vec<SessionInfo> = sessions
             .values()
-            .filter(|s| uid == 0 || s.owner == uid)
+            .filter(|s| user.may_act_for(&s.owner.id))
             .map(|s| {
                 let mut info = s.info.lock().unwrap().clone();
                 info.rx_bytes = s.stats.rx_bytes.load(Ordering::Relaxed);
@@ -422,14 +427,14 @@ impl Manager {
 
 struct Runner {
     manager: Arc<Manager>,
-    owner: u32,
+    owner: User,
     profile: Profile,
     info: Arc<Mutex<SessionInfo>>,
     client: Arc<SessionClient>,
     cancel: CancellationToken,
     stats: Arc<TunnelStats>,
     /// Kept to start a new engine if the session's one dies.
-    prompts: std::os::fd::OwnedFd,
+    prompts: crate::engine::Prompts,
     prompt_socket: String,
     prompt_file: Option<FileId>,
     /// The session this one is chained through.
@@ -476,7 +481,7 @@ impl Runner {
             None => tracing::info!(session = self.profile.name, "{state:?}"),
         }
         let event = Event::State { id: self.profile.id.clone(), state, detail, failure, retry };
-        let _ = self.manager.events.send(Watched { owner: Some(self.owner), event: event.clone() });
+        let _ = self.manager.events.send(Watched { owner: Some(self.owner.id.clone()), event: event.clone() });
         self.client.notify(event);
     }
 
@@ -568,7 +573,7 @@ impl Runner {
     fn deadlines(&self) -> impl Future<Output = ()> + Send + 'static {
         let rule = self.profile.auto_disconnect.clone();
         let (manager, owner, id, name) =
-            (self.manager.clone(), self.owner, self.profile.id.clone(), self.profile.name.clone());
+            (self.manager.clone(), self.owner.id.clone(), self.profile.id.clone(), self.profile.name.clone());
         let (info, schedule, cancel, ended_by) =
             (self.info.clone(), self.schedule.clone(), self.cancel.clone(), self.ended_by.clone());
         async move {
@@ -605,7 +610,7 @@ impl Runner {
                 if now >= planned.warning_at() && warned.is_none_or(|w| w.abs_diff(planned.at) > TICK_SLACK) {
                     warned = Some(planned.at);
                     let event = Event::Expiring { id: id.clone(), planned };
-                    let _ = manager.events.send(Watched { owner: Some(owner), event });
+                    let _ = manager.events.send(Watched { owner: Some(owner.clone()), event });
                 }
             }
         }
@@ -615,7 +620,7 @@ impl Runner {
         if !engine.is_alive() {
             tracing::warn!(session = self.profile.name, "the engine died; starting a new one");
             *engine = match self.prompts.try_clone().map_err(anyhow::Error::from).and_then(|prompts| {
-                RemoteEngine::spawn(&self.manager.launcher, &self.profile.name, self.owner, prompts)
+                RemoteEngine::spawn(&self.manager.launcher, &self.profile.name, &self.owner, prompts)
             }) {
                 Ok(engine) => engine,
                 Err(e) => return Outcome::Failed(e.context("cannot start the engine")),
@@ -658,7 +663,7 @@ impl Runner {
             }
         };
 
-        match self.manager.reserve(&self.profile.id, claims(&self.profile, &settings, self.owner)) {
+        match self.manager.reserve(&self.profile.id, claims(&self.profile, &settings, self.owner.clone())) {
             Ok(mut warnings) => {
                 warnings.extend(unused_dns(&settings));
                 for message in warnings {
@@ -909,7 +914,7 @@ fn announced(settings: &TunnelSettings) -> vpn_core::ipc::Announced {
 }
 
 /// What a session will install, for conflict checks with the others.
-fn claims(profile: &Profile, settings: &TunnelSettings, owner: u32) -> Claims {
+fn claims(profile: &Profile, settings: &TunnelSettings, owner: User) -> Claims {
     Claims {
         name: profile.name.clone(),
         owner,
@@ -1108,6 +1113,7 @@ async fn resolve_servers(profile: &Profile) -> (Vec<IpAddr>, Option<anyhow::Erro
 /// directory owned by this process's user (root) and writable by nobody
 /// else, which nobody else may list either (the socket names are the
 /// sessions'); stale sockets of a previous run are removed.
+#[cfg(unix)]
 pub fn prepare_prompt_dir(dir: &str) -> anyhow::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     match std::fs::symlink_metadata(dir) {
@@ -1133,13 +1139,21 @@ pub fn prepare_prompt_dir(dir: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Windows: prompt pipes are not written yet.
+#[cfg(windows)]
+pub fn prepare_prompt_dir(_dir: &str) -> anyhow::Result<()> {
+    Ok(())
+}
+
 /// A socket file, as created: removed only if still the same file.
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileId {
     dev: u64,
     ino: u64,
 }
 
+#[cfg(unix)]
 fn file_id(path: &str) -> Option<FileId> {
     use std::os::unix::fs::MetadataExt;
     std::fs::symlink_metadata(path).ok().map(|m| FileId { dev: m.dev(), ino: m.ino() })
@@ -1147,6 +1161,7 @@ fn file_id(path: &str) -> Option<FileId> {
 
 /// Removes the session's prompt socket unless it was replaced since (a new
 /// session of the same name owns it then).
+#[cfg(unix)]
 fn remove_prompt_socket(path: &str, created: Option<FileId>) {
     if created.is_some() && file_id(path) == created {
         let _ = std::fs::remove_file(path);
@@ -1157,7 +1172,9 @@ fn remove_prompt_socket(path: &str, created: Option<FileId>) {
 /// mode is set right after creation (a umask is process-wide); in between,
 /// the engine still refuses any other user's client. Nothing here follows
 /// a symbolic link.
-fn prompt_listener(path: &str, owner: u32) -> anyhow::Result<(std::os::fd::OwnedFd, Option<FileId>)> {
+#[cfg(unix)]
+fn prompt_listener(path: &str, owner: &User) -> anyhow::Result<(crate::engine::Prompts, Option<FileId>)> {
+    let UserId::Uid(owner) = owner.id else { bail!("{owner} is not a Unix user") };
     let _ = std::fs::remove_file(path);
     let listener = std::os::unix::net::UnixListener::bind(path).with_context(|| format!("cannot create {path}"))?;
     if nix::unistd::geteuid().is_root() {
@@ -1172,11 +1189,24 @@ fn prompt_listener(path: &str, owner: u32) -> anyhow::Result<(std::os::fd::Owned
     Ok((listener.into(), file_id(path)))
 }
 
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileId;
+
+#[cfg(windows)]
+fn remove_prompt_socket(_path: &str, _created: Option<FileId>) {}
+
+#[cfg(windows)]
+fn prompt_listener(path: &str, _owner: &User) -> anyhow::Result<(crate::engine::Prompts, Option<FileId>)> {
+    bail!("cannot create {path}: sessions are not supported on Windows yet")
+}
+
 fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-#[cfg(test)]
+// The sessions run in-process engines over Unix socket pairs.
+#[cfg(all(test, unix))]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -1268,7 +1298,7 @@ mod tests {
         m.sessions.lock().unwrap().insert(
             test_id(name),
             Session {
-                owner,
+                owner: User::uid(owner),
                 cancel: cancel.clone(),
                 info: Arc::new(Mutex::new(info)),
                 stats,
@@ -1317,13 +1347,13 @@ mod tests {
         let m = Arc::new(Manager::default());
         let (mine, mut mine_rx) = client();
         let (theirs, mut theirs_rx) = client();
-        m.watch(1000, mine, true);
-        m.watch(1001, theirs, true);
+        m.watch(&User::uid(1000), mine, true);
+        m.watch(&User::uid(1001), theirs, true);
         assert!(matches!(next_event(&mut mine_rx).await, Event::Status { sessions } if sessions.is_empty()));
         assert!(matches!(next_event(&mut theirs_rx).await, Event::Status { .. }));
 
         let (link, _rx) = client();
-        m.connect(profile(serde_json::json!({ "port": closed_port() })), None, link, 1000).unwrap();
+        m.connect(profile(serde_json::json!({ "port": closed_port() })), None, link, &User::uid(1000)).unwrap();
         let Event::State { id, state, failure, .. } = next_event(&mut mine_rx).await else {
             panic!("expected a state")
         };
@@ -1336,8 +1366,8 @@ mod tests {
         let m = Arc::new(Manager::default());
         let (mine, mut mine_rx) = client();
         let (theirs, mut theirs_rx) = client();
-        m.watch(1000, mine, true);
-        m.watch(1001, theirs, true);
+        m.watch(&User::uid(1000), mine, true);
+        m.watch(&User::uid(1001), theirs, true);
         assert!(matches!(next_event(&mut mine_rx).await, Event::Status { .. }));
         assert!(matches!(next_event(&mut theirs_rx).await, Event::Status { .. }));
         m.stopping();
@@ -1371,17 +1401,17 @@ mod tests {
         let m = Arc::new(Manager::default());
         let (link, _rx) = client();
         let profile = || profile(serde_json::json!({ "port": closed_port() }));
-        let err = m.connect(profile(), Some(test_id("eu")), link, 1000).unwrap_err();
+        let err = m.connect(profile(), Some(test_id("eu")), link, &User::uid(1000)).unwrap_err();
         assert!(
             err.to_string().contains(&format!("{}, which paris goes through, is not connected", test_id("eu"))),
             "{err}"
         );
         fake_session(&m, "eu", 1001);
         let (link, _rx) = client();
-        assert!(m.connect(profile(), Some(test_id("eu")), link, 1000).is_err(), "another user's session");
+        assert!(m.connect(profile(), Some(test_id("eu")), link, &User::uid(1000)).is_err(), "another user's session");
         fake_session(&m, "mine", 1000);
         let (link, _rx) = client();
-        assert!(m.connect(profile(), Some(test_id("mine")), link, 1000).is_ok());
+        assert!(m.connect(profile(), Some(test_id("mine")), link, &User::uid(1000)).is_ok());
     }
 
     #[tokio::test]
@@ -1391,21 +1421,22 @@ mod tests {
             fake_session(&m, &format!("s{i}"), 1000);
         }
         let (link, _rx) = client();
-        let err = m.connect(profile(serde_json::json!({ "port": closed_port() })), None, link, 1000).unwrap_err();
+        let err =
+            m.connect(profile(serde_json::json!({ "port": closed_port() })), None, link, &User::uid(1000)).unwrap_err();
         assert!(err.to_string().contains("too many sessions for this user"), "{err}");
         let (link, _rx) = client();
-        assert!(m.connect(profile(serde_json::json!({ "port": closed_port() })), None, link, 1001).is_ok());
+        assert!(m.connect(profile(serde_json::json!({ "port": closed_port() })), None, link, &User::uid(1001)).is_ok());
     }
 
     #[tokio::test]
     async fn only_root_or_the_sole_owner_may_shut_down() {
         let m = Manager::default();
-        assert!(m.may_shutdown(1000), "nothing to lose");
+        assert!(m.may_shutdown(&User::uid(1000)), "nothing to lose");
         fake_session(&m, "a", 1000);
-        assert!(m.may_shutdown(1000));
+        assert!(m.may_shutdown(&User::uid(1000)));
         fake_session(&m, "b", 1001);
-        assert!(!m.may_shutdown(1000), "would cut another user's tunnel");
-        assert!(m.may_shutdown(0));
+        assert!(!m.may_shutdown(&User::uid(1000)), "would cut another user's tunnel");
+        assert!(m.may_shutdown(&User::uid(0)));
     }
 
     #[test]
@@ -1609,7 +1640,7 @@ mod tests {
         let mut s = settings(&["10.0.0.0/8"], false, &["corp.example"]);
         s.dns.search_domains.push("search-only.example".into());
         s.excluded_routes = vec!["10.9.0.0/16".parse().unwrap()];
-        let c = claims(&profile(serde_json::json!({ "allow_route_overlap": true })), &s, 501);
+        let c = claims(&profile(serde_json::json!({ "allow_route_overlap": true })), &s, User::uid(501));
         assert_eq!(c.dns_domains, vec!["corp.example"]);
         assert_eq!(c.excluded_routes, s.excluded_routes);
         assert!(c.allow_overlap && !c.full_tunnel);
@@ -1620,24 +1651,33 @@ mod tests {
         let m = Manager::default();
         let p = profile(serde_json::json!({}));
         assert!(
-            m.reserve("a", claims(&p, &settings(&["10.0.0.0/8"], false, &["corp.example"]), 501)).unwrap().is_empty()
+            m.reserve("a", claims(&p, &settings(&["10.0.0.0/8"], false, &["corp.example"]), User::uid(501)))
+                .unwrap()
+                .is_empty()
         );
-        let err = m.reserve("b", claims(&p, &settings(&["10.1.0.0/16"], false, &[]), 501)).unwrap_err();
+        let err = m.reserve("b", claims(&p, &settings(&["10.1.0.0/16"], false, &[]), User::uid(501))).unwrap_err();
         assert!(err.message.contains("overlaps"), "{err}");
-        let err = m.reserve("b", claims(&p, &settings(&["172.16.0.0/12"], false, &["corp.example"]), 501)).unwrap_err();
+        let err = m
+            .reserve("b", claims(&p, &settings(&["172.16.0.0/12"], false, &["corp.example"]), User::uid(501)))
+            .unwrap_err();
         assert!(err.message.contains("corp.example") && err.with == "a", "{err}");
         // A refused session left no claims behind: a third one may use them.
-        assert!(m.reserve("c", claims(&p, &settings(&["172.16.0.0/12"], false, &[]), 501)).is_ok());
+        assert!(m.reserve("c", claims(&p, &settings(&["172.16.0.0/12"], false, &[]), User::uid(501))).is_ok());
         // Overlap accepted with the flag, as a warning.
         let lenient = profile(serde_json::json!({ "allow_route_overlap": true }));
-        let warnings = m.reserve("d", claims(&lenient, &settings(&["10.2.0.0/16"], false, &[]), 501)).unwrap();
+        let warnings =
+            m.reserve("d", claims(&lenient, &settings(&["10.2.0.0/16"], false, &[]), User::uid(501))).unwrap();
         assert_eq!(warnings.len(), 1);
         // Releasing a session frees its routes.
-        assert!(m.reserve("b", claims(&p, &settings(&["10.1.0.0/16"], false, &[]), 501)).is_err());
+        assert!(m.reserve("b", claims(&p, &settings(&["10.1.0.0/16"], false, &[]), User::uid(501))).is_err());
         m.registry.lock().unwrap().remove("a");
-        assert!(m.reserve("b", claims(&p, &settings(&["10.1.0.0/16"], false, &["corp.example"]), 501)).is_ok());
+        assert!(
+            m.reserve("b", claims(&p, &settings(&["10.1.0.0/16"], false, &["corp.example"]), User::uid(501))).is_ok()
+        );
         // Re-checking a session against itself is not a conflict.
-        assert!(m.reserve("b", claims(&p, &settings(&["10.1.0.0/16"], false, &["corp.example"]), 501)).is_ok());
+        assert!(
+            m.reserve("b", claims(&p, &settings(&["10.1.0.0/16"], false, &["corp.example"]), User::uid(501))).is_ok()
+        );
     }
 
     // --- connect / disconnect / status -------------------------------------
@@ -1647,18 +1687,19 @@ mod tests {
         let m = Arc::new(Manager::default());
         for name in ["", " lead", "../etc", "tab\tname", &"n".repeat(65)] {
             let (link, _rx) = client();
-            let err = m.connect(profile(serde_json::json!({ "name": name })), None, link, 1000).unwrap_err();
+            let err =
+                m.connect(profile(serde_json::json!({ "name": name })), None, link, &User::uid(1000)).unwrap_err();
             assert!(err.to_string().contains("profile names are"), "{name:?}: {err}");
         }
         // Sessions are keyed by the id: one that could escape a path is refused.
         for id in ["../../etc/passwd", "PARIS", "x"] {
             let (link, _rx) = client();
-            let err = m.connect(profile(serde_json::json!({ "id": id })), None, link, 1000).unwrap_err();
+            let err = m.connect(profile(serde_json::json!({ "id": id })), None, link, &User::uid(1000)).unwrap_err();
             assert!(err.to_string().contains("no valid id"), "{id:?}: {err}");
         }
         let (link, _rx) = client();
         let p = profile(serde_json::json!({ "ca_file": "/etc/master.passwd" }));
-        assert!(m.connect(p, None, link, 1000).unwrap_err().to_string().contains("must be inlined"));
+        assert!(m.connect(p, None, link, &User::uid(1000)).unwrap_err().to_string().contains("must be inlined"));
         assert!(m.sessions.lock().unwrap().is_empty(), "nothing started");
     }
 
@@ -1667,13 +1708,14 @@ mod tests {
         let m = Arc::new(Manager::default());
         fake_session(&m, "paris", 1000);
         let (link, _rx) = client();
-        let err = m.connect(profile(serde_json::json!({})), None, link, 1000).unwrap_err();
+        let err = m.connect(profile(serde_json::json!({})), None, link, &User::uid(1000)).unwrap_err();
         assert!(err.to_string().contains("paris is already active"), "{err}");
         for i in 1..MAX_SESSIONS {
             fake_session(&m, &format!("s{i}"), 1000);
         }
         let (link, _rx) = client();
-        let err = m.connect(profile(serde_json::json!({ "name": "one-more" })), None, link, 1000).unwrap_err();
+        let err =
+            m.connect(profile(serde_json::json!({ "name": "one-more" })), None, link, &User::uid(1000)).unwrap_err();
         assert!(err.to_string().contains("too many sessions"), "{err}");
     }
 
@@ -1683,26 +1725,26 @@ mod tests {
         let alice = fake_session(&m, "alice-vpn", 1000);
         let bob = fake_session(&m, "bob-vpn", 1001);
 
-        let err = m.disconnect(&test_id("alice-vpn"), 1001).await.unwrap_err();
+        let err = m.disconnect(&test_id("alice-vpn"), &User::uid(1001)).await.unwrap_err();
         assert_eq!(
             err.to_string(),
             format!("{} is not active", test_id("alice-vpn")),
             "no hint that the session exists"
         );
         assert!(!alice.is_cancelled());
-        assert!(m.disconnect(&test_id("nope"), 0).await.is_err());
+        assert!(m.disconnect(&test_id("nope"), &User::uid(0)).await.is_err());
 
-        let names = |uid| m.status(uid).into_iter().map(|s| s.name).collect::<Vec<_>>();
+        let names = |uid| m.status(&User::uid(uid)).into_iter().map(|s| s.name).collect::<Vec<_>>();
         assert_eq!(names(1000), vec!["alice-vpn"]);
         assert_eq!(names(1001), vec!["bob-vpn"]);
         assert_eq!(names(0), vec!["alice-vpn", "bob-vpn"]);
         assert!(names(1002).is_empty());
-        let s = &m.status(1000)[0];
+        let s = &m.status(&User::uid(1000))[0];
         assert_eq!((s.rx_bytes, s.tx_bytes), (100, 40), "live counters are reported");
 
-        m.disconnect(&test_id("alice-vpn"), 1000).await.unwrap();
+        m.disconnect(&test_id("alice-vpn"), &User::uid(1000)).await.unwrap();
         assert!(alice.is_cancelled());
-        m.disconnect(&test_id("bob-vpn"), 0).await.unwrap();
+        m.disconnect(&test_id("bob-vpn"), &User::uid(0)).await.unwrap();
         assert!(bob.is_cancelled());
         assert!(names(0).is_empty());
     }
@@ -1712,12 +1754,12 @@ mod tests {
     async fn a_lagging_watcher_gets_the_status_again() {
         let m = Arc::new(Manager::default());
         let (tx, mut rx) = mpsc::channel(2 * WATCH_QUEUE);
-        m.watch(1000, ClientLink::new(tx), true);
+        m.watch(&User::uid(1000), ClientLink::new(tx), true);
         assert!(matches!(rx.recv().await, Some(Event::Status { .. })));
         fake_session(&m, "paris", 1000);
         for i in 0..WATCH_QUEUE + 10 {
             let event = Event::Warning { message: i.to_string() };
-            let _ = m.events.send(Watched { owner: Some(1000), event });
+            let _ = m.events.send(Watched { owner: Some(UserId::Uid(1000)), event });
         }
         let Some(Event::Status { sessions }) = timeout(Duration::from_secs(2), rx.recv()).await.unwrap() else {
             panic!("expected the status first")
@@ -1748,13 +1790,13 @@ mod tests {
         m.sessions.lock().unwrap().get_mut(&id).unwrap().task = Some(task);
         let disconnect = tokio::spawn({
             let (m, id) = (m.clone(), id.clone());
-            async move { m.disconnect(&id, 1000).await }
+            async move { m.disconnect(&id, &User::uid(1000)).await }
         });
         ended_rx.await.unwrap();
         fake_session(&m, "paris", 1000); // connected again meanwhile
         resume.send(()).unwrap();
         disconnect.await.unwrap().unwrap();
-        assert_eq!(m.status(1000).len(), 1, "the new session is still listed");
+        assert_eq!(m.status(&User::uid(1000)).len(), 1, "the new session is still listed");
     }
 
     #[tokio::test]
@@ -1773,8 +1815,8 @@ mod tests {
         let m = Arc::new(Manager::default());
         let (link, mut rx) = client();
         let port = closed_port();
-        m.connect(profile(serde_json::json!({ "port": port })), None, link.clone(), 1000).unwrap();
-        assert_eq!(m.status(1000)[0].state, SessionState::Connecting);
+        m.connect(profile(serde_json::json!({ "port": port })), None, link.clone(), &User::uid(1000)).unwrap();
+        assert_eq!(m.status(&User::uid(1000))[0].state, SessionState::Connecting);
 
         let Event::State { id, state, detail, failure, .. } = next_event(&mut rx).await else {
             panic!("expected a state, no prompt")
@@ -1787,19 +1829,20 @@ mod tests {
         assert_eq!(failure, Some(FailureKind::Unreachable));
 
         // The failed session stays listed with its error, holding no claims.
-        let listed = m.status(1000);
+        let listed = m.status(&User::uid(1000));
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].state, SessionState::Failed);
         assert!(listed[0].detail.as_deref().unwrap().contains("cannot reach gateway"));
-        assert!(m.reserve("other", Claims { full_tunnel: true, ..Default::default() }).is_ok(), "no claims left");
+        let full = claims(&profile(serde_json::json!({ "name": "other" })), &settings(&[], true, &[]), User::uid(1001));
+        assert!(m.reserve("other", full).is_ok(), "no claims left");
         // Another user cannot replace it; its owner can, and disconnecting dismisses it.
         let (link, _rx) = client();
-        assert!(m.connect(profile(serde_json::json!({ "port": port })), None, link, 1001).is_err());
+        assert!(m.connect(profile(serde_json::json!({ "port": port })), None, link, &User::uid(1001)).is_err());
         let (link, mut rx) = client();
-        m.connect(profile(serde_json::json!({ "port": port })), None, link, 1000).unwrap();
+        m.connect(profile(serde_json::json!({ "port": port })), None, link, &User::uid(1000)).unwrap();
         let _ = next_event(&mut rx).await;
-        m.disconnect(&test_id("paris"), 1000).await.unwrap();
-        assert!(m.status(0).is_empty());
+        m.disconnect(&test_id("paris"), &User::uid(1000)).await.unwrap();
+        assert!(m.status(&User::uid(0)).is_empty());
     }
 
     /// An IPsec profile asks for its pre-shared key before any network I/O.
@@ -1811,13 +1854,13 @@ mod tests {
     async fn disconnect_while_prompting() {
         let m = Arc::new(Manager::default());
         let (link, mut rx) = client();
-        m.connect(prompting_profile(), None, link, 1000).unwrap();
+        m.connect(prompting_profile(), None, link, &User::uid(1000)).unwrap();
         let mut prompts = PromptClient::attach(&mut rx).await;
         assert!(matches!(prompts.next().await, Event::Prompt { .. }));
 
-        assert!(m.disconnect(&test_id("paris"), 1001).await.is_err());
-        timeout(Duration::from_secs(5), m.disconnect(&test_id("paris"), 1000)).await.unwrap().unwrap();
-        assert!(m.status(0).is_empty(), "disconnect waits for the session to end");
+        assert!(m.disconnect(&test_id("paris"), &User::uid(1001)).await.is_err());
+        timeout(Duration::from_secs(5), m.disconnect(&test_id("paris"), &User::uid(1000))).await.unwrap().unwrap();
+        assert!(m.status(&User::uid(0)).is_empty(), "disconnect waits for the session to end");
         let Event::State { state, .. } = next_event(&mut rx).await else { panic!("expected a state") };
         assert_eq!(state, SessionState::Disconnected);
     }
@@ -1829,7 +1872,7 @@ mod tests {
         use tokio::io::AsyncWriteExt;
         let m = Arc::new(Manager::default());
         let (link, mut rx) = client();
-        m.connect(prompting_profile(), None, link, 1000).unwrap();
+        m.connect(prompting_profile(), None, link, &User::uid(1000)).unwrap();
         let Some(Event::Attach { socket }) = timeout(Duration::from_secs(5), rx.recv()).await.unwrap() else {
             panic!("expected the prompt socket first")
         };
@@ -1854,13 +1897,13 @@ mod tests {
             let (link, mut rx) = client();
             let gateway =
                 serde_json::json!({ "name": name, "protocol": "ipsec", "gateway": "127.0.0.1", "port": closed_port() });
-            m.connect(profile(gateway), None, link, 1000 + clients.len() as u32).unwrap();
+            m.connect(profile(gateway), None, link, &User::uid(1000 + clients.len() as u32)).unwrap();
             let mut prompts = PromptClient::attach(&mut rx).await;
             assert!(matches!(prompts.next().await, Event::Prompt { .. }));
             clients.push((rx, prompts));
         }
         timeout(Duration::from_secs(5), m.disconnect_all()).await.expect("stopping hangs");
-        assert!(m.status(0).is_empty());
+        assert!(m.status(&User::uid(0)).is_empty());
     }
 
     /// omnitunctl killed while the password prompt is shown: the session ends
@@ -1870,12 +1913,12 @@ mod tests {
     async fn session_fails_when_client_leaves_during_prompt() {
         let m = Arc::new(Manager::default());
         let (link, mut rx) = client();
-        m.connect(prompting_profile(), None, link, 1000).unwrap();
+        m.connect(prompting_profile(), None, link, &User::uid(1000)).unwrap();
         let mut prompts = PromptClient::attach(&mut rx).await;
         assert!(matches!(prompts.next().await, Event::Prompt { .. }));
         drop(prompts);
         timeout(Duration::from_secs(2), async {
-            while m.status(0)[0].state != SessionState::Failed {
+            while m.status(&User::uid(0))[0].state != SessionState::Failed {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
@@ -1888,9 +1931,9 @@ mod tests {
         let m = Arc::new(Manager::default());
         let (link, rx) = client();
         drop(rx);
-        m.connect(profile(serde_json::json!({ "port": closed_port() })), None, link, 1000).unwrap();
+        m.connect(profile(serde_json::json!({ "port": closed_port() })), None, link, &User::uid(1000)).unwrap();
         timeout(Duration::from_secs(5), async {
-            while m.status(0)[0].state != SessionState::Failed {
+            while m.status(&User::uid(0))[0].state != SessionState::Failed {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
@@ -1929,8 +1972,8 @@ mod tests {
         let m = Arc::new(Manager::default());
         let (new, mut new_rx) = client();
         let (old, mut old_rx) = client();
-        m.watch(1000, new, true);
-        m.watch(1000, old, false);
+        m.watch(&User::uid(1000), new, true);
+        m.watch(&User::uid(1000), old, false);
         assert!(matches!(next_event(&mut new_rx).await, Event::Status { .. }));
         assert!(matches!(next_event(&mut old_rx).await, Event::Status { .. }));
         let planned = vpn_core::auto_disconnect::Planned {
@@ -1939,7 +1982,7 @@ mod tests {
             limit: "8:00".parse().unwrap(),
         };
         let event = Event::Expiring { id: test_id("paris"), planned };
-        let _ = m.events.send(Watched { owner: Some(1000), event });
+        let _ = m.events.send(Watched { owner: Some(UserId::Uid(1000)), event });
         m.stopping();
         assert!(matches!(next_event(&mut new_rx).await, Event::Expiring { .. }));
         assert!(matches!(next_event(&mut new_rx).await, Event::Stopping));
@@ -1951,7 +1994,7 @@ mod tests {
         use vpn_core::auto_disconnect::{AutoDisconnect, Criterion, Planned};
         let m = Manager::default();
         let _cancel = fake_session(&m, "paris", 1000);
-        assert!(m.postpone(&test_id("paris"), 1000).is_err(), "nothing planned");
+        assert!(m.postpone(&test_id("paris"), &User::uid(1000)).is_err(), "nothing planned");
 
         let rule = AutoDisconnect { after: Some("8:00".parse().unwrap()), ..Default::default() };
         let plan = |criterion| Planned { at: 1_000 + 8 * 3600, criterion, limit: "8:00".parse().unwrap() };
@@ -1961,8 +2004,8 @@ mod tests {
             session.schedule.lock().unwrap().start(&rule, 1_000);
             session.info.lock().unwrap().auto_disconnect = Some(plan(Criterion::After));
         }
-        assert!(m.postpone(&test_id("paris"), 1001).is_err(), "another user's session");
-        m.postpone(&test_id("paris"), 1000).unwrap();
+        assert!(m.postpone(&test_id("paris"), &User::uid(1001)).is_err(), "another user's session");
+        m.postpone(&test_id("paris"), &User::uid(1000)).unwrap();
         let sessions = m.sessions.lock().unwrap();
         let session = &sessions[&test_id("paris")];
         assert_eq!(session.info.lock().unwrap().auto_disconnect, None, "planned again at the next tick");
@@ -1971,6 +2014,6 @@ mod tests {
 
         session.info.lock().unwrap().auto_disconnect = Some(plan(Criterion::Idle));
         drop(sessions);
-        assert!(m.postpone(&test_id("paris"), 0).is_err());
+        assert!(m.postpone(&test_id("paris"), &User::uid(0)).is_err());
     }
 }

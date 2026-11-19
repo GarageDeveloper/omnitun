@@ -4,13 +4,19 @@
 //! binary, unprivileged and sandboxed, given the sockets bound here; what
 //! it reports is checked against the session's domains before anything is
 //! routed. If it fails, the session goes on with its DNS as without it.
+//!
+//! Windows: the proxy is not started yet.
+#![cfg_attr(windows, allow(dead_code, unused_imports))]
 
 use std::net::SocketAddr;
+#[cfg(unix)]
 use std::os::fd::OwnedFd;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream as StdUnixStream;
 
 use anyhow::{Context, bail};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+#[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use vpn_core::dns_ipc::{FromProxy, MAX_LINE, ProxyConfig, ToProxy, Upstream};
@@ -123,7 +129,13 @@ fn bind() -> anyhow::Result<(std::net::UdpSocket, std::net::TcpListener)> {
 }
 
 impl DnsProxy {
+    #[cfg(windows)]
+    pub async fn start(_launcher: &Launcher, _name: &str, _config: ProxyConfig) -> anyhow::Result<Self> {
+        bail!("routes by domain are not supported on Windows yet")
+    }
+
     /// Starts session `name`'s proxy with `config`.
+    #[cfg(unix)]
     pub async fn start(launcher: &Launcher, name: &str, config: ProxyConfig) -> anyhow::Result<Self> {
         let (udp, tcp) = bind().context("cannot bind the DNS proxy's sockets")?;
         let port = udp.local_addr()?.port();
@@ -302,6 +314,8 @@ mod tests {
 
     /// The proxy end to end, in this process: it reports, the daemon
     /// releases.
+    // In-process over a Unix socket pair.
+    #[cfg(unix)]
     #[tokio::test]
     async fn starts_and_reports() {
         let config = ProxyConfig { routed: vec!["*.saas.example".parse().unwrap()], upstreams: vec![] };

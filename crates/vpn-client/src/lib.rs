@@ -11,7 +11,6 @@ pub mod profiles;
 pub mod secrets;
 pub mod service_log;
 pub mod session;
-mod transport;
 pub mod vpnprofile;
 
 pub use daemon::Daemon;

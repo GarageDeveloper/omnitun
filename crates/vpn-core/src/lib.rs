@@ -30,6 +30,7 @@ pub mod openvpn;
 pub mod profile;
 pub mod prompt;
 pub mod settings;
+pub mod user;
 pub mod wireguard;
 
 pub use auto_disconnect::{AutoDisconnect, HourMinute};
@@ -47,4 +48,5 @@ pub use profile::{
 };
 pub use prompt::{Prompt, PromptKind, Prompter, SignAlgorithm, SignRequest};
 pub use settings::{DnsSettings, TunnelSettings, valid_domain};
+pub use user::{User, UserId};
 pub use wireguard::{WIREGUARD_MTU, WIREGUARD_PORT, WireGuardProfile};

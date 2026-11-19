@@ -1954,6 +1954,7 @@ dependencies = [
  "vpn-core",
  "vpn-dnsproxy",
  "vpn-platform",
+ "vpn-transport",
  "zeroize",
 ]
 
@@ -3472,6 +3473,7 @@ dependencies = [
  "toml_edit",
  "tracing",
  "vpn-core",
+ "vpn-transport",
  "x25519-dalek",
  "x509-parser",
  "zeroize",
@@ -3673,6 +3675,17 @@ dependencies = [
  "tokio",
  "vpn-core",
  "x509-parser",
+]
+
+[[package]]
+name = "vpn-transport"
+version = "0.4.5"
+dependencies = [
+ "anyhow",
+ "nix 0.31.3",
+ "tokio",
+ "vpn-core",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

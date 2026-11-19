@@ -8,10 +8,10 @@ use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use vpn_core::ipc::{Event, Request, Retry, SessionInfo, SessionState};
 use vpn_core::{CertificateInfo, FailureKind, Profile, Prompt, PromptKind};
+use vpn_transport::{ReadHalf, Stream, WriteHalf};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::client_key::ClientKey;
-use crate::transport::{self, ReadHalf, WriteHalf};
 use crate::{Daemon, ProfileStore, printable};
 
 /// What the user decided about a certificate that cannot be verified.
@@ -340,12 +340,12 @@ const MAX_QUESTION: usize = 1024 * 1024;
 
 impl PromptSocket {
     async fn open(path: &str) -> anyhow::Result<Self> {
-        let (read, write) =
-            transport::connect(path).await.with_context(|| format!("cannot reach the session at {path}"))?;
-        Ok(Self::new(read, write))
+        let stream =
+            vpn_transport::connect(path).await.with_context(|| format!("cannot reach the session at {path}"))?;
+        Ok(Self::new(stream))
     }
 
-    fn new(read: ReadHalf, write: WriteHalf) -> Self {
+    fn new(Stream { read, write }: Stream) -> Self {
         Self { read, pending: Vec::new(), write }
     }
 
@@ -641,8 +641,8 @@ mod tests {
     }
 
     fn sockets() -> (PromptSocket, Engine) {
-        let ((our_read, our_write), (read, write)) = transport::pair();
-        (PromptSocket::new(our_read, our_write), Engine { read: tokio::io::BufReader::new(read), write })
+        let (ours, Stream { read, write }) = Stream::pair();
+        (PromptSocket::new(ours), Engine { read: tokio::io::BufReader::new(read), write })
     }
 
     impl Engine {

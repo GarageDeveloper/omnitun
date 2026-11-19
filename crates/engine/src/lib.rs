@@ -2,6 +2,10 @@
 //! run here, unprivileged and sandboxed. The daemon starts one engine per
 //! session and one attempt per `Start`, and hands it the tun interface;
 //! the user's answers come straight from the client on the prompt socket.
+//!
+//! Unix only for now: on Windows the engine will get packets from the
+//! daemon through a pipe instead of a tun descriptor.
+#![cfg(unix)]
 
 mod prompts;
 

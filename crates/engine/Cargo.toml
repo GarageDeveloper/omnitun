@@ -10,6 +10,10 @@ name = "omnitun_engine"
 
 [dependencies]
 vpn-core.workspace = true
+anyhow.workspace = true
+
+# The engine is Unix only for now.
+[target.'cfg(unix)'.dependencies]
 vpn-platform.workspace = true
 vpn-fortissl.workspace = true
 vpn-ipsec.workspace = true
@@ -17,16 +21,14 @@ vpn-openvpn.workspace = true
 vpn-l2tp.workspace = true
 vpn-wireguard.workspace = true
 vpn-dnsproxy.workspace = true
-anyhow.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-nix = { version = "0.31", features = ["user"] }
 zeroize = "1"
+nix = { version = "0.31", features = ["user"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
-nix = { version = "0.31", features = ["user"] }

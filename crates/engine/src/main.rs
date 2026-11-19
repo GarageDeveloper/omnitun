@@ -8,16 +8,22 @@
 //! the control socket as descriptor 3, the bound UDP socket as 4 and the
 //! TCP listener on the same port as 5.
 
+#[cfg(unix)]
 use std::os::fd::{FromRawFd, OwnedFd};
 
+#[cfg(unix)]
 use anyhow::{Context, bail};
 
+#[cfg(unix)]
 const CONTROL_FD: i32 = 3;
+#[cfg(unix)]
 const FDS_FD: i32 = 4;
+#[cfg(unix)]
 const PROMPTS_FD: i32 = 5;
 
 // Two workers: a client certificate signature blocks one inside the TLS
 // handshake while the other carries the question to the client.
+#[cfg(unix)]
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> anyhow::Result<()> {
     // Started by the daemon, which relays the log with its own timestamps:
@@ -57,6 +63,7 @@ async fn main() -> anyhow::Result<()> {
     omnitun_engine::serve(control, std::os::unix::net::UnixStream::from(fds), prompts, owner).await
 }
 
+#[cfg(unix)]
 async fn dns_proxy() -> anyhow::Result<()> {
     // SAFETY: the daemon set up these three descriptors for this process.
     let (control, udp, tcp) =
@@ -77,6 +84,7 @@ async fn dns_proxy() -> anyhow::Result<()> {
 
 /// What an engine needs from its sandbox: name resolution, outbound
 /// connections and a loopback listener (SAML).
+#[cfg(unix)]
 async fn check() -> anyhow::Result<()> {
     let host = std::env::args().nth(2).unwrap_or_else(|| "apple.com".into());
     let resolved = tokio::net::lookup_host((host.as_str(), 443)).await.map(|mut a| a.next());
@@ -95,4 +103,10 @@ async fn check() -> anyhow::Result<()> {
     let home = std::fs::read_dir("/Users");
     println!("list /Users: {}", if home.is_ok() { "ALLOWED" } else { "refused" });
     Ok(())
+}
+
+/// Windows: the engine is not ported yet.
+#[cfg(windows)]
+fn main() -> anyhow::Result<()> {
+    anyhow::bail!("{} is not supported on Windows yet", vpn_core::brand::ENGINE)
 }

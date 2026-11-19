@@ -8,7 +8,7 @@ use vpn_core::{FailureExt, FailureKind, brand};
 use zeroize::Zeroizing;
 
 use crate::printable;
-use crate::transport::{self, ReadHalf, WriteHalf};
+use vpn_transport::{ReadHalf, WriteHalf};
 
 pub struct Daemon {
     lines: tokio::io::Lines<BufReader<ReadHalf>>,
@@ -21,7 +21,7 @@ impl Daemon {
     /// Connects and greets the daemon as `client` (shown in its logs).
     pub async fn open(client: &str) -> anyhow::Result<Self> {
         let path = vpn_core::ipc::socket_path();
-        let (read, write) = transport::connect(&path)
+        let vpn_transport::Stream { read, write } = vpn_transport::connect(&path)
             .await
             .with_context(|| format!("cannot reach {} at {path} (is it running, are you in its group?)", brand::DAEMON))
             .kind(FailureKind::ServiceUnavailable)?;

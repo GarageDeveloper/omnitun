@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 vpn-core.workspace = true
 vpn-platform.workspace = true
+vpn-transport.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
@@ -17,12 +18,17 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
-nix = { version = "0.31", features = ["user", "fs", "resource"] }
 zeroize = "1"
 libc = "0.2"
 
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", features = ["user", "fs", "resource"] }
+
 [dev-dependencies]
-omnitun-engine.workspace = true
-vpn-dnsproxy.workspace = true
 toml.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+
+# In-process engines and DNS proxies, over Unix socket pairs.
+[target.'cfg(unix)'.dev-dependencies]
+omnitun-engine.workspace = true
+vpn-dnsproxy.workspace = true

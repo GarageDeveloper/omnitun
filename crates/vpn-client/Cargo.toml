@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 vpn-core.workspace = true
+vpn-transport.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 tokio.workspace = true

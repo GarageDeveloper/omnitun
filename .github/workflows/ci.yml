@@ -51,8 +51,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
 
-  # Windows (port in progress): the libraries and omnitunctl. The
-  # daemon and the engine are not ported yet.
+  # Windows (port in progress): everything but the macOS probe. The
+  # daemon serves clients but starts no session yet.
   windows:
     runs-on: windows-latest
     steps:
@@ -63,8 +63,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      - run: cargo clippy --workspace --all-targets --locked --exclude omnitund --exclude omnitun-engine --exclude utun-probe -- -D warnings
-      - run: cargo test --workspace --locked --exclude omnitund --exclude omnitun-engine --exclude utun-probe
+      - run: cargo clippy --workspace --all-targets --locked --exclude utun-probe -- -D warnings
+      - run: cargo test --workspace --locked --exclude utun-probe
 
   licenses:
     runs-on: ubuntu-latest

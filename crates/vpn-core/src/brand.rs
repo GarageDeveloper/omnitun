@@ -31,9 +31,10 @@ pub mod legacy {
     pub const DAEMON: &str = "vpnd";
 }
 
-/// Directory of the daemon's runtime files: the control socket and the
-/// route journal. A reboot clears it on macOS and Linux; on Windows it is
-/// `%ProgramData%\Omnitun`, which only SYSTEM and Administrators can change.
+/// Directory of the daemon's runtime files: the control socket (not on
+/// Windows) and the route journal. A reboot clears it on macOS and Linux;
+/// on Windows it is `%ProgramData%\Omnitun`, which only SYSTEM and
+/// Administrators can change.
 pub fn runtime_dir() -> String {
     if cfg!(target_os = "macos") {
         "/var/run".to_owned()
@@ -45,7 +46,10 @@ pub fn runtime_dir() -> String {
     }
 }
 
-/// Default control socket path.
+/// Default control socket path; a named pipe on Windows.
 pub fn default_socket() -> String {
+    if cfg!(windows) {
+        return format!(r"\\.\pipe\{DAEMON}");
+    }
     std::path::Path::new(&runtime_dir()).join(format!("{DAEMON}.sock")).display().to_string()
 }

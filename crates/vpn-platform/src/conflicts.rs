@@ -6,14 +6,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
 
 use ipnet::Ipv4Net;
+use vpn_core::User;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Claims {
     /// The session's name, for messages (sessions are keyed by id).
     pub name: String,
-    /// The user who started it (0: root). A session's flags never let it
-    /// take traffic from another user's session.
-    pub owner: u32,
+    /// The user who started it. A session's flags never let it take
+    /// traffic from another user's session, unless an administrator
+    /// started it.
+    pub owner: User,
     pub routes: Vec<Ipv4Net>,
     /// Networks forced onto the physical uplink.
     pub excluded_routes: Vec<Ipv4Net>,
@@ -68,8 +70,8 @@ impl Registry {
             let conflict = |message: String| Conflict { with: key.clone(), message };
             // The routing table and the resolver are shared by all users:
             // overlap and chaining are accepted only between sessions of one
-            // user (or root's).
-            let trusted = claims.owner == theirs.owner || claims.owner == 0;
+            // user (or an administrator's).
+            let trusted = claims.owner.may_act_for(&theirs.owner.id);
             let chained = trusted && (claims.related.contains(key) || theirs.related.iter().any(|r| r == name));
             let allow_overlap = trusted && claims.allow_overlap;
             let other = if theirs.name.is_empty() { key } else { &theirs.name };
@@ -181,7 +183,7 @@ impl Registry {
     fn dynamic_conflict(&self, name: &str, ours: &Claims, address: Ipv4Addr, full: bool) -> Option<Conflict> {
         for (key, theirs) in self.active.iter().filter(|(n, _)| n.as_str() != name) {
             let conflict = |message: String| Some(Conflict { with: key.clone(), message });
-            let trusted = ours.owner == theirs.owner || ours.owner == 0;
+            let trusted = ours.owner.may_act_for(&theirs.owner.id);
             // Only a VPN this one goes through: an address inside the
             // network of a VPN chained through this one is that VPN's, and
             // a host route here would take its traffic.
@@ -244,7 +246,7 @@ mod tests {
     fn claims(routes: &[&str], full: bool, domains: &[&str]) -> Claims {
         Claims {
             name: String::new(),
-            owner: 501,
+            owner: User::uid(501),
             routes: routes.iter().map(|r| r.parse().unwrap()).collect(),
             excluded_routes: Vec::new(),
             full_tunnel: full,
@@ -284,7 +286,7 @@ mod tests {
         reg.insert("overlap", overlap);
         assert!(reg.claim_dynamic("overlap", ip("10.9.9.9")).is_ok());
         let mut stranger = claims(&["192.168.70.0/24"], false, &[]);
-        (stranger.owner, stranger.allow_overlap) = (502, true);
+        (stranger.owner, stranger.allow_overlap) = (User::uid(502), true);
         reg.insert("stranger", stranger);
         assert!(reg.claim_dynamic("stranger", ip("10.9.9.10")).is_err(), "not another user's");
 
@@ -403,14 +405,14 @@ mod tests {
         let mut r = Registry::default();
         r.insert("a", claims(&["10.0.0.0/8"], false, &["corp.example"]));
         let mut b = claims(&["10.1.0.0/16"], false, &[]);
-        b.owner = 502;
+        b.owner = User::uid(502);
         b.allow_overlap = true;
         b.related = vec!["a".into()];
         assert!(r.check("b", &b).is_err(), "overlap and chain refused");
         let mut dns = claims(&[], false, &["intranet.corp.example"]);
-        dns.owner = 502;
+        dns.owner = User::uid(502);
         assert!(r.check("d", &dns).is_err(), "a subdomain refused");
-        b.owner = 0;
+        b.owner = User::uid(0);
         assert!(r.check("b", &b).is_ok(), "root may");
         let mut own = claims(&["10.1.0.0/16"], false, &["intranet.corp.example"]);
         own.allow_overlap = true;
