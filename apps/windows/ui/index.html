@@ -1,0 +1,50 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Omnitun</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>Omnitun</h1>
+    <button id="edit" class="link" data-i18n="edit"></button>
+  </header>
+  <div id="banner" hidden></div>
+  <div id="update" hidden><span id="update-text"></span> <button id="update-open" class="link" data-i18n="download"></button></div>
+  <main id="list"></main>
+  <p id="empty" hidden data-i18n="empty"></p>
+  <footer><span id="version"></span></footer>
+
+  <dialog id="prompt">
+    <form method="dialog">
+      <p class="profile" id="prompt-profile"></p>
+      <label id="prompt-message" for="prompt-input"></label>
+      <input id="prompt-input" autocomplete="off" spellcheck="false">
+      <menu>
+        <!-- Not a submit button: Enter in the field answers OK. -->
+        <button type="button" id="prompt-cancel" data-i18n="cancel"></button>
+        <button value="ok" class="primary" data-i18n="ok"></button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="trust">
+    <form method="dialog">
+      <p class="profile" id="trust-profile"></p>
+      <p data-i18n="trust-intro"></p>
+      <p id="trust-host" class="mono"></p>
+      <p id="trust-reason" class="muted"></p>
+      <p class="mono small" id="trust-sha"></p>
+      <p class="muted" data-i18n="trust-advice"></p>
+      <menu>
+        <button value="reject" data-i18n="reject"></button>
+        <button value="once" data-i18n="once"></button>
+        <button value="pin" class="primary" data-i18n="pin"></button>
+      </menu>
+    </form>
+  </dialog>
+</body>
+</html>

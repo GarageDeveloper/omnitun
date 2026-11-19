@@ -10,6 +10,8 @@ allow = [
     "Unicode-3.0",
     "Unlicense",
     "CDLA-Permissive-2.0",
+    # foldhash (the Windows app, through Tauri).
+    "Zlib",
     # uniffi (Swift bindings): file-level copyleft, used unmodified.
     "MPL-2.0",
 ]

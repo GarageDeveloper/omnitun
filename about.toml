@@ -9,6 +9,7 @@ accepted = [
     "Unicode-3.0",
     "Unlicense",
     "CDLA-Permissive-2.0",
+    "Zlib",
     "MPL-2.0",
 ]
 targets = [

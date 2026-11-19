@@ -1,0 +1,31 @@
+# The Windows app: a tray icon and a window over omnitund, as the macOS
+# menu bar app is. Its own workspace: Tauri needs WebView2 (or WebKitGTK),
+# which the libraries and the command line do not.
+[workspace]
+
+[package]
+name = "omnitun-app"
+version = "0.4.5"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[bin]]
+name = "Omnitun"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+vpn-core = { path = "../../crates/vpn-core" }
+vpn-client = { path = "../../crates/vpn-client" }
+tauri = { version = "2", features = ["tray-icon"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+async-trait = "0.1"
+zeroize = "1"
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
