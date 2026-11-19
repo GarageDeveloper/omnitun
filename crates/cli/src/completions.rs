@@ -15,7 +15,7 @@ pub enum Shell {
     Bash,
     Zsh,
     #[value(name = "powershell")]
-    PowerShell,
+    Powershell,
 }
 
 /// The completion script for `shell`.
@@ -25,7 +25,7 @@ pub fn script(shell: Shell, command: &mut clap::Command) -> anyhow::Result<Strin
     let generator = match shell {
         Shell::Bash => clap_complete::Shell::Bash,
         Shell::Zsh => clap_complete::Shell::Zsh,
-        Shell::PowerShell => clap_complete::Shell::PowerShell,
+        Shell::Powershell => clap_complete::Shell::PowerShell,
     };
     clap_complete::generate(generator, command, &name, &mut out);
     let generated = String::from_utf8(out)?;
@@ -36,7 +36,7 @@ pub fn script(shell: Shell, command: &mut clap::Command) -> anyhow::Result<Strin
     match shell {
         Shell::Bash => bash(&generated, &name, &profiles, &value_options(command)),
         Shell::Zsh => zsh(&generated, &name, &profiles),
-        Shell::PowerShell => powershell(&generated, &name, &profiles),
+        Shell::Powershell => powershell(&generated, &name, &profiles),
     }
 }
 
@@ -284,7 +284,7 @@ mod tests {
 
     #[test]
     fn powershell_offers_profiles_where_they_go() {
-        let script = script(Shell::PowerShell, &mut command()).unwrap();
+        let script = script(Shell::Powershell, &mut command()).unwrap();
         let offers = |case: &str| {
             let start = script.find(&format!("'tool;{case}' {{")).unwrap();
             script[start..].lines().nth(1).unwrap().contains("profiles --names")
