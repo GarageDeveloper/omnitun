@@ -117,7 +117,9 @@ sudo cp packaging/omnitund.service /etc/systemd/system/ && sudo systemctl enable
 ```
 
 On Windows, `packaging\windows\build-msi.ps1` builds the installer (see
-its header for the tools it needs); to try the service from a build, run
+its header for the tools it needs; the "Windows installers" workflow builds
+both and attaches them to a release, and `packaging/windows/winget.sh`
+then writes the winget manifests to submit); to try the service from a build, run
 `target\debug\omnitund.exe --allow-writable-binaries` in an
 administrator terminal, with `wintun.dll` (from wintun.net) next to it.
 

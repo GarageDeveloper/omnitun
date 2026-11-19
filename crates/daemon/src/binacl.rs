@@ -48,12 +48,12 @@ pub fn check(path: &Path) -> anyhow::Result<()> {
         let shown = shown.strip_prefix(r"\\?\").unwrap_or(&shown);
         let (owner, writers) = security(p).with_context(|| format!("cannot check {shown}"))?;
         if !TRUSTED.contains(&owner.as_str()) {
-            bail!("{shown} belongs to {owner}, not to SYSTEM or the Administrators");
+            bail!("{shown} belongs to {}, not to SYSTEM or the Administrators", account(&owner));
         }
         if let Some((sid, _)) =
             writers.iter().find(|(sid, mask)| mask & guarded(depth) != 0 && !TRUSTED.contains(&sid.as_str()))
         {
-            bail!("{shown} can be changed by {sid}, not only by SYSTEM or the Administrators");
+            bail!("{shown} can be changed by {}, not only by SYSTEM or the Administrators", account(sid));
         }
     }
     Ok(())
@@ -115,6 +115,40 @@ fn security(path: &Path) -> anyhow::Result<(String, Vec<(String, u32)>)> {
     // SAFETY: allocated by GetNamedSecurityInfoW.
     unsafe { LocalFree(descriptor) };
     result
+}
+
+/// `DOMAIN\name` of a SID, for messages; the SID itself if unknown.
+fn account(sid: &str) -> String {
+    use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
+    use windows_sys::Win32::Security::{LookupAccountSidW, SID_NAME_USE};
+    let wide: Vec<u16> = sid.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut binary: PSID = null_mut();
+    // SAFETY: a NUL-terminated string; the SID is freed below.
+    if unsafe { ConvertStringSidToSidW(wide.as_ptr(), &mut binary) } == 0 {
+        return sid.to_owned();
+    }
+    let (mut name, mut domain) = (vec![0u16; 256], vec![0u16; 256]);
+    let (mut name_len, mut domain_len, mut kind) = (256u32, 256u32, SID_NAME_USE::default());
+    // SAFETY: buffers of the sizes given.
+    let found = unsafe {
+        LookupAccountSidW(
+            std::ptr::null(),
+            binary,
+            name.as_mut_ptr(),
+            &mut name_len,
+            domain.as_mut_ptr(),
+            &mut domain_len,
+            &mut kind,
+        )
+    } != 0;
+    // SAFETY: allocated by ConvertStringSidToSidW.
+    unsafe { LocalFree(binary) };
+    if !found {
+        return sid.to_owned();
+    }
+    let name = String::from_utf16_lossy(&name[..name_len as usize]);
+    let domain = String::from_utf16_lossy(&domain[..domain_len as usize]);
+    if domain.is_empty() { name } else { format!("{domain}\\{name}") }
 }
 
 fn sid_string(sid: PSID) -> anyhow::Result<String> {
