@@ -21,8 +21,7 @@ pub(crate) struct Entry {
 static ENTRIES: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
 
 fn path() -> PathBuf {
-    let dir = if cfg!(target_os = "macos") { "/var/run" } else { "/run" };
-    Path::new(dir).join(format!("{}.routes", vpn_core::brand::DAEMON))
+    Path::new(&vpn_core::brand::runtime_dir()).join(format!("{}.routes", vpn_core::brand::DAEMON))
 }
 
 /// Records a route about to be added.
@@ -69,9 +68,13 @@ fn save(path: &Path, entries: &[Entry]) {
 }
 
 fn write(path: &Path, text: &str) -> std::io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
     let tmp = path.with_extension("routes.tmp");
-    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    // Windows: the runtime directory's ACL keeps it to SYSTEM and Administrators.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(&tmp)?;
     file.write_all(text.as_bytes())?;
     std::fs::rename(&tmp, path)
 }

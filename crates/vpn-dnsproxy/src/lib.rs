@@ -23,7 +23,7 @@ use anyhow::{Context, bail};
 use hickory_proto::op::{Edns, Message, MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::{Name, RData, RecordType};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream, UdpSocket, UnixStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use vpn_core::dns_ipc::{FromProxy, MAX_ADDRESSES, MAX_LINE, ProxyConfig, ToProxy, Upstream};
 
@@ -350,8 +350,11 @@ impl Router for Arc<ControlRouter> {
 
 /// The proxy process: its configuration first on `control`, then queries
 /// on `udp` and `tcp` until the daemon closes `control`.
-pub async fn run(control: UnixStream, udp: UdpSocket, tcp: TcpListener) -> anyhow::Result<()> {
-    let (read, mut write) = control.into_split();
+pub async fn run<C>(control: C, udp: UdpSocket, tcp: TcpListener) -> anyhow::Result<()>
+where
+    C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
+{
+    let (read, mut write) = tokio::io::split(control);
     let mut lines = BufReader::new(read);
     let mut read_line = async move || -> anyhow::Result<Option<ToProxy>> {
         let mut line = String::new();

@@ -211,7 +211,7 @@ mod tests {
         let ca = dir.join("ca.pem");
         std::fs::write(&ca, "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n").unwrap();
         let p = profile(&format!(
-            "name = \"paris\"\nprotocol = \"forti-ssl\"\nhost = \"vpn.example.com\"\nca_file = \"{}\"",
+            "name = \"paris\"\nprotocol = \"forti-ssl\"\nhost = \"vpn.example.com\"\nca_file = '{}'",
             ca.display()
         ));
         let back = parse(&export(&p).unwrap()).unwrap();

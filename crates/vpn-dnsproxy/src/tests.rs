@@ -320,9 +320,9 @@ async fn the_process_end_to_end() {
     let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let tcp = TcpListener::bind(udp.local_addr().unwrap()).await.unwrap();
     let listen = udp.local_addr().unwrap();
-    let (daemon, proxy_side) = UnixStream::pair().unwrap();
+    let (daemon, proxy_side) = tokio::io::duplex(64 * 1024);
     let proxy = tokio::spawn(run(proxy_side, udp, tcp));
-    let (read, mut write) = daemon.into_split();
+    let (read, mut write) = tokio::io::split(daemon);
     let config = ToProxy::Config { config: config(&[upstream.addr]) };
     write.write_all(format!("{}\n", serde_json::to_string(&config).unwrap()).as_bytes()).await.unwrap();
 

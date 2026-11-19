@@ -23,6 +23,7 @@ pub struct TunDevice {
     device: tun_rs::SyncDevice,
 }
 
+#[cfg(unix)]
 impl TunDevice {
     pub fn fd(&self) -> std::os::fd::RawFd {
         std::os::fd::AsRawFd::as_raw_fd(&self.device)
@@ -45,6 +46,7 @@ pub fn create(settings: &TunnelSettings, cancel: CancellationToken) -> anyhow::R
 }
 
 /// Moves packets for an interface received from the daemon (engine side).
+#[cfg(unix)]
 pub fn attach(
     fd: std::os::fd::OwnedFd,
     mtu: u16,

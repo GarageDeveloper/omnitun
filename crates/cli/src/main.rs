@@ -383,18 +383,19 @@ async fn main() -> anyhow::Result<()> {
                 // Its shared keys (tls-auth, tls-crypt) are for the other
                 // users of the VPN, not for everyone on this Mac.
                 // The mode is set before writing: an existing file keeps
-                // its own otherwise.
+                // its own otherwise. Windows: the file inherits the ACL of
+                // its folder.
                 Some(path) => {
                     use std::io::Write;
-                    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-                    std::fs::OpenOptions::new()
-                        .write(true)
-                        .create(true)
-                        .truncate(true)
-                        .mode(0o600)
+                    let mut options = std::fs::OpenOptions::new();
+                    options.write(true).create(true).truncate(true);
+                    #[cfg(unix)]
+                    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+                    options
                         .open(&path)
                         .and_then(|mut f| {
-                            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+                            #[cfg(unix)]
+                            f.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
                             f.write_all(text.as_bytes())
                         })
                         .with_context(|| format!("cannot write {}", path.display()))?
@@ -564,8 +565,18 @@ impl Interaction for Terminal<'_> {
     }
 
     fn open_url(&self, url: &str) {
-        let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-        if let Err(e) = std::process::Command::new(opener).arg(url).spawn() {
+        // Windows: url.dll takes the URL as is, where `start` would cut it
+        // at its first `&`.
+        let mut opener = if cfg!(target_os = "macos") {
+            std::process::Command::new("open")
+        } else if cfg!(windows) {
+            let mut c = std::process::Command::new("rundll32");
+            c.arg("url.dll,FileProtocolHandler");
+            c
+        } else {
+            std::process::Command::new("xdg-open")
+        };
+        if let Err(e) = opener.arg(url).spawn() {
             eprintln!("cannot open a browser ({e}); open the URL manually");
         }
     }

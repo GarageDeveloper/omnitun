@@ -6,12 +6,12 @@
 use anyhow::{Context, ensure};
 use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
 use vpn_core::ipc::{Event, Request, Retry, SessionInfo, SessionState};
 use vpn_core::{CertificateInfo, FailureKind, Profile, Prompt, PromptKind};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::client_key::ClientKey;
+use crate::transport::{self, ReadHalf, WriteHalf};
 use crate::{Daemon, ProfileStore, printable};
 
 /// What the user decided about a certificate that cannot be verified.
@@ -328,11 +328,11 @@ async fn handle_question(
 /// The session's prompt socket: the engine asks, the user answers; the
 /// daemon is not on the way.
 struct PromptSocket {
-    read: tokio::net::unix::OwnedReadHalf,
+    read: ReadHalf,
     /// What was read past the last whole question. `next` runs in a
     /// `select!`: a question read in parts survives its cancellation.
     pending: Vec<u8>,
-    write: tokio::net::unix::OwnedWriteHalf,
+    write: WriteHalf,
 }
 
 /// Longest question accepted from an engine.
@@ -340,12 +340,12 @@ const MAX_QUESTION: usize = 1024 * 1024;
 
 impl PromptSocket {
     async fn open(path: &str) -> anyhow::Result<Self> {
-        let stream = UnixStream::connect(path).await.with_context(|| format!("cannot reach the session at {path}"))?;
-        Ok(Self::new(stream))
+        let (read, write) =
+            transport::connect(path).await.with_context(|| format!("cannot reach the session at {path}"))?;
+        Ok(Self::new(read, write))
     }
 
-    fn new(stream: UnixStream) -> Self {
-        let (read, write) = stream.into_split();
+    fn new(read: ReadHalf, write: WriteHalf) -> Self {
         Self { read, pending: Vec::new(), write }
     }
 
@@ -636,14 +636,13 @@ mod tests {
 
     /// A session's engine, at the other end of the prompt socket.
     struct Engine {
-        read: tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
-        write: tokio::net::unix::OwnedWriteHalf,
+        read: tokio::io::BufReader<ReadHalf>,
+        write: WriteHalf,
     }
 
     fn sockets() -> (PromptSocket, Engine) {
-        let (ours, theirs) = UnixStream::pair().unwrap();
-        let (read, write) = theirs.into_split();
-        (PromptSocket::new(ours), Engine { read: tokio::io::BufReader::new(read), write })
+        let ((our_read, our_write), (read, write)) = transport::pair();
+        (PromptSocket::new(our_read, our_write), Engine { read: tokio::io::BufReader::new(read), write })
     }
 
     impl Engine {

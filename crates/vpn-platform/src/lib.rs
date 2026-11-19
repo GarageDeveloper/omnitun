@@ -1,10 +1,15 @@
 //! OS integration: one tun interface per session, routes and split DNS
 //! (macOS: `route` + `scutil`; Linux: `ip` + `resolvectl`), and a registry
 //! that keeps concurrent sessions from stepping on each other.
+//!
+//! Windows: routes and DNS are not written yet, so the code that drives
+//! them is unused there.
+#![cfg_attr(windows, allow(dead_code, unused_imports))]
 
 mod cmd;
 pub mod conflicts;
 pub mod dynamic;
+#[cfg(unix)]
 pub mod fdpass;
 mod journal;
 mod netconfig;
@@ -13,7 +18,9 @@ mod tun;
 pub use conflicts::{Claims, Conflict, Registry};
 pub use dynamic::Direction;
 pub use netconfig::{AppliedConfig, DynamicClaims, Through, apply, cleanup_stale, current_resolvers};
-pub use tun::{TunDevice, TunInterface, attach, create, create_device};
+#[cfg(unix)]
+pub use tun::attach;
+pub use tun::{TunDevice, TunInterface, create, create_device};
 
 /// Session names end up in interface keys and command arguments.
 pub fn valid_session_name(name: &str) -> bool {

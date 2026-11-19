@@ -16,6 +16,7 @@ pub struct ProfileStore {
     legacy: bool,
     /// The file is in our own config directory, which only the user may
     /// list (not a folder given with `--config`).
+    #[cfg_attr(not(unix), allow(dead_code))]
     own_dir: bool,
 }
 
@@ -26,16 +27,14 @@ struct Lock {
 }
 
 impl ProfileStore {
-    /// `path`, or `~/.config/omnitun/profiles.toml`; the file of the
-    /// pre-rename location is used while the new one does not exist.
+    /// `path`, or `~/.config/omnitun/profiles.toml` (Windows:
+    /// `%APPDATA%\omnitun\profiles.toml`); the file of the pre-rename
+    /// location is used while the new one does not exist.
     pub fn open(path: Option<PathBuf>) -> anyhow::Result<Self> {
         if let Some(path) = path {
             return Ok(Self { path, legacy: false, own_dir: false });
         }
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-            .context("cannot locate the config directory")?;
+        let base = config_base().context("cannot locate the config directory")?;
         let path = base.join(brand::ID).join("profiles.toml");
         let legacy = base.join(brand::legacy::CONFIG_DIR).join("profiles.toml");
         if !path.exists() && legacy.exists() {
@@ -151,11 +150,9 @@ impl ProfileStore {
     fn migrate(&self, lock: &Lock) -> anyhow::Result<()> {
         let backup = self.path.with_extension("toml.before-ids");
         if !backup.exists() {
-            use std::os::unix::fs::OpenOptionsExt;
-            std::fs::OpenOptions::new()
+            private_file()
                 .write(true)
                 .create_new(true)
-                .mode(0o600)
                 .open(&backup)
                 .and_then(|mut f| f.write_all(self.read_text().unwrap_or_default().as_bytes()))
                 .with_context(|| format!("cannot back up {} before giving ids", self.path.display()))?;
@@ -374,15 +371,13 @@ impl ProfileStore {
 
     /// Waits for the other writers, in this process or another one.
     fn lock(&self) -> anyhow::Result<Lock> {
-        use std::os::unix::fs::OpenOptionsExt;
         let dir = self.dir()?;
         let name = self.path.file_name().context("profiles file has no name")?.to_string_lossy();
         let path = dir.join(format!(".{name}.lock"));
-        let file = std::fs::OpenOptions::new()
+        let file = private_file()
             .write(true)
             .create(true)
             .truncate(false)
-            .mode(0o600)
             .open(&path)
             .with_context(|| format!("cannot open {}", path.display()))?;
         file.lock().with_context(|| format!("cannot lock {}", path.display()))?;
@@ -391,15 +386,21 @@ impl ProfileStore {
 
     /// The file's directory, created if needed. Ours is made listable by
     /// the user only, even if created by hand or by an earlier version.
+    /// Windows: `%APPDATA%` is already private to the user.
     fn dir(&self) -> anyhow::Result<&Path> {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
         let dir = self.path.parent().context("profiles file has no directory")?;
-        if !dir.exists() {
-            std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+            if !dir.exists() {
+                std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+            }
+            if self.own_dir && std::fs::metadata(dir).is_ok_and(|m| m.permissions().mode() & 0o077 != 0) {
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+            }
         }
-        if self.own_dir && std::fs::metadata(dir).is_ok_and(|m| m.permissions().mode() & 0o077 != 0) {
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-        }
+        #[cfg(not(unix))]
+        std::fs::create_dir_all(dir)?;
         Ok(dir)
     }
 
@@ -416,7 +417,6 @@ impl ProfileStore {
     /// file that is a link (dotfiles) stays one: the file it points to is
     /// replaced.
     fn write(&self, _: &Lock, text: &str) -> anyhow::Result<()> {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         self.dir()?;
         let target = match std::fs::canonicalize(&self.path) {
             Ok(target) => target,
@@ -425,15 +425,40 @@ impl ProfileStore {
         };
         let dir = target.parent().context("profiles file has no directory")?;
         let tmp = dir.join(format!(".{}.tmp-{}", brand::ID, vpn_core::new_id()));
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        let mut file = private_file().write(true).create_new(true).open(&tmp)?;
         let written = file.write_all(text.as_bytes()).and_then(|()| file.sync_all());
         if let Err(e) = written.and_then(|()| std::fs::rename(&tmp, &target)) {
             let _ = std::fs::remove_file(&tmp);
             return Err(e.into());
         }
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))?;
+        }
         Ok(())
     }
+}
+
+/// The per-user config directory: `$XDG_CONFIG_HOME` or `~/.config`;
+/// `%APPDATA%` on Windows.
+fn config_base() -> Option<PathBuf> {
+    if cfg!(windows) {
+        return std::env::var_os("APPDATA").map(PathBuf::from);
+    }
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+}
+
+/// Options for a file only the user can read (mode 0600 on Unix; on
+/// Windows, the ACL inherited from the user's profile directory).
+fn private_file() -> std::fs::OpenOptions {
+    #[allow(unused_mut)]
+    let mut options = std::fs::OpenOptions::new();
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options
 }
 
 /// The profile `key` names among `profiles` (see [`ProfileStore::find`]).
@@ -973,6 +998,7 @@ mod tests {
     }
 
     /// A profiles file kept with dotfiles, through a link.
+    #[cfg(unix)]
     #[test]
     fn a_linked_file_stays_linked() {
         let (store, dir) = store("link");
@@ -986,6 +1012,7 @@ mod tests {
     }
 
     /// The config directory of an earlier version, listable by all.
+    #[cfg(unix)]
     #[test]
     fn our_directory_is_made_private() {
         use std::os::unix::fs::PermissionsExt;

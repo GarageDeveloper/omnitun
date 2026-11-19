@@ -238,9 +238,13 @@ fn unix_time(stamp: &str) -> Option<u64> {
 pub fn local_time(at: u64) -> String {
     let t = at as libc::time_t;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    // SAFETY: both pointers are valid for the call; localtime_r is the
-    // thread-safe variant.
-    if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
+    // SAFETY: both pointers are valid for the call; localtime_r and
+    // localtime_s are the thread-safe variants.
+    #[cfg(unix)]
+    let ok = !unsafe { libc::localtime_r(&t, &mut tm) }.is_null();
+    #[cfg(windows)]
+    let ok = unsafe { libc::localtime_s(&mut tm, &t) } == 0;
+    if !ok {
         return at.to_string();
     }
     format!(

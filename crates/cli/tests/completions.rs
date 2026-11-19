@@ -1,5 +1,7 @@
 //! The completion scripts, run by the shells against the real binary and a
-//! profiles file of their own.
+//! profiles file of their own. Unix only: bash and zsh are not part of
+//! Windows.
+#![cfg(unix)]
 
 use std::path::PathBuf;
 use std::process::Command;
