@@ -7,6 +7,10 @@ on:
   workflow_dispatch:
   push:
     tags: ["v*"]
+    # While the port is on its branch (workflow_dispatch needs the file on
+    # the default branch): remove when merging.
+    branches: [windows-port]
+    paths: ["packaging/windows/**", ".github/workflows/windows-msi.yml"]
 
 permissions:
   contents: read
