@@ -25,6 +25,7 @@ vpn-client = { path = "../../crates/vpn-client" }
 vpn-ffi = { path = "../../crates/vpn-ffi", features = ["serde"] }
 tauri-plugin-dialog = "2"
 sys-locale = "0.3"
+tauri-plugin-notification = "2"
 tauri = { version = "2", features = ["tray-icon"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
@@ -33,3 +34,6 @@ anyhow = "1"
 async-trait = "0.1"
 zeroize = "1"
 ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"

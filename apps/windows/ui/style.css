@@ -91,3 +91,4 @@ dialog menu { display: flex; justify-content: flex-end; gap: 8px; padding: 0; ma
 .small { font-size: 11px; }
 button.gear { border: none; background: none; padding: 2px 4px; color: var(--muted); font-size: 15px; }
 button.gear:hover { color: var(--accent); }
+.links { display: flex; gap: 14px; }

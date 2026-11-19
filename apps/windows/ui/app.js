@@ -68,7 +68,7 @@ const STRINGS = {
     pinned: "Certificat enregistré dans le profil.",
   },
 };
-const T = navigator.language.toLowerCase().startsWith("fr") ? STRINGS.fr : STRINGS.en;
+let T = STRINGS.en;
 const t = (key, ...args) => (typeof T[key] === "function" ? T[key](...args) : T[key] ?? key);
 
 let profiles = [];
@@ -257,9 +257,11 @@ function askTrust(view) {
 }
 
 async function main() {
+  T = (await invoke("language")) === "fr" ? STRINGS.fr : STRINGS.en;
   for (const node of document.querySelectorAll("[data-i18n]")) node.textContent = t(node.dataset.i18n);
   document.getElementById("edit").addEventListener("click", () => invoke("open_manager", { id: null }).catch((e) => banner(String(e))));
   await listen("profiles-changed", loadProfiles);
+  document.getElementById("settings").addEventListener("click", () => invoke("open_settings"));
   document.getElementById("prompt-cancel").addEventListener("click", () => document.getElementById("prompt").close("cancel"));
   document.getElementById("update-open").addEventListener("click", () => invoke("open_releases"));
   document.getElementById("version").textContent = `Omnitun ${await invoke("version")}`;

@@ -10,6 +10,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod manage;
+mod settings;
+
+use settings::tr;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -49,6 +52,8 @@ struct State {
     signing: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     /// A newer release, if one was found.
     update: Mutex<Option<String>>,
+    /// The states notified last, by profile.
+    notified: Mutex<HashMap<String, SessionState>>,
 }
 
 type Shared = Arc<State>;
@@ -270,10 +275,7 @@ fn trust(state: tauri::State<'_, Shared>, id: u64, decision: String) {
 /// a window built from a synchronous command blocks its webview.
 #[tauri::command]
 async fn open_manager(app: AppHandle, id: Option<String>) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("manage") {
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
+    if focus(&app, "manage") {
         let _ = app.emit_to("manage", "select", id);
         return Ok(());
     }
@@ -288,6 +290,49 @@ async fn open_manager(app: AppHandle, id: Option<String>) -> Result<(), String> 
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Opens the Settings window.
+#[tauri::command]
+async fn open_settings(app: AppHandle) -> Result<(), String> {
+    if focus(&app, "settings") {
+        return Ok(());
+    }
+    tauri::WebviewWindowBuilder::new(&app, "settings", tauri::WebviewUrl::App("settings.html".into()))
+        .title(tr("Settings", "Réglages"))
+        .inner_size(580.0, 560.0)
+        .min_inner_size(480.0, 420.0)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Brings window `label` forward; false if it is not open.
+fn focus(app: &AppHandle, label: &str) -> bool {
+    let Some(window) = app.get_webview_window(label) else { return false };
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_focus();
+    true
+}
+
+/// Opens one of the app's pages in the browser.
+#[tauri::command]
+fn open_link(which: String) {
+    let url = match which.as_str() {
+        "source" => "https://github.com/GarageDeveloper/omnitun",
+        "mit" => "https://github.com/GarageDeveloper/omnitun/blob/main/LICENSE-MIT",
+        "apache" => "https://github.com/GarageDeveloper/omnitun/blob/main/LICENSE-APACHE",
+        _ => RELEASES,
+    };
+    open(url);
+}
+
+/// Looks for a newer release now; returns it, if any.
+#[tauri::command]
+async fn check_now(app: AppHandle, state: tauri::State<'_, Shared>) -> Result<Option<String>, String> {
+    let latest = latest_release().await.map_err(|e| format!("{e:#}"))?;
+    Ok(found_release(&app, &state, latest))
 }
 
 /// The profiles changed in the profiles window: the main window and the
@@ -346,6 +391,7 @@ async fn watch(app: AppHandle, state: Shared) {
                 }
                 let _ = app.emit("sessions", ());
                 refresh_tray(&app, &state);
+                notify(&app, &state);
             }
             #[allow(unreachable_code)]
             anyhow::Ok(())
@@ -378,31 +424,88 @@ async fn refresh(app: &AppHandle, state: &State) {
     let _ = app.emit("sessions", ());
     if changed {
         refresh_tray(app, state);
+        notify(app, state);
     }
+}
+
+/// Tells of connections up, failed or dropped, as the settings say.
+fn notify(app: &AppHandle, state: &State) {
+    use tauri_plugin_notification::NotificationExt;
+    let wanted = settings::current();
+    let sessions = state.sessions.lock().unwrap().clone();
+    let mut notified = state.notified.lock().unwrap();
+    for s in &sessions {
+        let before = notified.insert(s.id.clone(), s.state);
+        if before == Some(s.state) {
+            continue;
+        }
+        let text = match s.state {
+            SessionState::Connected if wanted.notify_connected => Some(tr("Connected", "Connexion établie").to_owned()),
+            SessionState::Failed if wanted.notify_failures => {
+                Some(s.detail.clone().unwrap_or_else(|| tr("The connection failed.", "La connexion a échoué.").into()))
+            }
+            SessionState::Reconnecting if wanted.notify_failures && before == Some(SessionState::Connected) => {
+                Some(tr("Connection lost: reconnecting.", "Connexion perdue : reconnexion.").to_owned())
+            }
+            _ => None,
+        };
+        if let Some(text) = text {
+            let _ = app.notification().builder().title(&s.name).body(text).show();
+        }
+    }
+    notified.retain(|id, _| sessions.iter().any(|s| &s.id == id));
 }
 
 /// Looks for a newer release once a day; the window offers it, the user
 /// decides (the page opens in the browser).
 async fn check_updates(app: AppHandle, state: Shared) {
     loop {
-        let latest = tokio::task::spawn_blocking(|| -> anyhow::Result<String> {
-            let release: serde_json::Value = ureq::get(LATEST)
-                .header("User-Agent", "omnitun-app")
-                .header("Accept", "application/vnd.github+json")
-                .call()?
-                .body_mut()
-                .read_json()?;
-            Ok(release["tag_name"].as_str().unwrap_or_default().trim_start_matches('v').to_owned())
-        })
-        .await;
-        if let Ok(Ok(latest)) = latest
-            && newer(&latest, env!("CARGO_PKG_VERSION"))
+        if settings::current().check_updates
+            && let Ok(latest) = latest_release().await
         {
-            *state.update.lock().unwrap() = Some(latest.clone());
-            let _ = app.emit("update", latest);
+            found_release(&app, &state, latest);
         }
         tokio::time::sleep(UPDATE_EVERY).await;
     }
+}
+
+/// The version of the latest release on GitHub.
+async fn latest_release() -> anyhow::Result<String> {
+    tokio::task::spawn_blocking(|| -> anyhow::Result<String> {
+        let release: serde_json::Value = ureq::get(LATEST)
+            .header("User-Agent", "omnitun-app")
+            .header("Accept", "application/vnd.github+json")
+            .call()?
+            .body_mut()
+            .read_json()?;
+        Ok(release["tag_name"].as_str().unwrap_or_default().trim_start_matches('v').to_owned())
+    })
+    .await?
+}
+
+/// `latest` if it is newer than this app, which the window then offers.
+fn found_release(app: &AppHandle, state: &State, latest: String) -> Option<String> {
+    if !newer(&latest, env!("CARGO_PKG_VERSION")) {
+        return None;
+    }
+    *state.update.lock().unwrap() = Some(latest.clone());
+    let _ = app.emit("update", latest.clone());
+    Some(latest)
+}
+
+/// Ends the app, and the VPNs too if the settings say so.
+async fn quit(app: AppHandle) {
+    if settings::current().disconnect_on_quit
+        && let Ok(daemon) = Daemon::open(CLIENT).await
+        && let Ok(sessions) = daemon.status().await
+    {
+        for s in sessions {
+            if let Ok(daemon) = Daemon::open(CLIENT).await {
+                let _ = daemon.disconnect(&s.id).await;
+            }
+        }
+    }
+    app.exit(0);
 }
 
 /// Whether version `a` (x.y.z) comes after `b`.
@@ -411,18 +514,13 @@ fn newer(a: &str, b: &str) -> bool {
     parse(a) > parse(b)
 }
 
-/// `en`, or `fr` when Windows speaks French (as the windows do).
-fn tr(en: &'static str, fr: &'static str) -> &'static str {
-    let french = sys_locale::get_locale().is_some_and(|l| l.to_ascii_lowercase().starts_with("fr"));
-    if french { fr } else { en }
-}
-
 /// The icon's menu: the window, the profiles window, the profiles (checked
 /// when up), Quit.
 fn tray_menu(app: &AppHandle, state: &State) -> tauri::Result<Menu<tauri::Wry>> {
     let menu = Menu::new(app)?;
     menu.append(&MenuItem::with_id(app, "open", "Omnitun…", true, None::<&str>)?)?;
     menu.append(&MenuItem::with_id(app, "manage", tr("Manage VPNs…", "Gérer les VPN…"), true, None::<&str>)?)?;
+    menu.append(&MenuItem::with_id(app, "settings", tr("Settings…", "Réglages…"), true, None::<&str>)?)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     let up: Vec<String> = state
         .sessions
@@ -470,6 +568,7 @@ fn main() {
     let hidden = std::env::args().any(|a| a == "--hidden");
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![
             profiles,
@@ -479,7 +578,20 @@ fn main() {
             answer,
             trust,
             open_manager,
+            open_settings,
+            open_link,
+            check_now,
             profiles_changed,
+            settings::settings,
+            settings::language,
+            settings::set_settings,
+            settings::open_at_login,
+            settings::set_open_at_login,
+            settings::service_info,
+            settings::restart_service,
+            settings::open_services,
+            settings::diagnostic_report,
+            settings::open_notices,
             manage::profile_summaries,
             manage::profile_form,
             manage::new_profile_form,
@@ -511,6 +623,7 @@ fn main() {
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
+            settings::load(&handle);
             let menu = tray_menu(&handle, &state)?;
             TrayIconBuilder::with_id("main")
                 .icon(app.default_window_icon().cloned().expect("the app has an icon"))
@@ -529,7 +642,16 @@ fn main() {
                                     let _ = open_manager(app, None).await;
                                 });
                             }
-                            "quit" => app.exit(0),
+                            "settings" => {
+                                let app = app.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    let _ = open_settings(app).await;
+                                });
+                            }
+                            "quit" => {
+                                let app = app.clone();
+                                tauri::async_runtime::spawn(quit(app));
+                            }
                             _ => {
                                 let Some(profile) = id.strip_prefix("p:") else { return };
                                 let up = state

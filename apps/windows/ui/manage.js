@@ -10,7 +10,7 @@ const files = window.__TAURI__.dialog;
 
 // ---------------------------------------------------------------- strings
 
-const FRENCH = navigator.language.toLowerCase().startsWith("fr");
+let FRENCH = false;
 /** French for each English text; %@ and %lld are replaced in order. */
 const FR = {
   "Manage VPNs": "Gérer les VPN",
@@ -1968,6 +1968,7 @@ async function imported(ids, connectNow) {
 // ---------------------------------------------------------------- start
 
 async function main() {
+  FRENCH = (await invoke("language")) === "fr";
   document.title = tr("Manage VPNs");
   const add = document.getElementById("add");
   add.title = tr("New VPN");
