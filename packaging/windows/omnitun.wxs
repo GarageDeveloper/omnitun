@@ -44,6 +44,9 @@
                           Arguments="--service"
                           Vital="yes" />
           <ServiceControl Id="Service" Name="omnitund" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
+          <!-- Taken (and deleted) by the service's next start, which adds
+               this member to the group: SetupGroup below may not run. -->
+          <RegistryValue Root="HKLM" Key="SOFTWARE\Omnitun" Name="SetupMember" Type="string" Value="[MEMBER]" />
         </Component>
         <Component Id="Engine" Bitness="always64">
           <File Source="$(Stage)\omnitun-engine.exe" KeyPath="yes" />
@@ -56,7 +59,11 @@
         </Component>
         <Component Id="App" Bitness="always64">
           <File Id="app" Source="$(Stage)\Omnitun.exe" KeyPath="yes">
-            <Shortcut Id="StartMenu" Directory="ProgramMenuFolder" Name="Omnitun" WorkingDirectory="INSTALLFOLDER" Advertise="no" />
+            <Shortcut Id="StartMenu" Directory="ProgramMenuFolder" Name="Omnitun" WorkingDirectory="INSTALLFOLDER" Advertise="no">
+              <!-- The app's notifications are shown under this identity
+                   (tauri.conf.json's identifier). -->
+              <ShortcutProperty Key="System.AppUserModel.ID" Value="com.root42.omnitun" />
+            </Shortcut>
           </File>
           <!-- In the notification area at each sign-in, every user's. -->
           <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="Omnitun"
@@ -79,14 +86,16 @@
     </StandardDirectory>
 
     <!-- The group must exist before the service starts (it listens for its
-         members); the service's restart on failure is set here too. The
-         group goes with the last uninstall, not with an upgrade. -->
+         members); the service's restart on failure is set here too. Not
+         fatal: on some machines an installer cannot start a program, and
+         the service does the same at its start (winsetup.rs). The group
+         goes with the last uninstall, not with an upgrade. -->
     <CustomAction Id="SetupGroup"
                   FileRef="omnitund"
                   ExeCommand="--setup &quot;[MEMBER]&quot;"
                   Execute="deferred"
                   Impersonate="no"
-                  Return="check" />
+                  Return="ignore" />
     <CustomAction Id="RemoveGroup"
                   FileRef="omnitund"
                   ExeCommand="--teardown"
@@ -95,7 +104,7 @@
                   Return="ignore" />
     <!-- MEMBER: who joins the group; the installing user unless given
          (msiexec /i Omnitun.msi MEMBER="DOMAIN\alice"). -->
-    <SetProperty Id="MEMBER" Value="[%USERDOMAIN]\[LogonUser]" Before="SetupGroup" Sequence="execute" Condition="NOT MEMBER" />
+    <SetProperty Id="MEMBER" Value="[%USERDOMAIN]\[LogonUser]" Before="WriteRegistryValues" Sequence="execute" Condition="NOT MEMBER" />
     <InstallExecuteSequence>
       <Custom Action="SetupGroup" Before="StartServices" Condition="NOT REMOVE" />
       <Custom Action="RemoveGroup" After="StopServices" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />

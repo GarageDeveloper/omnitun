@@ -21,6 +21,9 @@ static ARGS: OnceLock<std::sync::Mutex<Option<Args>>> = OnceLock::new();
 
 define_windows_service!(ffi_service_main, service_main);
 
+/// The exit code of a stop asked by a client: restart.
+const RESTART: u32 = 2;
+
 /// Hands this thread to the service manager until the service stops.
 pub fn run(args: Args) -> anyhow::Result<()> {
     ARGS.get_or_init(|| std::sync::Mutex::new(Some(args)));
@@ -55,6 +58,8 @@ fn serve(args: Args) -> anyhow::Result<()> {
             _ => ServiceControlHandlerResult::NotImplemented,
         }
     };
+    // Before listening: the group decides who may connect.
+    crate::winsetup::at_start(&args.group);
     let registered = service_control_handler::register(vpn_core::brand::DAEMON, handler)?;
     let _ = handle.set(registered);
     registered.set_service_status(status(ServiceState::Running, Duration::ZERO))?;
@@ -62,8 +67,15 @@ fn serve(args: Args) -> anyhow::Result<()> {
 
     let result = tokio::runtime::Runtime::new()
         .map_err(anyhow::Error::from)
-        .and_then(|runtime| runtime.block_on(crate::daemon(args, stop.cancelled_owned())));
+        .and_then(|runtime| runtime.block_on(crate::daemon(args, stop.clone().cancelled_owned())));
     let code = match &result {
+        // Asked by a client (`Shutdown`), not by the service manager: a
+        // restart, as launchd gives on macOS. A non-zero code has the
+        // service manager start it again (see winsetup).
+        Ok(()) if !stop.is_cancelled() => {
+            tracing::info!("stopped by a client: the service manager starts it again");
+            RESTART
+        }
         Ok(()) => 0,
         Err(e) => {
             tracing::error!("{e:#}");
