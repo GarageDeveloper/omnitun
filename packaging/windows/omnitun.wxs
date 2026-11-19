@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Omnitun for Windows, built by build-msi.ps1 (WiX 5):
+    wix build -arch x64|arm64 -d Version=… -d Stage=<folder> omnitun.wxs
+  Stage holds the files: omnitund.exe, omnitun-engine.exe, omnitunctl.exe,
+  wintun.dll and the license files.
+
+  Installs into Program Files (only administrators may change it: the
+  service checks it at start), registers the omnitund service (LocalSystem,
+  automatic, restarted if it fails: set by the setup step below), puts the folder on the PATH for
+  omnitunctl, and creates the "omnitun" group with the installing user in
+  it (who may then use the service; others are added with
+  `net localgroup omnitun <user> /add`).
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Omnitun"
+           Manufacturer="GarageDeveloper"
+           Version="$(Version)"
+           UpgradeCode="51284876-CB6E-4A7B-9CC3-B94B3E5B027B"
+           Scope="perMachine"
+           Compressed="yes">
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of Omnitun is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/GarageDeveloper/omnitun" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/GarageDeveloper/omnitun/issues" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="MEMBER" Secure="yes" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Omnitun">
+        <Component Id="Service" Bitness="always64">
+          <File Id="omnitund" Source="$(Stage)\omnitund.exe" KeyPath="yes" />
+          <ServiceInstall Id="Service"
+                          Name="omnitund"
+                          DisplayName="Omnitun"
+                          Description="Brings up the VPNs of Omnitun's users."
+                          Type="ownProcess"
+                          Start="auto"
+                          ErrorControl="normal"
+                          Account="LocalSystem"
+                          Arguments="--service"
+                          Vital="yes" />
+          <ServiceControl Id="Service" Name="omnitund" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
+        </Component>
+        <Component Id="Engine" Bitness="always64">
+          <File Source="$(Stage)\omnitun-engine.exe" KeyPath="yes" />
+        </Component>
+        <Component Id="Wintun" Bitness="always64">
+          <File Source="$(Stage)\wintun.dll" KeyPath="yes" />
+        </Component>
+        <Component Id="WintunLicense" Bitness="always64">
+          <File Source="$(Stage)\wintun-LICENSE.txt" KeyPath="yes" />
+        </Component>
+        <Component Id="Cli" Bitness="always64">
+          <File Source="$(Stage)\omnitunctl.exe" KeyPath="yes" />
+          <Environment Id="Path" Name="PATH" Value="[INSTALLFOLDER]" Permanent="no" Part="last" Action="set" System="yes" />
+        </Component>
+        <Component Id="LicenseMit" Bitness="always64">
+          <File Source="$(Stage)\LICENSE-MIT.txt" KeyPath="yes" />
+        </Component>
+        <Component Id="LicenseApache" Bitness="always64">
+          <File Source="$(Stage)\LICENSE-APACHE.txt" KeyPath="yes" />
+        </Component>
+        <Component Id="Notices" Bitness="always64">
+          <File Source="$(Stage)\THIRD-PARTY-NOTICES.txt" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <!-- The group must exist before the service starts (it listens for its
+         members); the service's restart on failure is set here too. The
+         group goes with the last uninstall, not with an upgrade. -->
+    <CustomAction Id="SetupGroup"
+                  FileRef="omnitund"
+                  ExeCommand="--setup &quot;[MEMBER]&quot;"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+    <CustomAction Id="RemoveGroup"
+                  FileRef="omnitund"
+                  ExeCommand="--teardown"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+    <!-- MEMBER: who joins the group; the installing user unless given
+         (msiexec /i Omnitun.msi MEMBER="DOMAIN\alice"). -->
+    <SetProperty Id="MEMBER" Value="[%USERDOMAIN]\[LogonUser]" Before="SetupGroup" Sequence="execute" Condition="NOT MEMBER" />
+    <InstallExecuteSequence>
+      <Custom Action="SetupGroup" Before="StartServices" Condition="NOT REMOVE" />
+      <Custom Action="RemoveGroup" After="StopServices" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+
+    <Feature Id="Main">
+      <ComponentRef Id="Service" />
+      <ComponentRef Id="Engine" />
+      <ComponentRef Id="Wintun" />
+      <ComponentRef Id="WintunLicense" />
+      <ComponentRef Id="Cli" />
+      <ComponentRef Id="LicenseMit" />
+      <ComponentRef Id="LicenseApache" />
+      <ComponentRef Id="Notices" />
+    </Feature>
+  </Package>
+</Wix>

@@ -19,6 +19,8 @@ mod service;
 mod winlog;
 #[cfg(windows)]
 mod winproc;
+#[cfg(windows)]
+mod winsetup;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -84,6 +86,16 @@ struct Args {
     #[cfg(windows)]
     #[arg(long)]
     service: bool,
+    /// Create the group (--group) with this user in it (DOMAIN\name) and
+    /// have the service restarted when it fails, then exit: what the
+    /// installer runs.
+    #[cfg(windows)]
+    #[arg(long, value_name = "USER")]
+    setup: Option<String>,
+    /// Remove the group (--group), then exit: what uninstalling runs.
+    #[cfg(windows)]
+    #[arg(long)]
+    teardown: bool,
 }
 
 /// A program run as root, and every folder above it, must be root's and
@@ -121,8 +133,16 @@ fn main() -> anyhow::Result<()> {
     nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o077));
     let args = Args::parse();
     #[cfg(windows)]
-    if args.service {
-        return service::run(args);
+    {
+        if let Some(user) = &args.setup {
+            return winsetup::install(&args.group, user);
+        }
+        if args.teardown {
+            return winsetup::remove(&args.group);
+        }
+        if args.service {
+            return service::run(args);
+        }
     }
     // launchd and systemd collect stderr (StandardErrorPath, journal).
     // Colors only for a terminal, not in the log file.

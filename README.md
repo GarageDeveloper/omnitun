@@ -37,7 +37,8 @@ Beyond connecting:
   report that leaves out secrets and addresses.
 
 On macOS, a menu bar app (English and French) creates, imports and runs
-the VPNs; `omnitunctl` does the same from a terminal, on macOS and Linux.
+the VPNs; `omnitunctl` does the same from a terminal, on macOS, Linux and
+Windows.
 It imports the VPNs of FortiClient, Viscosity, OpenVPN Connect, System
 Settings (Cisco IPSec and L2TP), `.ovpn` files and WireGuard `.conf` files.
 
@@ -59,6 +60,26 @@ published on the GitHub Releases page:
 The package (`Omnitun-<version>.pkg`) installs the app, the service and
 `omnitunctl` with its bash and zsh completions; the app then offers updates (Sparkle) and the user decides.
 macOS 14 or later.
+
+### Download (Windows)
+
+Windows 11 and later, x64 and ARM64: `Omnitun-<version>-x64.msi` and
+`Omnitun-<version>-arm64.msi` on the same Releases page. The installer is
+not signed yet, so SmartScreen warns before running it ("More info", then
+"Run anyway").
+
+It installs the service (`omnitund`, started at boot), the engine,
+`omnitunctl` (on the PATH) and Wintun's driver DLL into
+`C:\Program Files\Omnitun`, and creates the `omnitun` group with the user
+who installed it: other users are added with
+`net localgroup omnitun <user> /add` (they take effect at their next
+sign-in). The service's log is `C:\ProgramData\Omnitun\omnitund.log`
+(administrators only). Client certificates come from the personal
+certificate store: open a `.p12` file, or
+`certutil -user -importpfx file.p12`, then `omnitunctl identities`. For
+PowerShell completions, add
+`omnitunctl completions powershell | Out-String | Invoke-Expression` to
+`$PROFILE`.
 
 ### From source
 
@@ -94,6 +115,11 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/com.root42.omnitun.daemon
 # Linux (systemd-resolved required)
 sudo cp packaging/omnitund.service /etc/systemd/system/ && sudo systemctl enable --now omnitund
 ```
+
+On Windows, `packaging\windows\build-msi.ps1` builds the installer (see
+its header for the tools it needs); to try the service from a build, run
+`target\debug\omnitund.exe --allow-writable-binaries` in an
+administrator terminal, with `wintun.dll` (from wintun.net) next to it.
 
 To try it without installing (the `_omnitun` user only exists after the
 package):

@@ -1,0 +1,56 @@
+name: Windows installers
+
+# The MSIs for x64 and ARM64 (packaging/windows/build-msi.ps1), unsigned:
+# as artifacts when run by hand; attached to the GitHub Release when a
+# release tag (vX.Y.Z) is pushed.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  msi:
+    strategy:
+      matrix:
+        arch: [x64, arm64]
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: ${{ matrix.arch == 'arm64' && 'aarch64-pc-windows-msvc' || 'x86_64-pc-windows-msvc' }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: msi-${{ matrix.arch }}
+      - name: Tools
+        run: |
+          cargo install --locked cargo-about --features cli
+          dotnet tool install --global wix --version 5.0.2
+      - name: Build
+        shell: pwsh
+        run: packaging\windows\build-msi.ps1 -Arch ${{ matrix.arch }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: omnitun-${{ matrix.arch }}-msi
+          path: target/msi/*.msi
+          if-no-files-found: error
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # apple/release.sh pushes the tag, then creates the Release.
+        run: |
+          foreach ($i in 1..30) {
+            gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" *> $null
+            if ($LASTEXITCODE -eq 0) { break }
+            Start-Sleep 20
+          }
+          gh release upload "${{ github.ref_name }}" (Get-ChildItem target\msi\*.msi).FullName --clobber --repo "${{ github.repository }}"
