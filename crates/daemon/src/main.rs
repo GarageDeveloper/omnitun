@@ -1,15 +1,22 @@
 //! `omnitund`: privileged daemon that owns the tunnels. It must run as root
 //! (Windows: SYSTEM or an administrator) to create tun interfaces and change
 //! routes and DNS; users drive it with `omnitunctl` through a Unix socket
-//! (Windows: a named pipe) restricted to one group.
+//! (Windows: a named pipe) restricted to one group. On Windows it runs as a
+//! service (`--service`, see `service`), or in a console for development.
 
 mod autodisconnect;
+#[cfg(windows)]
+mod binacl;
 mod dnsproxy;
 mod engine;
 #[cfg(unix)]
 mod logfile;
 mod manager;
 mod prompter;
+#[cfg(windows)]
+mod service;
+#[cfg(windows)]
+mod winlog;
 #[cfg(windows)]
 mod winproc;
 
@@ -41,7 +48,7 @@ const MAX_CLIENTS_PER_USER: usize = 12;
 const MAX_LINE: usize = 1024 * 1024;
 /// Bound on closing all sessions when stopping; below the service
 /// managers' stop timeouts (`ExitTimeOut`, `TimeoutStopSec`).
-const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+pub(crate) const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 /// How long a new connection may take to say hello.
 const HELLO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// How long a closing connection may take to send its last events.
@@ -72,6 +79,11 @@ struct Args {
     /// (a development build; never for an installed service).
     #[arg(long)]
     allow_writable_binaries: bool,
+    /// Run as a Windows service, started by the service manager; the log
+    /// goes to the runtime folder.
+    #[cfg(windows)]
+    #[arg(long)]
+    service: bool,
 }
 
 /// A program run as root, and every folder above it, must be root's and
@@ -92,10 +104,10 @@ fn root_only(path: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Windows: the ACL of the program and its folders is not checked yet.
+/// Windows: the same, read from the access lists (see `binacl`).
 #[cfg(windows)]
 fn root_only(path: &std::path::Path) -> anyhow::Result<()> {
-    anyhow::bail!("who may change {} is not checked on Windows yet", path.display())
+    binacl::check(path)
 }
 
 /// Created by the installer; only its members may drive the daemon.
@@ -103,25 +115,41 @@ const fn default_group() -> &'static str {
     vpn_core::brand::ID
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     // Whatever the daemon creates without an explicit mode is root's only.
     #[cfg(unix)]
     nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o077));
+    let args = Args::parse();
+    #[cfg(windows)]
+    if args.service {
+        return service::run(args);
+    }
     // launchd and systemd collect stderr (StandardErrorPath, journal).
     // Colors only for a terminal, not in the log file.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_env_filter(log_filter())
         .init();
-    let args = Args::parse();
     #[cfg(target_os = "macos")]
     if args.print_engine_sandbox {
         let engine = args.engine.clone().map_or_else(engine::default_path, Ok)?;
         print!("{}", engine::sandbox_profile(&engine));
         return Ok(());
     }
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let stop = stop_signals()?;
+        daemon(args, stop).await
+    })
+}
+
+fn log_filter() -> tracing_subscriber::EnvFilter {
+    tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into())
+}
+
+/// Serves until `stop` (a signal, the service manager) or a `Shutdown`
+/// request, then closes every session.
+async fn daemon(args: Args, stop: impl Future<Output = ()>) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         // A core dump would contain prompt answers and session keys.
@@ -154,7 +182,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let sandbox = cfg!(target_os = "macos") && !args.no_engine_sandbox;
-    if !sandbox {
+    // Windows: engines are always restricted (see winproc).
+    if !sandbox && cfg!(unix) {
         tracing::warn!("engines run without a sandbox");
     }
     let launcher = engine::Launcher::process(args.engine.clone(), &args.engine_user, sandbox)?;
@@ -169,8 +198,7 @@ async fn main() -> anyhow::Result<()> {
     let clients = Arc::new(tokio::sync::Semaphore::new(MAX_CLIENTS));
     let quotas = Arc::new(Quotas::default());
 
-    let signals = stop_signals()?;
-    tokio::pin!(signals);
+    tokio::pin!(stop);
     loop {
         tokio::select! {
             accepted = listener.accept() => match accepted {
@@ -193,7 +221,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Err(e) => tracing::warn!("accept: {e}"),
             },
-            () = &mut signals => break,
+            () = &mut stop => break,
             _ = manager.shutdown.cancelled() => break,
         }
     }
