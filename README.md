@@ -37,8 +37,8 @@ Beyond connecting:
   report that leaves out secrets and addresses.
 
 On macOS, a menu bar app (English and French) creates, imports and runs
-the VPNs; `omnitunctl` does the same from a terminal, on macOS, Linux and
-Windows.
+the VPNs; on Windows, an app in the notification area runs them;
+`omnitunctl` does the same from a terminal, on macOS, Linux and Windows.
 It imports the VPNs of FortiClient, Viscosity, OpenVPN Connect, System
 Settings (Cisco IPSec and L2TP), `.ovpn` files and WireGuard `.conf` files.
 
@@ -68,7 +68,8 @@ Windows 11 and later, x64 and ARM64: `Omnitun-<version>-x64.msi` and
 not signed yet, so SmartScreen warns before running it ("More info", then
 "Run anyway").
 
-It installs the service (`omnitund`, started at boot), the engine,
+It installs the service (`omnitund`, started at boot), the engine, the
+Omnitun app (Start menu, and the notification area at sign-in),
 `omnitunctl` (on the PATH) and Wintun's driver DLL into
 `C:\Program Files\Omnitun`, and creates the `omnitun` group with the user
 who installed it: other users are added with

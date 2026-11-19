@@ -26,6 +26,9 @@ $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' | Select
 
 cargo build --release --locked --target $target -p omnitund -p omnitun-engine -p omnitunctl
 if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
+# The app is a workspace of its own (apps\windows): its build goes there.
+cargo build --release --locked --target $target --manifest-path apps\windows\Cargo.toml
+if ($LASTEXITCODE -ne 0) { throw 'cargo build of the app failed' }
 
 $zip = "target\wintun-$wintunVersion.zip"
 if (-not (Test-Path $zip)) {
@@ -41,14 +44,20 @@ New-Item -ItemType Directory -Force $stage | Out-Null
 foreach ($exe in 'omnitund', 'omnitun-engine', 'omnitunctl') {
     Copy-Item "target\$target\release\$exe.exe" $stage
 }
+Copy-Item "apps\windows\target\$target\release\Omnitun.exe" $stage
 Copy-Item "$wintun\bin\$wintunArch\wintun.dll" $stage
 Copy-Item "$wintun\LICENSE.txt" "$stage\wintun-LICENSE.txt"
 Copy-Item LICENSE-MIT "$stage\LICENSE-MIT.txt"
 Copy-Item LICENSE-APACHE "$stage\LICENSE-APACHE.txt"
 
 # Written by cargo-about itself: PowerShell would re-encode its output.
+# The service's crates, then the app's (Tauri and the rest).
 cargo about generate --fail -o "$stage\THIRD-PARTY-NOTICES.txt" about.hbs
 if ($LASTEXITCODE -ne 0) { throw 'cargo about failed (cargo install --locked cargo-about --features cli)' }
+cargo about generate --fail -c about.toml --manifest-path apps\windows\Cargo.toml -o "$stage\app-notices.txt" about.hbs
+if ($LASTEXITCODE -ne 0) { throw 'cargo about failed for the app' }
+[IO.File]::AppendAllText("$root\$stage\THIRD-PARTY-NOTICES.txt", "`n" + [IO.File]::ReadAllText("$root\$stage\app-notices.txt"))
+Remove-Item "$stage\app-notices.txt"
 $wintunNotice = "`n" + ('=' * 80) + "`nWintun $wintunVersion (wintun.dll), Prebuilt Binaries License`n" + ('-' * 80) + "`n`n" +
     (Get-Content -Raw "$wintun\LICENSE.txt")
 [IO.File]::AppendAllText("$root\$stage\THIRD-PARTY-NOTICES.txt", $wintunNotice)

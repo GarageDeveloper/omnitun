@@ -3,10 +3,11 @@
   Omnitun for Windows, built by build-msi.ps1 (WiX 5):
     wix build -arch x64|arm64 -d Version=… -d Stage=<folder> omnitun.wxs
   Stage holds the files: omnitund.exe, omnitun-engine.exe, omnitunctl.exe,
-  wintun.dll and the license files.
+  Omnitun.exe (the app), wintun.dll and the license files.
 
   Installs into Program Files (only administrators may change it: the
-  service checks it at start), registers the omnitund service (LocalSystem,
+  service checks it at start), the app (Start menu, and the notification
+  area at sign-in), registers the omnitund service (LocalSystem,
   automatic, restarted if it fails: set by the setup step below), puts the folder on the PATH for
   omnitunctl, and creates the "omnitun" group with the installing user in
   it (who may then use the service; others are added with
@@ -53,6 +54,14 @@
         <Component Id="WintunLicense" Bitness="always64">
           <File Source="$(Stage)\wintun-LICENSE.txt" KeyPath="yes" />
         </Component>
+        <Component Id="App" Bitness="always64">
+          <File Id="app" Source="$(Stage)\Omnitun.exe" KeyPath="yes">
+            <Shortcut Id="StartMenu" Directory="ProgramMenuFolder" Name="Omnitun" WorkingDirectory="INSTALLFOLDER" Advertise="no" />
+          </File>
+          <!-- In the notification area at each sign-in, every user's. -->
+          <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="Omnitun"
+                         Type="string" Value="&quot;[INSTALLFOLDER]Omnitun.exe&quot; --hidden" />
+        </Component>
         <Component Id="Cli" Bitness="always64">
           <File Source="$(Stage)\omnitunctl.exe" KeyPath="yes" />
           <Environment Id="Path" Name="PATH" Value="[INSTALLFOLDER]" Permanent="no" Part="last" Action="set" System="yes" />
@@ -95,6 +104,7 @@
     <Feature Id="Main">
       <ComponentRef Id="Service" />
       <ComponentRef Id="Engine" />
+      <ComponentRef Id="App" />
       <ComponentRef Id="Wintun" />
       <ComponentRef Id="WintunLicense" />
       <ComponentRef Id="Cli" />

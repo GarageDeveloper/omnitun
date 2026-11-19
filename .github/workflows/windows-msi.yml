@@ -10,7 +10,7 @@ on:
     # While the port is on its branch (workflow_dispatch needs the file on
     # the default branch): remove when merging.
     branches: [windows-port]
-    paths: ["packaging/windows/**", ".github/workflows/windows-msi.yml"]
+    paths: ["packaging/windows/**", "apps/windows/**", ".github/workflows/windows-msi.yml"]
 
 permissions:
   contents: read
@@ -33,6 +33,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: msi-${{ matrix.arch }}
+          workspaces: ". -> target\n apps/windows -> target"
       - name: Tools
         run: |
           cargo install --locked cargo-about --features cli
