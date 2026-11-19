@@ -83,8 +83,8 @@ async fn dns_proxy() -> anyhow::Result<()> {
 }
 
 /// What an engine needs from its sandbox: name resolution, outbound
-/// connections and a loopback listener (SAML).
-#[cfg(unix)]
+/// connections and a loopback listener (SAML); and what it must not do.
+#[cfg_attr(unix, allow(dead_code))]
 async fn check() -> anyhow::Result<()> {
     let host = std::env::args().nth(2).unwrap_or_else(|| "apple.com".into());
     let resolved = tokio::net::lookup_host((host.as_str(), 443)).await.map(|mut a| a.next());
@@ -98,15 +98,28 @@ async fn check() -> anyhow::Result<()> {
     println!("udp socket: {}", if udp.is_ok() { "ok" } else { "failed" });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await;
     println!("loopback listener: {}", if listener.is_ok() { "ok" } else { "failed" });
-    let secret = std::fs::read("/etc/master.passwd");
-    println!("read /etc/master.passwd: {}", if secret.is_ok() { "ALLOWED" } else { "refused" });
-    let home = std::fs::read_dir("/Users");
-    println!("list /Users: {}", if home.is_ok() { "ALLOWED" } else { "refused" });
+    // A user's home given as the next argument.
+    #[cfg(unix)]
+    let (secret, users, written) = ("/etc/master.passwd", "/Users", "/tmp/omnitun-engine-check");
+    #[cfg(windows)]
+    let (secret, users, written) =
+        (r"C:\Windows\System32\config\SAM", r"C:\Users", r"C:\ProgramData\omnitun-engine-check");
+    let users = std::env::args().nth(3).unwrap_or_else(|| users.into());
+    let refused = |allowed: bool| if allowed { "ALLOWED" } else { "refused" };
+    println!("read {secret}: {}", refused(std::fs::read(secret).is_ok()));
+    println!("list {users}: {}", refused(std::fs::read_dir(&users).is_ok()));
+    let wrote = std::fs::write(written, b"x").is_ok();
+    let _ = std::fs::remove_file(written);
+    println!("write {written}: {}", refused(wrote));
     Ok(())
 }
 
-/// Windows: the engine is not ported yet.
+/// Windows: only the check of the restrictions for now.
 #[cfg(windows)]
-fn main() -> anyhow::Result<()> {
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+async fn main() -> anyhow::Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("--check") {
+        return check().await;
+    }
     anyhow::bail!("{} is not supported on Windows yet", vpn_core::brand::ENGINE)
 }

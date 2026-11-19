@@ -10,6 +10,9 @@ mod engine;
 mod logfile;
 mod manager;
 mod prompter;
+#[cfg(windows)]
+#[allow(dead_code)]
+mod winproc;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

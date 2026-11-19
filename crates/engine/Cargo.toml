@@ -11,6 +11,7 @@ name = "omnitun_engine"
 [dependencies]
 vpn-core.workspace = true
 anyhow.workspace = true
+tokio.workspace = true
 
 # The engine is Unix only for now.
 [target.'cfg(unix)'.dependencies]
@@ -22,7 +23,6 @@ vpn-l2tp.workspace = true
 vpn-wireguard.workspace = true
 vpn-dnsproxy.workspace = true
 async-trait.workspace = true
-tokio.workspace = true
 tokio-util.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
