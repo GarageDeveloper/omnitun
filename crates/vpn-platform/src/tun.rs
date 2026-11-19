@@ -17,12 +17,14 @@ pub struct TunInterface {
 }
 
 /// A tun interface created by the daemon for an engine process: the daemon
-/// configures routes and DNS on `name` and hands the descriptor over.
+/// configures routes and DNS on `name` and hands the descriptor over (on
+/// Windows, relays its packets).
 pub struct TunDevice {
     pub name: String,
-    /// Windows: read by the packet relay to the engine (not written yet).
-    #[cfg_attr(windows, allow(dead_code))]
+    #[cfg(unix)]
     device: tun_rs::SyncDevice,
+    #[cfg(windows)]
+    device: Arc<AsyncDevice>,
 }
 
 #[cfg(unix)]
@@ -33,9 +35,42 @@ impl TunDevice {
 }
 
 /// Creates the interface for a session's settings, without moving packets.
+#[cfg(unix)]
 pub fn create_device(settings: &TunnelSettings) -> anyhow::Result<TunDevice> {
     let device = builder(settings)?.build_sync()?;
     Ok(TunDevice { name: device.name()?, device })
+}
+
+/// Creates the interface for a session's settings, without moving packets.
+#[cfg(windows)]
+pub fn create_device(settings: &TunnelSettings) -> anyhow::Result<TunDevice> {
+    let device = builder(settings)?.build_async()?;
+    Ok(TunDevice { name: device.name()?, device: Arc::new(device) })
+}
+
+/// The packets of a [`TunDevice`], for the relay to its engine.
+#[cfg(windows)]
+#[derive(Clone)]
+pub struct TunPackets(Arc<AsyncDevice>);
+
+#[cfg(windows)]
+impl TunPackets {
+    /// The next packet sent through the interface.
+    pub async fn recv(&self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.recv(buf).await
+    }
+
+    /// A packet coming out of the interface.
+    pub async fn send(&self, packet: &[u8]) -> std::io::Result<usize> {
+        self.0.send(packet).await
+    }
+}
+
+#[cfg(windows)]
+impl TunDevice {
+    pub fn packets(&self) -> TunPackets {
+        TunPackets(self.device.clone())
+    }
 }
 
 /// Creates the interface for a session and returns the engine side of the

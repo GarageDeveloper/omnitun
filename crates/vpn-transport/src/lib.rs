@@ -4,11 +4,15 @@
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
+#[cfg(windows)]
+mod handoff;
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]
 mod windows;
 
+#[cfg(windows)]
+pub use handoff::{HandoffListener, pipe_pair};
 #[cfg(unix)]
 pub use unix::{Listener, connect, current_user};
 #[cfg(windows)]

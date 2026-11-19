@@ -18,6 +18,8 @@ pub use conflicts::{Claims, Conflict, Registry};
 pub use dynamic::Direction;
 pub use netconfig::{AppliedConfig, DynamicClaims, Through, apply, cleanup_stale, current_resolvers};
 pub use runtime::prepare_runtime_dir;
+#[cfg(windows)]
+pub use tun::TunPackets;
 #[cfg(unix)]
 pub use tun::attach;
 pub use tun::{TunDevice, TunInterface, create, create_device};

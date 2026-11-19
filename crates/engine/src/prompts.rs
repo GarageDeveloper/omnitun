@@ -10,8 +10,9 @@ use std::time::Duration;
 
 use anyhow::bail;
 use async_trait::async_trait;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+#[cfg(unix)]
+use tokio::net::UnixListener;
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use vpn_core::ipc::{Event, Request};
@@ -75,6 +76,7 @@ impl PromptHub {
 
     /// Accepts the owner's clients (and root's), the newest replacing the
     /// previous one.
+    #[cfg(unix)]
     pub async fn listen(self: Arc<Self>, listener: UnixListener, owner: u32) {
         loop {
             let Ok((stream, _)) = listener.accept().await else { return };
@@ -87,8 +89,8 @@ impl PromptHub {
     }
 
     /// Serves one client: events out, answers in.
-    pub fn attach(&self, stream: UnixStream) {
-        let (read, mut write) = stream.into_split();
+    pub fn attach(&self, stream: impl AsyncRead + AsyncWrite + Send + 'static) {
+        let (read, mut write) = tokio::io::split(stream);
         let (events, mut events_rx) = mpsc::channel::<Event>(CLIENT_QUEUE);
         let client = Client { events, pending: Default::default(), gone: CancellationToken::new() };
         let gone = client.gone.clone();
@@ -233,15 +235,15 @@ mod tests {
 
     /// The client's side of an attached prompt socket.
     struct TestClient {
-        lines: tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
-        write: tokio::net::unix::OwnedWriteHalf,
+        lines: tokio::io::Lines<BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>>,
+        write: tokio::io::WriteHalf<tokio::io::DuplexStream>,
     }
 
     impl TestClient {
         fn attach(hub: &PromptHub) -> Self {
-            let (ours, theirs) = UnixStream::pair().unwrap();
+            let (ours, theirs) = tokio::io::duplex(64 * 1024);
             hub.attach(theirs);
-            let (read, write) = ours.into_split();
+            let (read, write) = tokio::io::split(ours);
             Self { lines: BufReader::new(read).lines(), write }
         }
 
@@ -407,6 +409,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn only_the_owner_may_attach() {
         let dir = std::env::temp_dir().join(format!("omnitun-engine-prompts-{}", std::process::id()));
@@ -419,7 +422,7 @@ mod tests {
         }
         let hub = Arc::new(PromptHub::default());
         tokio::spawn(hub.clone().listen(UnixListener::bind(&path).unwrap(), me.wrapping_add(1)));
-        let _stranger = UnixStream::connect(&path).await.unwrap();
+        let _stranger = tokio::net::UnixStream::connect(&path).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
         let err = hub.ask(prompt("password", PromptKind::Secret)).await.unwrap_err();
         assert_eq!(vpn_core::failure::kind_of(&err), FailureKind::NeedsUser, "another user's client was attached");

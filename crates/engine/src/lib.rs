@@ -3,18 +3,22 @@
 //! session and one attempt per `Start`, and hands it the tun interface;
 //! the user's answers come straight from the client on the prompt socket.
 //!
-//! Unix only for now: on Windows the engine will get packets from the
-//! daemon through a pipe instead of a tun descriptor.
-#![cfg(unix)]
+//! On Windows, where an interface cannot be handed over, the daemon relays
+//! its packets on a pipe instead, and hands over the prompt clients it
+//! accepted for the session's owner (see `packets`).
 
+#[cfg(windows)]
+mod packets;
 mod prompts;
 
+#[cfg(unix)]
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -28,8 +32,58 @@ const LOGOUT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Serves the daemon until it closes the control socket: `control` carries
 /// messages, `fds` the tun descriptors, `prompts` the owner's clients.
+#[cfg(unix)]
 pub async fn serve(control: UnixStream, fds: StdUnixStream, prompts: UnixListener, owner: u32) -> anyhow::Result<()> {
-    let (read, mut write) = control.into_split();
+    let hub = Arc::new(PromptHub::default());
+    let listener = tokio::spawn(hub.clone().listen(prompts, owner));
+    let result = run(control, Interfaces(Arc::new(fds)), hub).await;
+    listener.abort();
+    result
+}
+
+/// Serves the daemon until it closes the control pipe: `control` carries
+/// messages, `packets` the interface's packets, `clients` the prompt
+/// clients the daemon accepted for the session's owner.
+#[cfg(windows)]
+pub async fn serve(
+    control: tokio::net::windows::named_pipe::NamedPipeClient,
+    packets: tokio::net::windows::named_pipe::NamedPipeClient,
+    clients: tokio::net::windows::named_pipe::NamedPipeClient,
+) -> anyhow::Result<()> {
+    let hub = Arc::new(PromptHub::default());
+    let listener = tokio::spawn(packets::clients(clients, hub.clone()));
+    let result = run(control, packets::Interfaces::new(packets), hub).await;
+    listener.abort();
+    result
+}
+
+/// The interfaces of a Unix engine's attempts: descriptors from the daemon.
+#[cfg(unix)]
+struct Interfaces(Arc<StdUnixStream>);
+
+#[cfg(unix)]
+impl Interfaces {
+    /// The interface of the attempt, and its packets; the first value
+    /// keeps them moving.
+    async fn attach(&self, mtu: u16, cancel: CancellationToken) -> anyhow::Result<(Box<dyn Send>, vpn_core::PacketIo)> {
+        let fds = self.0.clone();
+        let fd = tokio::task::spawn_blocking(move || vpn_platform::fdpass::recv_fd(&*fds))
+            .await?
+            .context("no interface descriptor")?;
+        let (interface, io) = vpn_platform::attach(fd, mtu, cancel)?;
+        Ok((Box::new(interface), io))
+    }
+}
+
+#[cfg(windows)]
+use packets::Interfaces;
+
+async fn run(
+    control: impl AsyncRead + AsyncWrite + Send + 'static,
+    interfaces: Interfaces,
+    hub: Arc<PromptHub>,
+) -> anyhow::Result<()> {
+    let (read, mut write) = tokio::io::split(control);
     let (out, mut out_rx) = mpsc::channel::<FromEngine>(64);
     let writer = tokio::spawn(async move {
         while let Some(message) = out_rx.recv().await {
@@ -40,7 +94,6 @@ pub async fn serve(control: UnixStream, fds: StdUnixStream, prompts: UnixListene
             }
         }
     });
-    let hub = Arc::new(PromptHub::default());
     let (messages_tx, mut messages) = mpsc::channel::<ToEngine>(16);
     let stopper = hub.clone();
     let reader = tokio::spawn(async move {
@@ -66,8 +119,6 @@ pub async fn serve(control: UnixStream, fds: StdUnixStream, prompts: UnixListene
         }
     });
 
-    let listener = tokio::spawn(hub.clone().listen(prompts, owner));
-    let fds = Arc::new(fds);
     while let Some(message) = messages.recv().await {
         let ToEngine::Start { profile, attach_wait_ms } = message else {
             tracing::debug!("ignoring {message:?} between attempts");
@@ -84,7 +135,7 @@ pub async fn serve(control: UnixStream, fds: StdUnixStream, prompts: UnixListene
         let span = tracing::info_span!("engine", session = profile.name);
         let result = {
             let _enter = span.enter();
-            attempt(&profile, &ctx, &out, &mut messages, fds.clone()).await
+            attempt(&profile, &ctx, &out, &mut messages, &interfaces).await
         };
         ctx.cancel.cancel();
         let error = result.err().map(|e| {
@@ -96,7 +147,6 @@ pub async fn serve(control: UnixStream, fds: StdUnixStream, prompts: UnixListene
             break;
         }
     }
-    listener.abort();
     reader.abort();
     drop(out);
     let _ = writer.await;
@@ -109,7 +159,7 @@ async fn attempt(
     ctx: &SessionContext,
     out: &mpsc::Sender<FromEngine>,
     messages: &mut mpsc::Receiver<ToEngine>,
-    fds: Arc<StdUnixStream>,
+    interfaces: &Interfaces,
 ) -> anyhow::Result<()> {
     let mut engine = make_engine(profile);
     // None: stopped by the daemon.
@@ -149,10 +199,7 @@ async fn attempt(
             Some(other) => tracing::warn!("unexpected {other:?} while waiting for the interface"),
         }
     };
-    let fd = tokio::task::spawn_blocking(move || vpn_platform::fdpass::recv_fd(&*fds))
-        .await?
-        .context("no interface descriptor")?;
-    let (interface, io) = vpn_platform::attach(fd, mtu, ctx.cancel.clone())?;
+    let (interface, io) = interfaces.attach(mtu, ctx.cancel.clone()).await?;
     tracing::info!("running on {name}");
 
     let reporter = {
@@ -222,7 +269,7 @@ fn make_engine(profile: &Profile) -> Box<dyn Engine> {
     }
 }
 
-async fn next(lines: &mut BufReader<tokio::net::unix::OwnedReadHalf>) -> anyhow::Result<Option<ToEngine>> {
+async fn next(lines: &mut (impl AsyncBufRead + Unpin)) -> anyhow::Result<Option<ToEngine>> {
     let mut line = String::new();
     let n = (&mut *lines).take(MAX_LINE as u64).read_line(&mut line).await?;
     if n == 0 {

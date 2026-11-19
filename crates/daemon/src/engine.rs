@@ -3,9 +3,10 @@
 //! interface, and treats everything it says as untrusted. The user's
 //! answers go to the engine directly, on the session's prompt socket.
 //!
-//! Windows: engines are not started yet (an unprivileged process fed with
-//! packets by the daemon), so most of this is unused there.
-#![cfg_attr(windows, allow(dead_code, unused_imports))]
+//! On Windows, where neither an interface nor a listening socket can be
+//! handed over, the daemon relays the interface's packets on a pipe, and
+//! accepts the owner's prompt clients itself to hand each connection over
+//! (the answers still go to the engine only).
 
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -36,15 +37,58 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(6);
 #[cfg(unix)]
 pub type Prompts = OwnedFd;
 
+/// The session's prompt pipe: the clients accepted on it, for the engine
+/// of the moment. Clones share it; the last one closes the pipe.
 #[cfg(windows)]
-pub struct Prompts;
+#[derive(Clone)]
+pub struct Prompts(std::sync::Arc<PromptPipe>);
+
+#[cfg(windows)]
+pub struct PromptPipe {
+    clients: tokio::sync::Mutex<mpsc::Receiver<(std::os::windows::io::OwnedHandle, User)>>,
+    accept: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(windows)]
+impl Drop for PromptPipe {
+    fn drop(&mut self) {
+        // The listener goes with the task, and the pipe with it.
+        self.accept.abort();
+    }
+}
 
 #[cfg(windows)]
 impl Prompts {
+    pub fn new(mut listener: vpn_transport::HandoffListener) -> Self {
+        let (tx, clients) = mpsc::channel(4);
+        let accept = tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok(client) => {
+                        if tx.send(client).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("prompt pipe: {e}");
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                    }
+                }
+            }
+        });
+        Self(std::sync::Arc::new(PromptPipe { clients: tokio::sync::Mutex::new(clients), accept }))
+    }
+
     pub fn try_clone(&self) -> std::io::Result<Self> {
-        Ok(Self)
+        Ok(self.clone())
     }
 }
+
+/// An engine process.
+#[cfg(unix)]
+type Process = tokio::process::Child;
+#[cfg(windows)]
+type Process = std::sync::Arc<crate::winproc::Child>;
 
 /// How engines are started.
 pub enum Launcher {
@@ -57,10 +101,11 @@ pub enum Launcher {
         /// macOS: run under `sandbox-exec` with `sandbox_profile`.
         sandbox: bool,
     },
+    /// Run as LocalService, restricted (see `winproc`).
     #[cfg(windows)]
     Process { path: PathBuf },
     /// In this process, on a socket pair: tests, which cannot switch users.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     InProcess,
 }
 
@@ -132,7 +177,9 @@ pub struct RemoteEngine {
     events: mpsc::Receiver<FromEngine>,
     #[cfg(unix)]
     fds: Option<StdUnixStream>,
-    child: Option<tokio::process::Child>,
+    #[cfg(windows)]
+    packets: PacketPipe,
+    child: Option<Process>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
     /// The engine reported the end of its attempt.
     ended: bool,
@@ -141,7 +188,7 @@ pub struct RemoteEngine {
 impl Drop for RemoteEngine {
     fn drop(&mut self) {
         if let Some(child) = &mut self.child {
-            let _ = child.start_kill();
+            kill_now(child);
         }
         for task in &self.tasks {
             task.abort();
@@ -150,11 +197,37 @@ impl Drop for RemoteEngine {
 }
 
 impl RemoteEngine {
-    /// Starts the engine of session `name`, owned by `owner`, listening for
-    /// its clients on `prompts`.
+    /// Starts the engine of session `name`, owned by `owner`, whose clients
+    /// on `prompts` it serves.
     #[cfg(windows)]
-    pub fn spawn(_launcher: &Launcher, _name: &str, _owner: &User, _prompts: Prompts) -> anyhow::Result<Self> {
-        bail!("sessions are not supported on Windows yet")
+    pub fn spawn(launcher: &Launcher, name: &str, owner: &User, prompts: Prompts) -> anyhow::Result<Self> {
+        use std::os::windows::io::AsRawHandle;
+
+        let Launcher::Process { path } = launcher;
+        let (control, control_theirs) = vpn_transport::pipe_pair(true)?;
+        let (packets, packets_theirs) = vpn_transport::pipe_pair(true)?;
+        let (clients, clients_theirs) = vpn_transport::pipe_pair(true)?;
+        let (stderr, stderr_theirs) = vpn_transport::pipe_pair(false)?;
+        let theirs = [&control_theirs, &packets_theirs, &clients_theirs].map(|h| h.as_raw_handle());
+        // Inherited handles keep their values.
+        let args: Vec<String> = ["--control", "--packets", "--prompts"]
+            .iter()
+            .zip(theirs)
+            .flat_map(|(flag, handle)| [flag.to_string(), (handle as usize).to_string()])
+            .collect();
+        let child = std::sync::Arc::new(
+            crate::winproc::Child::spawn(path, &args, &theirs, stderr_theirs.as_raw_handle())
+                .with_context(|| format!("cannot start {}", path.display()))?,
+        );
+        // The engine has its copies now.
+        drop((control_theirs, packets_theirs, clients_theirs, stderr_theirs));
+        let mut tasks = vec![
+            tokio::spawn(relay_log(name.to_owned(), stderr)),
+            tokio::spawn(hand_over(prompts, child.clone(), owner.id.clone(), clients)),
+        ];
+        let (read, write) = tokio::io::split(control);
+        let (out, events) = talk(read, write, &mut tasks);
+        Ok(Self { out, events, packets: PacketPipe::new(packets), child: Some(child), tasks, ended: true })
     }
 
     /// Starts the engine of session `name`, owned by `owner`, listening for
@@ -180,7 +253,7 @@ impl RemoteEngine {
                 }
                 Some(child)
             }
-            #[cfg(test)]
+            #[cfg(all(test, unix))]
             Launcher::InProcess => {
                 control_theirs.set_nonblocking(true)?;
                 let control = tokio::net::UnixStream::from_std(control_theirs)?;
@@ -224,10 +297,12 @@ impl RemoteEngine {
         }
     }
 
-    /// Hands the interface over and waits for the tunnel to end.
+    /// Relays the interface's packets and waits for the tunnel to end.
     #[cfg(windows)]
-    pub async fn run(&mut self, _stats: &TunnelStats, _device: &TunDevice) -> anyhow::Result<()> {
-        bail!("sessions are not supported on Windows yet")
+    pub async fn run(&mut self, stats: &TunnelStats, device: &TunDevice) -> anyhow::Result<()> {
+        self.out.send(ToEngine::Tun { name: device.name.clone() }).await.context("engine gone")?;
+        let _relay = self.packets.relay(device.packets());
+        self.wait_end(stats).await
     }
 
     /// Hands the interface over and waits for the tunnel to end.
@@ -238,6 +313,11 @@ impl RemoteEngine {
         let fd = device.fd();
         let fds = tokio::task::spawn_blocking(move || vpn_platform::fdpass::send_fd(&fds, fd).map(|()| fds)).await??;
         self.fds = Some(fds);
+        self.wait_end(stats).await
+    }
+
+    /// Waits for the end of a running tunnel.
+    async fn wait_end(&mut self, stats: &TunnelStats) -> anyhow::Result<()> {
         loop {
             match self.next_event(stats).await? {
                 FromEngine::Ended { error: None } => return Ok(()),
@@ -276,7 +356,7 @@ impl RemoteEngine {
     /// Ends the session's engine.
     pub async fn kill(&mut self) {
         if let Some(child) = &mut self.child {
-            let _ = child.start_kill();
+            kill_now(child);
             let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
             self.child = None;
         }
@@ -348,9 +428,119 @@ fn talk(
     (out, events)
 }
 
+#[cfg(unix)]
+fn kill_now(child: &mut Process) {
+    let _ = child.start_kill();
+}
+
+#[cfg(windows)]
+fn kill_now(child: &mut Process) {
+    child.kill();
+}
+
+/// The packet channel of a Windows engine, used by one attempt at a time.
+#[cfg(windows)]
+struct PacketPipe {
+    read: std::sync::Arc<tokio::sync::Mutex<tokio::io::ReadHalf<tokio::net::windows::named_pipe::NamedPipeServer>>>,
+    write: std::sync::Arc<tokio::sync::Mutex<tokio::io::WriteHalf<tokio::net::windows::named_pipe::NamedPipeServer>>>,
+}
+
+#[cfg(windows)]
+impl PacketPipe {
+    fn new(pipe: tokio::net::windows::named_pipe::NamedPipeServer) -> Self {
+        let (read, write) = tokio::io::split(pipe);
+        Self {
+            read: std::sync::Arc::new(tokio::sync::Mutex::new(read)),
+            write: std::sync::Arc::new(tokio::sync::Mutex::new(write)),
+        }
+    }
+
+    /// Moves packets between the interface and the engine until dropped.
+    fn relay(&self, device: vpn_platform::TunPackets) -> Relay {
+        use vpn_core::engine_ipc::{MAX_PACKET, read_packet, write_packet};
+        let outbound = {
+            let (write, device) = (self.write.clone(), device.clone());
+            tokio::spawn(async move {
+                let mut write = write.lock().await;
+                let mut buf = vec![0u8; MAX_PACKET];
+                loop {
+                    let n = match device.recv(&mut buf).await {
+                        Ok(n) => n,
+                        Err(e) => {
+                            tracing::warn!("interface read: {e}");
+                            return;
+                        }
+                    };
+                    if write_packet(&mut *write, &buf[..n]).await.is_err() {
+                        return;
+                    }
+                }
+            })
+        };
+        let inbound = {
+            let read = self.read.clone();
+            tokio::spawn(async move {
+                let mut read = read.lock().await;
+                let mut buf = vec![0u8; MAX_PACKET];
+                // What the engine sends goes into the interface, as its
+                // writes to a descriptor would on Unix.
+                while let Ok(Some(n)) = read_packet(&mut *read, &mut buf).await {
+                    if let Err(e) = device.send(&buf[..n]).await {
+                        tracing::debug!("interface write: {e}");
+                    }
+                }
+            })
+        };
+        Relay([outbound, inbound])
+    }
+}
+
+/// Stops the relay of an attempt's packets when dropped.
+#[cfg(windows)]
+struct Relay([tokio::task::JoinHandle<()>; 2]);
+
+#[cfg(windows)]
+impl Drop for Relay {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
+/// Hands the owner's prompt clients (and the administrators') to the
+/// engine: a copy of each connection's handle in its process, announced
+/// on `clients`.
+#[cfg(windows)]
+async fn hand_over(
+    prompts: Prompts,
+    child: Process,
+    owner: vpn_core::UserId,
+    mut clients: tokio::net::windows::named_pipe::NamedPipeServer,
+) {
+    use std::os::windows::io::AsRawHandle;
+    let mut accepted = prompts.0.clients.lock().await;
+    while let Some((connection, user)) = accepted.recv().await {
+        if !user.may_act_for(&owner) {
+            tracing::warn!("refusing a prompt client of {user}");
+            continue;
+        }
+        let handle = match child.give(connection.as_raw_handle()) {
+            Ok(handle) => handle,
+            Err(e) => {
+                tracing::warn!("cannot hand a prompt client over: {e}");
+                continue;
+            }
+        };
+        if clients.write_all(format!("{handle}\n").as_bytes()).await.is_err() {
+            return;
+        }
+    }
+}
+
 /// Copies a child's log into the daemon's, as an engine's: one line at a
 /// time, bounded in length and rate, control characters escaped.
-pub(crate) async fn relay_log(name: String, stderr: tokio::process::ChildStderr) {
+pub(crate) async fn relay_log(name: String, stderr: impl AsyncRead + Unpin + Send + 'static) {
     let mut lines = BufReader::new(stderr);
     let (mut window, mut count) = (tokio::time::Instant::now(), 0u32);
     loop {

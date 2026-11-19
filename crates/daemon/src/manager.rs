@@ -85,19 +85,28 @@ impl Manager {
 
 /// Engines run in-process, on the protocol's socket pair; prompt sockets
 /// go to a directory of their own.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl Default for Manager {
     fn default() -> Self {
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         // Short: socket paths are limited to about 100 bytes, and the
         // per-user temporary directory of macOS is long.
-        let tmp = if cfg!(windows) { std::env::temp_dir() } else { "/tmp".into() };
+        let tmp = std::path::PathBuf::from("/tmp");
         let dir =
             tmp.join(format!("otd-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         std::fs::create_dir_all(&dir).unwrap();
         let control = dir.join("c.sock").display().to_string();
         prepare_prompt_dir(&vpn_core::ipc::prompt_socket_dir(&control)).unwrap();
         Self::new(Launcher::InProcess, control)
+    }
+}
+
+/// Windows: no engine runs in tests, which do not connect.
+#[cfg(all(test, windows))]
+impl Default for Manager {
+    fn default() -> Self {
+        let control = format!(r"\\.\pipe\otd-test-{}", std::process::id());
+        Self::new(Launcher::Process { path: "omnitun-engine-absent.exe".into() }, control)
     }
 }
 
@@ -1139,7 +1148,7 @@ pub fn prepare_prompt_dir(dir: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Windows: prompt pipes are not written yet.
+/// Windows: prompt pipes live in no directory.
 #[cfg(windows)]
 pub fn prepare_prompt_dir(_dir: &str) -> anyhow::Result<()> {
     Ok(())
@@ -1196,9 +1205,13 @@ struct FileId;
 #[cfg(windows)]
 fn remove_prompt_socket(_path: &str, _created: Option<FileId>) {}
 
+/// The session's prompt pipe: only its owner (and SYSTEM, the
+/// Administrators) may connect; the pipe goes with the last handle on it.
 #[cfg(windows)]
-fn prompt_listener(path: &str, _owner: &User) -> anyhow::Result<(crate::engine::Prompts, Option<FileId>)> {
-    bail!("cannot create {path}: sessions are not supported on Windows yet")
+fn prompt_listener(path: &str, owner: &User) -> anyhow::Result<(crate::engine::Prompts, Option<FileId>)> {
+    let UserId::Sid(sid) = &owner.id else { bail!("{owner} is not a Windows user") };
+    let listener = vpn_transport::HandoffListener::bind(path, sid)?;
+    Ok((crate::engine::Prompts::new(listener), None))
 }
 
 fn now() -> u64 {

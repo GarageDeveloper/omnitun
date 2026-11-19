@@ -4,6 +4,10 @@
 //! as 4 and the session's listening prompt socket as 5; `--owner <uid>`
 //! names the only user (besides root) whose client may attach to it.
 //!
+//! On Windows, three inherited pipes named by their handles: `--control`,
+//! `--packets` (the interface's packets, relayed by the daemon) and
+//! `--prompts` (the owner's prompt clients, accepted by the daemon).
+//!
 //! `--dns-proxy`: a session's DNS proxy instead (routes by domain, #37):
 //! the control socket as descriptor 3, the bound UDP socket as 4 and the
 //! TCP listener on the same port as 5.
@@ -26,16 +30,7 @@ const PROMPTS_FD: i32 = 5;
 #[cfg(unix)]
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> anyhow::Result<()> {
-    // Started by the daemon, which relays the log with its own timestamps:
-    // plain lines without time. In a terminal, the usual format.
-    let terminal = std::io::IsTerminal::is_terminal(&std::io::stderr());
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
-    let log = tracing_subscriber::fmt().with_writer(std::io::stderr).with_ansi(terminal).with_env_filter(filter);
-    if terminal {
-        log.init()
-    } else {
-        log.without_time().with_target(false).init()
-    }
+    init_log();
     if std::env::args().nth(1).as_deref() == Some("--check") {
         return check().await;
     }
@@ -82,9 +77,17 @@ async fn dns_proxy() -> anyhow::Result<()> {
     .await
 }
 
+/// Started by the daemon, which relays the log with its own timestamps:
+/// plain lines without time. In a terminal, the usual format.
+fn init_log() {
+    let terminal = std::io::IsTerminal::is_terminal(&std::io::stderr());
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    let log = tracing_subscriber::fmt().with_writer(std::io::stderr).with_ansi(terminal).with_env_filter(filter);
+    if terminal { log.init() } else { log.without_time().with_target(false).init() }
+}
+
 /// What an engine needs from its sandbox: name resolution, outbound
 /// connections and a loopback listener (SAML); and what it must not do.
-#[cfg_attr(unix, allow(dead_code))]
 async fn check() -> anyhow::Result<()> {
     let host = std::env::args().nth(2).unwrap_or_else(|| "apple.com".into());
     let resolved = tokio::net::lookup_host((host.as_str(), 443)).await.map(|mut a| a.next());
@@ -114,12 +117,31 @@ async fn check() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Windows: only the check of the restrictions for now.
+/// Windows: the daemon passes its pipes' handles, inherited, as arguments.
 #[cfg(windows)]
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> anyhow::Result<()> {
+    use anyhow::{Context, bail};
+    use tokio::net::windows::named_pipe::NamedPipeClient;
+
+    init_log();
     if std::env::args().nth(1).as_deref() == Some("--check") {
         return check().await;
     }
-    anyhow::bail!("{} is not supported on Windows yet", vpn_core::brand::ENGINE)
+    // Parsing network data is exactly what an administrator must not do.
+    if vpn_transport::current_user()?.admin {
+        bail!("{} must not run as an administrator", vpn_core::brand::ENGINE);
+    }
+    let usage =
+        || format!("usage: {} --control <handle> --packets <handle> --prompts <handle>", vpn_core::brand::ENGINE);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let handle = |flag: &str| -> anyhow::Result<NamedPipeClient> {
+        let value = args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).with_context(usage)?;
+        let value: usize = value.parse().with_context(|| format!("{flag} {value}"))?;
+        // SAFETY: an overlapped pipe handle this process inherited for
+        // this use, owned from now on.
+        unsafe { NamedPipeClient::from_raw_handle(value as std::os::windows::io::RawHandle) }
+            .with_context(|| format!("{flag} {value}"))
+    };
+    omnitun_engine::serve(handle("--control")?, handle("--packets")?, handle("--prompts")?).await
 }

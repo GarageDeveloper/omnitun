@@ -40,7 +40,8 @@ use crate::Stream;
 /// What a client may do with the pipe: read, write, read its owner.
 /// Not `FILE_GENERIC_WRITE`, whose `FILE_APPEND_DATA` is, on a pipe, the
 /// right to create an instance.
-const CLIENT_RIGHTS: u32 = FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE;
+pub(crate) const CLIENT_RIGHTS: u32 =
+    FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE;
 
 /// How long a client waits while every instance is busy.
 const BUSY_WAIT: Duration = Duration::from_secs(5);
@@ -112,7 +113,11 @@ fn create(name: &str, descriptor: &Descriptor, first: bool) -> io::Result<NamedP
 
 /// The account of the client on the other end of `pipe`.
 fn client_user(pipe: &NamedPipeServer) -> io::Result<User> {
-    let handle = pipe.as_raw_handle() as HANDLE;
+    pipe_client_user(pipe.as_raw_handle() as HANDLE)
+}
+
+/// The account of the client on the other end of the pipe `handle`.
+pub(crate) fn pipe_client_user(handle: HANDLE) -> io::Result<User> {
     // SAFETY: the thread takes the client's identity only between these
     // calls, and gets its own back before anything else runs on it.
     let token = unsafe {
@@ -225,7 +230,7 @@ fn check_owner(handle: HANDLE, name: &str) -> io::Result<()> {
 }
 
 /// The SID of an account or group, in string form.
-fn account_sid(name: &str) -> io::Result<String> {
+pub(crate) fn account_sid(name: &str) -> io::Result<String> {
     let wide = wide(name);
     let (mut sid_len, mut domain_len, mut kind) = (0u32, 0u32, SID_NAME_USE::default());
     // SAFETY: a size query, with no buffers.
@@ -352,14 +357,14 @@ impl OwnedSid {
 }
 
 /// A security descriptor allocated by the system.
-struct Descriptor(PSECURITY_DESCRIPTOR);
+pub(crate) struct Descriptor(pub(crate) PSECURITY_DESCRIPTOR);
 
 // SAFETY: an immutable block of memory once made.
 unsafe impl Send for Descriptor {}
 unsafe impl Sync for Descriptor {}
 
 impl Descriptor {
-    fn from_sddl(sddl: &str) -> io::Result<Self> {
+    pub(crate) fn from_sddl(sddl: &str) -> io::Result<Self> {
         let wide = wide(sddl);
         let mut descriptor = null_mut();
         // SAFETY: `wide` is NUL-terminated; the descriptor is freed on drop.
@@ -385,6 +390,6 @@ impl Drop for Descriptor {
     }
 }
 
-fn wide(s: &str) -> Vec<u16> {
+pub(crate) fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
