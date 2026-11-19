@@ -865,7 +865,7 @@ impl Runner {
                 return None;
             }
         };
-        if let Err(e) = applied.use_proxy(proxy.port, &plan.domains).await {
+        if let Err(e) = applied.use_proxy(proxy.address, &plan.domains).await {
             tracing::warn!(session = name, "routes by domain off: {e:#}");
             applied.stop_proxy().await;
             return None;

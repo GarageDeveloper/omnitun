@@ -334,16 +334,17 @@ impl AppliedConfig {
         claims.release(address);
     }
 
-    /// Sends the names under `domains` to the session's DNS proxy on
-    /// 127.0.0.1:`port`, and flushes the system's DNS cache so names
-    /// resolved before take the routes too. On Linux the tunnel's resolver
-    /// becomes the proxy, which relays the tunnel's domains to its servers.
-    pub async fn use_proxy(&mut self, port: u16, domains: &[String]) -> anyhow::Result<()> {
+    /// Sends the names under `domains` to the session's DNS proxy at
+    /// `proxy` (a loopback address), and flushes the system's DNS cache so
+    /// names resolved before take the routes too. On Linux the tunnel's
+    /// resolver becomes the proxy, which relays the tunnel's domains to its
+    /// servers.
+    pub async fn use_proxy(&mut self, proxy: SocketAddr, domains: &[String]) -> anyhow::Result<()> {
         if let Some(bad) = domains.iter().find(|d| !vpn_core::valid_domain(d)) {
             bail!("refusing invalid DNS domain {bad:?}");
         }
         self.undo.push(Undo::ProxyDns);
-        set_proxy_dns(&self.session, &self.interface, &self.settings, port, domains).await?;
+        set_proxy_dns(&self.session, &self.interface, &self.settings, proxy, domains).await?;
         flush_dns_cache().await;
         Ok(())
     }
@@ -735,12 +736,14 @@ async fn set_proxy_dns(
     session: &str,
     interface: &str,
     settings: &TunnelSettings,
-    port: u16,
+    proxy: SocketAddr,
     domains: &[String],
 ) -> anyhow::Result<()> {
     let script = format!(
-        "d.init\nd.add ServerAddresses * 127.0.0.1\nd.add ServerPort # {port}\n\
+        "d.init\nd.add ServerAddresses * {}\nd.add ServerPort # {}\n\
          d.add SupplementalMatchDomains * {}\nset {}\n",
+        proxy.ip(),
+        proxy.port(),
         domains.join(" "),
         scutil_key(&format!("{session}-dns-proxy"), "DNS"),
     );
@@ -774,11 +777,11 @@ async fn set_proxy_dns(
     _session: &str,
     interface: &str,
     settings: &TunnelSettings,
-    port: u16,
+    proxy: SocketAddr,
     domains: &[String],
 ) -> anyhow::Result<()> {
     check_domains(settings)?;
-    resolvectl(&["dns".into(), interface.into(), format!("127.0.0.1:{port}")]).await?;
+    resolvectl(&["dns".into(), interface.into(), proxy.to_string()]).await?;
     let dns = &settings.dns;
     let mut routing: Vec<String> = dns.search_domains.clone();
     routing.extend(dns.match_domains.iter().chain(domains).map(|d| format!("~{d}")));

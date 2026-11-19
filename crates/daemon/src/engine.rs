@@ -86,9 +86,9 @@ impl Prompts {
 
 /// An engine process.
 #[cfg(unix)]
-type Process = tokio::process::Child;
+pub(crate) type Process = tokio::process::Child;
 #[cfg(windows)]
-type Process = std::sync::Arc<crate::winproc::Child>;
+pub(crate) type Process = std::sync::Arc<crate::winproc::Child>;
 
 /// How engines are started.
 pub enum Launcher {
@@ -429,12 +429,12 @@ fn talk(
 }
 
 #[cfg(unix)]
-fn kill_now(child: &mut Process) {
+pub(crate) fn kill_now(child: &mut Process) {
     let _ = child.start_kill();
 }
 
 #[cfg(windows)]
-fn kill_now(child: &mut Process) {
+pub(crate) fn kill_now(child: &mut Process) {
     child.kill();
 }
 

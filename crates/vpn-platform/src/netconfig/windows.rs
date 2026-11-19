@@ -12,18 +12,19 @@ use std::ptr::{null, null_mut};
 use anyhow::{Context, bail};
 use ipnet::{Ipv4Net, Ipv6Net};
 use vpn_core::TunnelSettings;
-use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_ITEMS, WIN32_ERROR};
+use windows_sys::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_ITEMS, WIN32_ERROR};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     ConvertInterfaceAliasToLuid, ConvertInterfaceLuidToGuid, ConvertInterfaceLuidToIndex, CreateIpForwardEntry2,
     DNS_INTERFACE_SETTINGS, DNS_INTERFACE_SETTINGS_VERSION1, DNS_SETTING_NAMESERVER, DNS_SETTING_SEARCHLIST,
-    DeleteIpForwardEntry2, FreeMibTable, GetBestRoute2, GetIpForwardTable2, GetIpInterfaceEntry, IP_ADDRESS_PREFIX,
-    InitializeIpForwardEntry, InitializeIpInterfaceEntry, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2,
-    MIB_IPINTERFACE_ROW, SetInterfaceDnsSettings,
+    DeleteIpForwardEntry2, FreeMibTable, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_FRIENDLY_NAME, GAA_FLAG_SKIP_MULTICAST,
+    GAA_FLAG_SKIP_UNICAST, GetAdaptersAddresses, GetBestRoute2, GetIpForwardTable2, GetIpInterfaceEntry,
+    IP_ADAPTER_ADDRESSES_LH, IP_ADDRESS_PREFIX, InitializeIpForwardEntry, InitializeIpInterfaceEntry,
+    MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW, SetInterfaceDnsSettings,
 };
 use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 use windows_sys::Win32::Networking::WinSock::{
-    AF_INET, AF_INET6, IN_ADDR, IN_ADDR_0, IN6_ADDR, IN6_ADDR_0, MIB_IPPROTO_NETMGMT, SOCKADDR_IN, SOCKADDR_IN6,
-    SOCKADDR_INET,
+    AF_INET, AF_INET6, AF_UNSPEC, IN_ADDR, IN_ADDR_0, IN6_ADDR, IN6_ADDR_0, MIB_IPPROTO_NETMGMT, SOCKADDR_IN,
+    SOCKADDR_IN6, SOCKADDR_INET,
 };
 use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_LOCAL_MACHINE, KEY_ALL_ACCESS, REG_DWORD, REG_MULTI_SZ, REG_OPTION_NON_VOLATILE, REG_OPTION_VOLATILE,
@@ -31,10 +32,6 @@ use windows_sys::Win32::System::Registry::{
 };
 
 use super::{Uplink, Via, check_domains};
-
-pub(super) fn unsupported<T>() -> anyhow::Result<T> {
-    bail!("routes by domain are not supported on Windows yet")
-}
 
 /// The default route with the lowest metric, route and interface added
 /// as Windows ranks them.
@@ -123,27 +120,75 @@ pub(super) async fn clear_dns(session: &str, interface: &str) -> anyhow::Result<
     removed
 }
 
+/// The proxy's domains go to it through a rule of their own: the NRPT
+/// applies the most specific rule, so the session's own rule (its domains,
+/// or every name in a full tunnel) stays as it is. The NRPT knows no port:
+/// the proxy has a loopback address of its own, on port 53.
 pub(super) async fn set_proxy_dns(
-    _session: &str,
+    session: &str,
     _interface: &str,
     _settings: &TunnelSettings,
-    _port: u16,
-    _domains: &[String],
+    proxy: SocketAddr,
+    domains: &[String],
 ) -> anyhow::Result<()> {
-    unsupported()
+    if proxy.port() != 53 {
+        bail!("the DNS proxy must listen on port 53, not {}", proxy.port());
+    }
+    let names: Vec<String> = domains.iter().flat_map(|d| [d.clone(), format!(".{d}")]).collect();
+    nrpt::set(&proxy_rule(session), &names, &[proxy.ip().to_string()])
 }
 
 pub(super) async fn clear_proxy_dns(
-    _session: &str,
+    session: &str,
     _interface: &str,
     _settings: &TunnelSettings,
     _restore: bool,
 ) -> anyhow::Result<()> {
-    unsupported()
+    nrpt::remove(&proxy_rule(session))
 }
 
+fn proxy_rule(session: &str) -> String {
+    format!("{}-proxy", nrpt::rule(session))
+}
+
+/// The DNS servers of the uplink's interface: those Windows asks for the
+/// names no rule claims. `ignore`: unused, the uplink is never a tunnel.
 pub(super) async fn current_resolvers(_ignore: &[String]) -> anyhow::Result<Vec<SocketAddr>> {
-    unsupported()
+    let uplink = uplink().await?;
+    let index: u32 = uplink.interface.parse().context("uplink index")?;
+    let flags = GAA_FLAG_SKIP_UNICAST | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_FRIENDLY_NAME;
+    let mut size = 16 * 1024u32;
+    let buffer = loop {
+        let mut buffer = vec![0u64; (size as usize).div_ceil(8)];
+        // SAFETY: a buffer of `size` bytes, aligned for the structures.
+        let status =
+            unsafe { GetAdaptersAddresses(AF_UNSPEC as u32, flags, null(), buffer.as_mut_ptr().cast(), &mut size) };
+        match status {
+            0 => break buffer,
+            ERROR_BUFFER_OVERFLOW => continue,
+            error => return Err(std::io::Error::from_raw_os_error(error as i32)).context("cannot list the adapters"),
+        }
+    };
+    let mut servers = Vec::new();
+    // SAFETY: a list the call above filled in, within `buffer`.
+    unsafe {
+        let mut adapter = buffer.as_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
+        while !adapter.is_null() {
+            if (*adapter).Anonymous1.Anonymous.IfIndex == index {
+                let mut server = (*adapter).FirstDnsServerAddress;
+                while !server.is_null() {
+                    let address = (*server).Address.lpSockaddr.cast::<SOCKADDR_INET>();
+                    if let Some(ip) = (!address.is_null()).then(|| ip_of(&*address)).flatten() {
+                        servers.push(SocketAddr::new(ip, 53));
+                    }
+                    server = (*server).Next;
+                }
+            }
+            adapter = (*adapter).Next;
+        }
+    }
+    servers.truncate(8);
+    Ok(servers)
 }
 
 pub(super) async fn flush_dns_cache() {

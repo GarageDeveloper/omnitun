@@ -15,6 +15,7 @@ vpn-ipsec.workspace = true
 vpn-openvpn.workspace = true
 vpn-l2tp.workspace = true
 vpn-wireguard.workspace = true
+vpn-dnsproxy.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
@@ -25,10 +26,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 zeroize = "1"
 
-# Interfaces handed over as descriptors; the DNS proxy (not on Windows yet).
+# Interfaces handed over as descriptors.
 [target.'cfg(unix)'.dependencies]
 vpn-platform.workspace = true
-vpn-dnsproxy.workspace = true
 nix = { version = "0.31", features = ["user"] }
 
 [target.'cfg(windows)'.dependencies]

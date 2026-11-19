@@ -6,7 +6,8 @@
 //!
 //! On Windows, three inherited pipes named by their handles: `--control`,
 //! `--packets` (the interface's packets, relayed by the daemon) and
-//! `--prompts` (the owner's prompt clients, accepted by the daemon).
+//! `--prompts` (the owner's prompt clients, accepted by the daemon); for
+//! the DNS proxy, `--control` with the sockets `--udp` and `--tcp`.
 //!
 //! `--dns-proxy`: a session's DNS proxy instead (routes by domain, #37):
 //! the control socket as descriptor 3, the bound UDP socket as 4 and the
@@ -132,16 +133,42 @@ async fn main() -> anyhow::Result<()> {
     if vpn_transport::current_user()?.admin {
         bail!("{} must not run as an administrator", vpn_core::brand::ENGINE);
     }
-    let usage =
-        || format!("usage: {} --control <handle> --packets <handle> --prompts <handle>", vpn_core::brand::ENGINE);
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let handle = |flag: &str| -> anyhow::Result<NamedPipeClient> {
-        let value = args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).with_context(usage)?;
-        let value: usize = value.parse().with_context(|| format!("{flag} {value}"))?;
+    let value = |flag: &str| -> anyhow::Result<usize> {
+        let value = args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).with_context(|| {
+            format!(
+                "usage: {} --control <handle> --packets <handle> --prompts <handle> \
+                 (or --dns-proxy --control <handle> --udp <socket> --tcp <socket>)",
+                vpn_core::brand::ENGINE
+            )
+        })?;
+        value.parse().with_context(|| format!("{flag} {value}"))
+    };
+    let pipe = |flag: &str| -> anyhow::Result<NamedPipeClient> {
+        let handle = value(flag)?;
         // SAFETY: an overlapped pipe handle this process inherited for
         // this use, owned from now on.
-        unsafe { NamedPipeClient::from_raw_handle(value as std::os::windows::io::RawHandle) }
-            .with_context(|| format!("{flag} {value}"))
+        unsafe { NamedPipeClient::from_raw_handle(handle as std::os::windows::io::RawHandle) }
+            .with_context(|| format!("{flag} {handle}"))
     };
-    omnitun_engine::serve(handle("--control")?, handle("--packets")?, handle("--prompts")?).await
+    if args.first().map(String::as_str) == Some("--dns-proxy") {
+        use std::os::windows::io::FromRawSocket;
+        // SAFETY: sockets this process inherited, bound by the daemon,
+        // owned from now on.
+        let (udp, tcp) = unsafe {
+            (
+                std::net::UdpSocket::from_raw_socket(value("--udp")? as u64),
+                std::net::TcpListener::from_raw_socket(value("--tcp")? as u64),
+            )
+        };
+        udp.set_nonblocking(true)?;
+        tcp.set_nonblocking(true)?;
+        return vpn_dnsproxy::run(
+            pipe("--control")?,
+            tokio::net::UdpSocket::from_std(udp).context("DNS socket")?,
+            tokio::net::TcpListener::from_std(tcp).context("DNS listener")?,
+        )
+        .await;
+    }
+    omnitun_engine::serve(pipe("--control")?, pipe("--packets")?, pipe("--prompts")?).await
 }
