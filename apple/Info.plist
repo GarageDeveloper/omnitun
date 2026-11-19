@@ -21,6 +21,9 @@
     <!-- The commit built, shown next to the version; never compared. -->
     <key>BuildCommit</key>
     <string>@COMMIT@</string>
+    <!-- The GitHub repository the build came from, linked from About. -->
+    <key>SourceURL</key>
+    <string>@SOURCE_URL@</string>
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <!-- Also lists the app under System Settings › Language & Region › Applications. -->

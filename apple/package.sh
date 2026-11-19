@@ -39,6 +39,7 @@ if [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
 fi
 export OMNITUN_COMMIT="$COMMIT"
 REPO=${REPO:-GarageDeveloper/omnitun}
+SOURCE_URL="https://github.com/$REPO"
 FEED_URL="https://github.com/$REPO/releases/latest/download/appcast.xml"
 
 dist=apple/dist
@@ -84,7 +85,7 @@ subst() {
   sed -e "s|@PRODUCT@|$PRODUCT|g" -e "s|@ID@|$ID|g" -e "s|@RDNS@|$RDNS|g" -e "s|@DAEMON@|$DAEMON|g" -e "s|@CLI@|$CLI|g" \
       -e "s|@ENGINE@|$ENGINE|g" -e "s|@ENGINE_USER@|$ENGINE_USER|g" \
       -e "s|@LABEL@|$LABEL|g" -e "s|@BUNDLE_ID@|$BUNDLE_ID|g" -e "s|@VERSION@|$VERSION|g" -e "s|@BUILD@|$BUILD|g" \
-      -e "s|@FEED_URL@|$FEED_URL|g" -e "s|@COMMIT@|$COMMIT|g" "$1"
+      -e "s|@FEED_URL@|$FEED_URL|g" -e "s|@SOURCE_URL@|$SOURCE_URL|g" -e "s|@COMMIT@|$COMMIT|g" "$1"
 }
 subst apple/Info.plist > "$app/Contents/Info.plist"
 cp -R apple/Resources/en.lproj apple/Resources/fr.lproj "$app/Contents/Resources/"

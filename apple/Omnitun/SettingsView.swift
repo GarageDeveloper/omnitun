@@ -37,6 +37,12 @@ private struct AboutView: View {
         return details.isEmpty ? short : "\(short) (\(details.joined(separator: ", ")))"
     }
 
+    /// The repository this build came from, set at packaging; absent when
+    /// the app runs unpackaged.
+    private var source: URL? {
+        (Bundle.main.infoDictionary?["SourceURL"] as? String).flatMap(URL.init(string:))
+    }
+
     var body: some View {
         VStack(spacing: 12) {
             Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 96, height: 96)
@@ -44,6 +50,9 @@ private struct AboutView: View {
             Text(String(localized: "Version \(version)")).foregroundStyle(.secondary).textSelection(.enabled)
             Text("A VPN client for FortiGate SSL VPN, IPsec, OpenVPN, L2TP and WireGuard, several at a time.")
                 .multilineTextAlignment(.center)
+            if let source {
+                Link("Source Code on GitHub", destination: source).font(.callout)
+            }
             Divider().frame(width: 300)
             Text(verbatim: "© 2026 GarageDeveloper and the \(brand.product) contributors")
             Text("Free software: use, change and share it under the MIT license or the Apache License 2.0, as you prefer.")
