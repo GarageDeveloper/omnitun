@@ -40,7 +40,9 @@ On macOS, a menu bar app (English and French) creates, imports and runs
 the VPNs; on Windows, an app in the notification area runs them;
 `omnitunctl` does the same from a terminal, on macOS, Linux and Windows.
 It imports the VPNs of FortiClient, Viscosity, OpenVPN Connect, System
-Settings (Cisco IPSec and L2TP), `.ovpn` files and WireGuard `.conf` files.
+Settings (Cisco IPSec and L2TP), `.ovpn` files and WireGuard `.conf` files;
+on Windows, those of Viscosity, OpenVPN Connect and FortiClient's SSL VPNs
+(from the registry; not its IPsec VPNs yet), and the files.
 
 > Omnitun is an independent project. It is not affiliated with or endorsed
 > by Fortinet, Cisco, OpenVPN Inc., Jason A. Donenfeld (WireGuard) or any
@@ -138,7 +140,7 @@ Profiles live in `~/.config/omnitun/profiles.toml`; see
 [examples/profiles.toml](examples/profiles.toml).
 
 ```sh
-omnitunctl import forticlient --write      # FortiClient's VPNs (macOS)
+omnitunctl import forticlient --write      # FortiClient's VPNs (Windows: SSL VPNs)
 omnitunctl secret set paris                # password in the Keychain (optional)
 omnitunctl connect paris branch            # two tunnels side by side
 omnitunctl status                          # uptime, gateway, DNS, drops, traffic

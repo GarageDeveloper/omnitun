@@ -9,15 +9,19 @@ use std::path::Path;
 use anyhow::Context;
 use plist::{Dictionary, Value};
 
+#[cfg(windows)]
+mod forticlient_windows;
 mod macos;
 mod openvpn_connect;
 mod ovpn;
 mod viscosity;
 mod wireguard;
+#[cfg(windows)]
+pub use forticlient_windows::forticlient_windows;
 pub use macos::{MACOS_NETWORK_PREFERENCES, macos_vpns};
-pub use openvpn_connect::{OPENVPN_CONNECT_DIR, openvpn_connect};
+pub use openvpn_connect::{OPENVPN_CONNECT_DIR, openvpn_connect, openvpn_connect_dir};
 pub use ovpn::{MAX_SIZE as OPENVPN_MAX_SIZE, openvpn};
-pub use viscosity::{VISCOSITY_LIBRARY, viscosity};
+pub use viscosity::{VISCOSITY_LIBRARY, viscosity, viscosity_library};
 pub use wireguard::{WireGuardImport, is_wireguard, new_private_key, public_key, wireguard};
 
 /// One connection found by an importer that reads another client's

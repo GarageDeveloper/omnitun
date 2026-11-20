@@ -3481,6 +3481,7 @@ dependencies = [
  "vpn-core",
  "vpn-transport",
  "windows-sys 0.61.2",
+ "winreg",
  "x25519-dalek",
  "x509-parser",
  "zeroize",

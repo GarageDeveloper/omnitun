@@ -38,6 +38,7 @@ const FR = {
   "“/” separates subfolders, as in Clients/Acme.": "« / » sépare les sous-dossiers, comme dans Clients/Acme.",
   "OK": "OK",
   "Cancel": "Annuler",
+  "Close": "Fermer",
   "Rename “%@”": "Renommer « %@ »",
   "Up to 64 characters, without “/”; unique in its folder.": "64 caractères au plus, sans « / » ; unique dans son dossier.",
   "Rename": "Renommer",
@@ -1953,6 +1954,118 @@ async function importConfigFile() {
   });
 }
 
+/** What each other client is, for the import from it. */
+const SOURCES = {
+  forticlient: {
+    title: "FortiClient Profiles Found", empty: "No FortiClient profile on this computer.",
+    secrets: "FortiClient's passwords and pre-shared keys cannot be read. A secret typed here is saved in the Credential Manager; the others are asked at the first connection.",
+  },
+  viscosity: {
+    title: "Viscosity Connections Found", empty: "No Viscosity connection on this computer.",
+    secrets: "Viscosity's passwords stay with it. A password typed here is saved in the Credential Manager; otherwise it is asked at the first connection.",
+  },
+  "openvpn-connect": {
+    title: "OpenVPN Connect Profiles Found", empty: "No OpenVPN Connect profile on this computer.",
+    secrets: "OpenVPN Connect's passwords stay with it. A password typed here is saved in the Credential Manager; otherwise it is asked at the first connection.",
+  },
+};
+FR["FortiClient Profiles Found"] = "Profils FortiClient trouvés";
+FR["Viscosity Connections Found"] = "Connexions Viscosity trouvées";
+FR["OpenVPN Connect Profiles Found"] = "Profils OpenVPN Connect trouvés";
+FR["No FortiClient profile on this computer."] = "Aucun profil FortiClient sur cet ordinateur.";
+FR["No Viscosity connection on this computer."] = "Aucune connexion Viscosity sur cet ordinateur.";
+FR["No OpenVPN Connect profile on this computer."] = "Aucun profil OpenVPN Connect sur cet ordinateur.";
+FR["FortiClient's passwords and pre-shared keys cannot be read. A secret typed here is saved in the Credential Manager; the others are asked at the first connection."] =
+  "Les mots de passe et clés pré-partagées de FortiClient ne peuvent pas être lus. Un secret saisi ici est enregistré dans le Gestionnaire d'identification ; les autres sont demandés à la première connexion.";
+FR["Viscosity's passwords stay with it. A password typed here is saved in the Credential Manager; otherwise it is asked at the first connection."] =
+  "Les mots de passe de Viscosity restent chez lui. Un mot de passe saisi ici est enregistré dans le Gestionnaire d'identification ; sinon il est demandé à la première connexion.";
+FR["OpenVPN Connect's passwords stay with it. A password typed here is saved in the Credential Manager; otherwise it is asked at the first connection."] =
+  "Les mots de passe d'OpenVPN Connect restent chez lui. Un mot de passe saisi ici est enregistré dans le Gestionnaire d'identification ; sinon il est demandé à la première connexion.";
+FR["Cannot be imported: %@"] = "Ne peut pas être importé : %@";
+FR["Already added"] = "Déjà ajouté";
+FR["Same server as %@, already added"] = "Même serveur que %@, déjà ajouté";
+FR["Pre-shared key (VPN)"] = "Clé pré-partagée (VPN)";
+FR["Add %lld Profile(s)"] = "Ajouter %lld profil(s)";
+FR["From FortiClient…"] = "Depuis FortiClient…";
+FR["From Viscosity…"] = "Depuis Viscosity…";
+FR["From OpenVPN Connect…"] = "Depuis OpenVPN Connect…";
+
+/** The VPNs another client has: which to add, with the secrets it keeps. */
+async function importFrom(source) {
+  const info = SOURCES[source];
+  await loadProfiles();
+  const known = new Set(profiles.filter((p) => !p.folder).map((p) => p.name));
+  let found = [];
+  let failure = null;
+  try {
+    found = await call("import_preview", { source, path: null });
+  } catch (e) {
+    failure = e.message;
+  }
+  // The first of each name not added yet, unless its server is.
+  const names = new Set(known);
+  const chosen = new Set(found.map((p, i) => [p, i]).filter(([p]) => !p.refused && !p.duplicate_of && !names.has(p.name) && names.add(p.name)).map(([, i]) => i));
+  const secrets = found.map(() => ({}));
+  const error = el("p", { class: "error-text", hidden: true });
+  const list = el("div", { style: "max-height:340px;overflow:auto" });
+  const draw = () => {
+    const rows = found.map((p, i) => {
+      const exists = known.has(p.name);
+      const status = p.refused ? el("p", { class: "warning" }, tr("Cannot be imported: %@", p.refused))
+        : exists ? caption(tr("Already added"))
+        : p.duplicate_of ? caption(tr("Same server as %@, already added", p.duplicate_of)) : null;
+      const box = checkbox(el("b", {}, p.name), chosen.has(i), (on) => {
+        if (on) {
+          found.forEach((q, j) => { if (q.name === p.name) chosen.delete(j); });
+          chosen.add(i);
+        } else {
+          chosen.delete(i);
+        }
+        draw();
+      }, { disabled: exists || !!p.refused });
+      box.style.display = "flex";
+      const secret = (key, label) => {
+        const input = el("input", { type: "password", value: secrets[i][key] ?? "", placeholder: tr("Optional: asked at the first connection otherwise"), autocomplete: "new-password" });
+        input.oninput = () => { secrets[i][key] = input.value; };
+        return field(label, input);
+      };
+      return el("div", { style: "padding:6px 0;border-bottom:1px solid var(--line)" }, box, status,
+        p.notes.map((n) => caption(n)),
+        chosen.has(i) && p.needs_psk ? secret("psk", tr("Pre-shared key (VPN)")) : null,
+        chosen.has(i) && p.needs_password ? secret("password", tr("User password")) : null);
+    });
+    list.replaceChildren(...(failure ? [caption(failure)] : found.length ? rows : [caption(tr(info.empty))]),
+      found.length ? caption(tr(info.secrets)) : "");
+    const add = document.querySelector("#modal-buttons button[data-id=add]");
+    if (add) {
+      add.textContent = tr("Add %lld Profile(s)", chosen.size);
+      add.disabled = chosen.size === 0;
+    }
+  };
+  setTimeout(draw);
+  draw();
+  await modal({
+    title: tr(info.title), body: el("div", {}, list, error),
+    buttons: [{ id: "cancel", label: tr("Close") }, { id: "add", label: tr("Add %lld Profile(s)", chosen.size), primary: true }],
+    act: async () => {
+      const picked = [...chosen].sort((a, b) => a - b);
+      if (!picked.length) return false;
+      try {
+        const ids = await call("add_imported", {
+          toml: picked.map((i) => found[i].toml).join("\n"),
+          secrets: picked.map((i) => Object.fromEntries(Object.entries(secrets[i]).map(([k, v]) => [k, v.trim()]).filter(([, v]) => v))),
+        });
+        await imported(ids, false);
+        return true;
+      } catch (e) {
+        error.textContent = e.message;
+        error.hidden = false;
+        return false;
+      }
+    },
+  });
+}
+
 /** After an import: the list again, the first added profile selected. */
 async function imported(ids, connectNow) {
   await loadProfiles();
@@ -1988,6 +2101,10 @@ async function main() {
   importButton.onclick = () => popupBelow(importButton, [
     { label: tr("Profile File (.vpnprofile)…"), action: importProfileFile },
     { label: tr("OpenVPN or WireGuard File (.ovpn, .conf)…"), action: importConfigFile },
+    "-",
+    { label: tr("From FortiClient…"), action: () => importFrom("forticlient") },
+    { label: tr("From Viscosity…"), action: () => importFrom("viscosity") },
+    { label: tr("From OpenVPN Connect…"), action: () => importFrom("openvpn-connect") },
   ]);
   dropTarget(document.getElementById("tree"), (id) => moveTo(id, null, null));
 

@@ -13,15 +13,28 @@ use zeroize::Zeroizing;
 
 use super::Found;
 
-/// OpenVPN Connect's folder, under the user's home.
+/// OpenVPN Connect's folder, under the user's home (macOS).
 pub const OPENVPN_CONNECT_DIR: &str = "Library/Application Support/OpenVPN Connect";
+
+/// OpenVPN Connect's folder: under the home folder on macOS, in the
+/// roaming application data on Windows (`%APPDATA%\OpenVPN Connect`, the
+/// same layout).
+pub fn openvpn_connect_dir() -> anyhow::Result<PathBuf> {
+    if cfg!(windows) {
+        return Ok(std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .context("no APPDATA folder")?
+            .join("OpenVPN Connect"));
+    }
+    Ok(std::env::var_os("HOME").map(PathBuf::from).context("no home folder")?.join(OPENVPN_CONNECT_DIR))
+}
 
 /// The profiles of OpenVPN Connect's folder (`path` None, or another
 /// folder of the same layout), in the order they were imported.
 pub fn openvpn_connect(path: Option<&Path>, existing: &[String]) -> anyhow::Result<Vec<Found>> {
     let dir = match path {
         Some(path) => path.to_owned(),
-        None => std::env::var_os("HOME").map(PathBuf::from).context("no home folder")?.join(OPENVPN_CONNECT_DIR),
+        None => openvpn_connect_dir()?,
     };
     let folder = dir.join("profiles");
     let entries =

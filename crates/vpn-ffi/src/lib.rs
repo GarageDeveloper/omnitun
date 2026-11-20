@@ -238,9 +238,15 @@ impl Client {
         Ok(self.store.set_trusted_certificates(&id, &[sha256.to_ascii_lowercase()])?)
     }
 
-    /// Reads FortiClient's profiles (macOS); nothing is written.
+    /// Reads FortiClient's profiles (its vpn.plist on macOS, the registry
+    /// on Windows when `path` is None); nothing is written.
     pub fn import_forticlient(&self, path: Option<String>) -> Result<Vec<ImportedProfile>, ClientError> {
         let existing = self.store.load()?;
+        #[cfg(windows)]
+        if path.is_none() {
+            let found = vpn_client::import::forticlient_windows()?;
+            return Ok(marked(found.into_iter().map(ImportedProfile::from).collect(), &existing));
+        }
         let path = path.map(PathBuf::from).unwrap_or_else(|| vpn_client::import::FORTICLIENT_PLIST.into());
         Ok(marked(
             vpn_client::import::forticlient(&path)?

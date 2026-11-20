@@ -196,10 +196,12 @@ enum ImportSource {
         #[arg(long)]
         write: bool,
     },
-    /// FortiClient's vpn.plist (macOS).
+    /// FortiClient's VPNs: its vpn.plist on macOS (by default
+    /// /Library/Application Support/Fortinet/FortiClient/conf/vpn.plist),
+    /// the registry on Windows unless --from names a vpn.plist.
     Forticlient {
-        #[arg(long, default_value = import::FORTICLIENT_PLIST, value_hint = ValueHint::FilePath)]
-        from: PathBuf,
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        from: Option<PathBuf>,
         /// Append to the profiles file instead of printing.
         #[arg(long)]
         write: bool,
@@ -408,7 +410,12 @@ async fn main() -> anyhow::Result<()> {
                 None => print!("{text}"),
             }
         }
+        #[cfg(windows)]
+        Command::Import { source: ImportSource::Forticlient { from: None, write } } => {
+            add_found(&store, import::forticlient_windows()?, write, "FortiClient VPN")?;
+        }
         Command::Import { source: ImportSource::Forticlient { from, write } } => {
+            let from = from.unwrap_or_else(|| import::FORTICLIENT_PLIST.into());
             let imported = import::forticlient(&from)?;
             let existing = store.load()?;
             if imported.is_empty() {

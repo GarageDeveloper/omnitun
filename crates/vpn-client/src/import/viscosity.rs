@@ -2,7 +2,8 @@
 //! configuration, `config.conf`, with the files it names next to it, in a
 //! numbered folder of its library; exported connections are the same
 //! folder named `<name>.visc`. Its own settings are `#viscosity` comments.
-//! Passwords stay in Viscosity's Keychain items: never read.
+//! Passwords stay in Viscosity's Keychain items (Windows: its own store):
+//! never read.
 
 use std::path::{Path, PathBuf};
 
@@ -10,8 +11,21 @@ use anyhow::{Context, bail};
 
 use super::{Found, Imported};
 
-/// Viscosity's library, under the user's home.
+/// Viscosity's library, under the user's home (macOS).
 pub const VISCOSITY_LIBRARY: &str = "Library/Application Support/Viscosity/OpenVPN";
+
+/// Viscosity's library: under the home folder on macOS, in the roaming
+/// application data on Windows (`%APPDATA%\Viscosity\OpenVPN`).
+pub fn viscosity_library() -> anyhow::Result<PathBuf> {
+    if cfg!(windows) {
+        return Ok(std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .context("no APPDATA folder")?
+            .join("Viscosity")
+            .join("OpenVPN"));
+    }
+    Ok(std::env::var_os("HOME").map(PathBuf::from).context("no home folder")?.join(VISCOSITY_LIBRARY))
+}
 
 /// Most connections read from a library.
 const MAX_CONNECTIONS: usize = 64;
@@ -21,7 +35,7 @@ const MAX_CONNECTIONS: usize = 64;
 pub fn viscosity(path: Option<&Path>, existing: &[String]) -> anyhow::Result<Vec<Found>> {
     let path = match path {
         Some(path) => path.to_owned(),
-        None => std::env::var_os("HOME").map(PathBuf::from).context("no home folder")?.join(VISCOSITY_LIBRARY),
+        None => viscosity_library()?,
     };
     if path.extension().is_some_and(|e| e == "visz") {
         bail!("{} is compressed: open it in the Finder to unpack the .visc folder, then import that", path.display());
