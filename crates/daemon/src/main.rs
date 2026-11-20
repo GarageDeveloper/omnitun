@@ -16,6 +16,8 @@ mod prompter;
 #[cfg(windows)]
 mod service;
 #[cfg(windows)]
+mod winidle;
+#[cfg(windows)]
 mod winlog;
 #[cfg(windows)]
 mod winproc;
@@ -96,6 +98,11 @@ struct Args {
     #[cfg(windows)]
     #[arg(long)]
     teardown: bool,
+    /// Exit with this session's seconds since its last input: what the
+    /// service runs in the users' sessions.
+    #[cfg(windows)]
+    #[arg(long, hide = true)]
+    idle_secs: bool,
 }
 
 /// A program run as root, and every folder above it, must be root's and
@@ -139,6 +146,9 @@ fn main() -> anyhow::Result<()> {
         }
         if args.teardown {
             return winsetup::remove(&args.group);
+        }
+        if args.idle_secs {
+            std::process::exit(winidle::helper() as i32);
         }
         if args.service {
             return service::run(args);

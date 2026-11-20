@@ -285,7 +285,6 @@ const FR = {
   "Reconnections after a drop do not start the time again. Postponing starts it again.":
     "Les reconnexions après une coupure ne relancent pas le décompte. Prolonger le relance.",
   "After no keyboard or mouse activity for": "Après une inactivité clavier et souris de",
-  "Not available on Windows yet: the limit is kept for macOS.": "Pas encore disponible sous Windows : la limite est gardée pour macOS.",
   "At": "À",
   "The first time after connecting. Postponing moves it an hour later.": "La première fois après la connexion. Prolonger la recule d'une heure.",
   "Choose at least one limit.": "Choisissez au moins une limite.",
@@ -1706,10 +1705,10 @@ function durationField(field_, key) {
 
 function scheduleTab() {
   const f = ui.form;
-  const limit = (label, field_, initial, control, note, { unavailable = false } = {}) => {
+  const limit = (label, field_, initial, control, note) => {
     const on = (f[field_] ?? "").trim() !== "";
-    return field(checkbox(label, on, (v) => { f[field_] = v ? initial : ""; editedDeep(); }, { key: `${field_}-on`, disabled: unavailable && !on }),
-      on ? control() : [], caption(note), unavailable ? warning(tr("Not available on Windows yet: the limit is kept for macOS.")) : null);
+    return field(checkbox(label, on, (v) => { f[field_] = v ? initial : ""; editedDeep(); }, { key: `${field_}-on` }),
+      on ? control() : [], caption(note));
   };
   const none = ["disconnect_after", "disconnect_idle", "disconnect_at"].every((k) => !(f[k] ?? "").trim());
   return [
@@ -1719,7 +1718,7 @@ function scheduleTab() {
       limit(tr("After being connected for"), "disconnect_after", "8:00", () => durationField("disconnect_after", "after"),
         tr("Reconnections after a drop do not start the time again. Postponing starts it again.")),
       limit(tr("After no keyboard or mouse activity for"), "disconnect_idle", "1:00", () => durationField("disconnect_idle", "idle"),
-        tr("Network traffic does not count: it never stops. Using the computer again keeps the VPN up."), { unavailable: true }),
+        tr("Network traffic does not count: it never stops. Using the computer again keeps the VPN up.")),
       limit(tr("At"), "disconnect_at", "19:00", () => {
         const [h, m] = parseHM(f.disconnect_at, [19, 0]);
         const time = el("input", {

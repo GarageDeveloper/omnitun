@@ -125,7 +125,10 @@ pub async fn user_idle_secs() -> Option<u64> {
     parse_idle(&String::from_utf8_lossy(&output.stdout))
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+pub use crate::winidle::user_idle_secs;
+
+#[cfg(not(any(target_os = "macos", windows)))]
 pub async fn user_idle_secs() -> Option<u64> {
     None
 }
