@@ -1,9 +1,10 @@
 //! The directory of the daemon's runtime files (`vpn_core::brand::runtime_dir`).
 //! On macOS and Linux it is the system's (`/var/run`, `/run`). On Windows
 //! it is `%ProgramData%\Omnitun`, where any user may create a folder
-//! first: the daemon makes sure SYSTEM or the Administrators own it and
-//! that only they can change what is inside (the route journal is acted
-//! upon at the next start).
+//! first: the daemon makes sure it is a folder rather than a link (which
+//! it removes), that SYSTEM or the Administrators own it and that only
+//! they can change what is inside (the route journal is acted upon at the
+//! next start).
 
 /// Creates the directory if needed, and on Windows checks its owner and
 /// sets its access list.
@@ -21,18 +22,24 @@ pub fn prepare_runtime_dir() -> anyhow::Result<()> {
 mod windows {
     use std::ptr::{null, null_mut};
 
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::windows::io::AsRawHandle;
+
     use anyhow::{Context, bail};
     use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, LocalFree};
     use windows_sys::Win32::Security::Authorization::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
-        SetNamedSecurityInfoW,
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
+        SetSecurityInfo,
     };
     use windows_sys::Win32::Security::{
         ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, IsWellKnownSid, OWNER_SECURITY_INFORMATION,
         PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
         WinBuiltinAdministratorsSid, WinLocalSystemSid,
     };
-    use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateDirectoryW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, WRITE_DAC,
+    };
 
     /// SYSTEM and the Administrators only, for the folder and what it
     /// holds; nothing inherited from `%ProgramData%`.
@@ -46,21 +53,56 @@ mod windows {
             lpSecurityDescriptor: descriptor.0,
             bInheritHandle: 0,
         };
-        // SAFETY: a NUL-terminated path and attributes valid for the call.
-        if unsafe { CreateDirectoryW(path.as_ptr(), &attributes) } != 0 {
-            return Ok(());
+        let mut link_removed = false;
+        loop {
+            // SAFETY: a NUL-terminated path and attributes valid for the call.
+            if unsafe { CreateDirectoryW(path.as_ptr(), &attributes) } != 0 {
+                return Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(ERROR_ALREADY_EXISTS as i32) {
+                return Err(error).with_context(|| format!("cannot create {dir}"));
+            }
+            // There already. The folder itself is opened, not what a link
+            // there points to: a junction made by a user would pass the
+            // checks below on its target, then stay theirs to point
+            // anywhere the service writes, renames or deletes. It is kept
+            // open, without sharing its deletion, until its access is set.
+            let folder = std::fs::OpenOptions::new()
+                .access_mode(READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(dir)
+                .with_context(|| format!("cannot open {dir}"))?;
+            let attributes = folder.metadata().with_context(|| format!("cannot check {dir}"))?.file_attributes();
+            if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                drop(folder);
+                if link_removed {
+                    bail!("{dir} is a link again; remove it");
+                }
+                // Removes the link, not what it points to.
+                std::fs::remove_dir(dir).with_context(|| format!("{dir} is a link and cannot be removed"))?;
+                link_removed = true;
+                continue;
+            }
+            if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+                bail!("{dir} is not a folder; remove it");
+            }
+            return secure(&folder, dir, &descriptor);
         }
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() != Some(ERROR_ALREADY_EXISTS as i32) {
-            return Err(error).with_context(|| format!("cannot create {dir}"));
-        }
-        // There already: someone else's would stay theirs to change.
+    }
+
+    /// Checks that SYSTEM or the Administrators own the open folder, and
+    /// sets its access list.
+    fn secure(folder: &std::fs::File, dir: &str, descriptor: &Descriptor) -> anyhow::Result<()> {
+        let handle = folder.as_raw_handle();
+        // Someone else's would stay theirs to change.
         let mut owner: PSID = null_mut();
         let mut current: PSECURITY_DESCRIPTOR = null_mut();
-        // SAFETY: `owner` points into `current`, freed below.
+        // SAFETY: an open handle; `owner` points into `current`, freed below.
         let status = unsafe {
-            GetNamedSecurityInfoW(
-                path.as_ptr(),
+            GetSecurityInfo(
+                handle,
                 SE_FILE_OBJECT,
                 OWNER_SECURITY_INFORMATION,
                 &mut owner,
@@ -88,10 +130,10 @@ mod windows {
         if unsafe { GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut dacl, &mut defaulted) } == 0 {
             return Err(std::io::Error::last_os_error()).context("invalid access list");
         }
-        // SAFETY: a NUL-terminated path and a valid DACL.
+        // SAFETY: an open handle and a valid DACL.
         let status = unsafe {
-            SetNamedSecurityInfoW(
-                path.as_ptr(),
+            SetSecurityInfo(
+                handle,
                 SE_FILE_OBJECT,
                 DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
                 null_mut(),
