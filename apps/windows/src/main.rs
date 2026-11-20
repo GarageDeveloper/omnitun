@@ -11,6 +11,7 @@
 
 mod manage;
 mod settings;
+mod updates;
 
 use settings::tr;
 
@@ -328,11 +329,28 @@ fn open_link(which: String) {
     open(url);
 }
 
-/// Looks for a newer release now; returns it, if any.
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum Checked {
+    /// WinSparkle's window tells.
+    Shown,
+    Newer {
+        version: String,
+    },
+    UpToDate,
+}
+
+/// Looks for a newer release now: in WinSparkle's window, or on GitHub.
 #[tauri::command]
-async fn check_now(app: AppHandle, state: tauri::State<'_, Shared>) -> Result<Option<String>, String> {
+async fn check_now(app: AppHandle, state: tauri::State<'_, Shared>) -> Result<Checked, String> {
+    if updates::check_with_ui() {
+        return Ok(Checked::Shown);
+    }
     let latest = latest_release().await.map_err(|e| format!("{e:#}"))?;
-    Ok(found_release(&app, &state, latest))
+    Ok(match found_release(&app, &state, latest) {
+        Some(version) => Checked::Newer { version },
+        None => Checked::UpToDate,
+    })
 }
 
 /// The profiles changed in the profiles window: the main window and the
@@ -456,8 +474,8 @@ fn notify(app: &AppHandle, state: &State) {
     notified.retain(|id, _| sessions.iter().any(|s| &s.id == id));
 }
 
-/// Looks for a newer release once a day; the window offers it, the user
-/// decides (the page opens in the browser).
+/// Without WinSparkle: looks for a newer release once a day; the window
+/// offers it, the user decides (the page opens in the browser).
 async fn check_updates(app: AppHandle, state: Shared) {
     loop {
         if settings::current().check_updates
@@ -624,6 +642,7 @@ fn main() {
         .setup(move |app| {
             let handle = app.handle().clone();
             settings::load(&handle);
+            let sparkle = updates::start(&handle, settings::current().check_updates, settings::french());
             let menu = tray_menu(&handle, &state)?;
             TrayIconBuilder::with_id("main")
                 .icon(app.default_window_icon().cloned().expect("the app has an icon"))
@@ -687,7 +706,9 @@ fn main() {
                 })
                 .build(app)?;
             tauri::async_runtime::spawn(watch(handle.clone(), state.clone()));
-            tauri::async_runtime::spawn(check_updates(handle.clone(), state.clone()));
+            if !sparkle {
+                tauri::async_runtime::spawn(check_updates(handle.clone(), state.clone()));
+            }
             if !hidden {
                 show(&handle);
             }
@@ -700,8 +721,13 @@ fn main() {
                 let _ = window.hide();
             }
         })
-        .run(tauri::generate_context!())
-        .expect("the app starts");
+        .build(tauri::generate_context!())
+        .expect("the app starts")
+        .run(|_, event| {
+            if let tauri::RunEvent::Exit = event {
+                updates::cleanup();
+            }
+        });
 }
 
 #[cfg(test)]

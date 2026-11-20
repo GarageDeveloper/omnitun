@@ -1,6 +1,6 @@
 # Builds the Omnitun installer for Windows: release binaries for one
-# architecture, Wintun's DLL (downloaded, checked against its SHA-256), the
-# license notices, then the MSI (WiX 5, see omnitun.wxs).
+# architecture, Wintun's and WinSparkle's DLLs (downloaded, checked against
+# their SHA-256), the license notices, then the MSI (WiX 5, see omnitun.wxs).
 #
 #   packaging\windows\build-msi.ps1 -Arch arm64     (or x64)
 #
@@ -20,8 +20,11 @@ Set-Location $root
 
 $wintunVersion = '0.14.1'
 $wintunSha256 = '07C256185D6EE3652E09FA55C0B673E2624B565E02C4B9091C79CA7D2F24EF51'
+$winsparkleVersion = '0.9.4'
+$winsparkleSha256 = '6037DF37FC263BD1650A1C4949681A9D40FFE991D01F35892A406CB5D103C976'
 $target = @{ x64 = 'x86_64-pc-windows-msvc'; arm64 = 'aarch64-pc-windows-msvc' }[$Arch]
 $wintunArch = @{ x64 = 'amd64'; arm64 = 'arm64' }[$Arch]
+$winsparkleArch = @{ x64 = 'x64'; arm64 = 'ARM64' }[$Arch]
 $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches[0].Groups[1].Value
 
 cargo build --release --locked --target $target -p omnitund -p omnitun-engine -p omnitunctl
@@ -39,6 +42,15 @@ if ($hash -ne $wintunSha256) { throw "$zip has SHA-256 $hash, not $wintunSha256"
 Expand-Archive -Force $zip "target\wintun-$wintunVersion"
 $wintun = "target\wintun-$wintunVersion\wintun"
 
+$zip = "target\WinSparkle-$winsparkleVersion.zip"
+if (-not (Test-Path $zip)) {
+    Invoke-WebRequest "https://github.com/vslavik/winsparkle/releases/download/v$winsparkleVersion/WinSparkle-$winsparkleVersion.zip" -OutFile $zip
+}
+$hash = (Get-FileHash $zip -Algorithm SHA256).Hash
+if ($hash -ne $winsparkleSha256) { throw "$zip has SHA-256 $hash, not $winsparkleSha256" }
+Expand-Archive -Force $zip "target\winsparkle-$winsparkleVersion"
+$winsparkle = "target\winsparkle-$winsparkleVersion\WinSparkle-$winsparkleVersion"
+
 $stage = "target\$target\release\msi"
 New-Item -ItemType Directory -Force $stage | Out-Null
 foreach ($exe in 'omnitund', 'omnitun-engine', 'omnitunctl') {
@@ -47,6 +59,7 @@ foreach ($exe in 'omnitund', 'omnitun-engine', 'omnitunctl') {
 Copy-Item "apps\windows\target\$target\release\Omnitun.exe" $stage
 Copy-Item "$wintun\bin\$wintunArch\wintun.dll" $stage
 Copy-Item "$wintun\LICENSE.txt" "$stage\wintun-LICENSE.txt"
+Copy-Item "$winsparkle\$winsparkleArch\Release\WinSparkle.dll" $stage
 Copy-Item LICENSE-MIT "$stage\LICENSE-MIT.txt"
 Copy-Item LICENSE-APACHE "$stage\LICENSE-APACHE.txt"
 
@@ -61,6 +74,11 @@ Remove-Item "$stage\app-notices.txt"
 $wintunNotice = "`n" + ('=' * 80) + "`nWintun $wintunVersion (wintun.dll), Prebuilt Binaries License`n" + ('-' * 80) + "`n`n" +
     (Get-Content -Raw "$wintun\LICENSE.txt")
 [IO.File]::AppendAllText("$root\$stage\THIRD-PARTY-NOTICES.txt", $wintunNotice)
+# WinSparkle's license names the OpenSSL code it has; Expat's comes with it.
+$winsparkleNotice = "`n" + ('=' * 80) + "`nWinSparkle $winsparkleVersion (WinSparkle.dll), MIT License`n" + ('-' * 80) + "`n`n" +
+    (Get-Content -Raw "$winsparkle\COPYING") + "`n" + ('-' * 80) + "`nExpat, in WinSparkle`n" + ('-' * 80) + "`n`n" +
+    (Get-Content -Raw "$winsparkle\COPYING.expat")
+[IO.File]::AppendAllText("$root\$stage\THIRD-PARTY-NOTICES.txt", $winsparkleNotice)
 
 New-Item -ItemType Directory -Force target\msi | Out-Null
 $msi = "target\msi\Omnitun-$version-$Arch.msi"

@@ -113,8 +113,9 @@ function general() {
           onclick: async () => {
             busy = true; render();
             try {
-              const version = await invoke("check_now");
-              update = version ? { text: tr("Version %@ is available.", version), version } : { text: tr("Omnitun is up to date.") };
+              const checked = await invoke("check_now");
+              update = checked.kind === "newer" ? { text: tr("Version %@ is available.", checked.version), version: checked.version }
+                : checked.kind === "up_to_date" ? { text: tr("Omnitun is up to date.") } : null;
             } catch (e) {
               update = { text: String(e) };
             }

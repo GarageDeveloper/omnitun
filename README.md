@@ -71,7 +71,8 @@ not signed yet, so SmartScreen warns before running it ("More info", then
 It installs the service (`omnitund`, started at boot), the engine, the
 Omnitun app (Start menu, and the notification area at sign-in),
 `omnitunctl` (on the PATH) and Wintun's driver DLL into
-`C:\Program Files\Omnitun`, and creates the `omnitun` group with the user
+`C:\Program Files\Omnitun`; the app then offers updates (WinSparkle) and
+the user decides. It creates the `omnitun` group with the user
 who installed it: other users are added with
 `net localgroup omnitun <user> /add` (they take effect at their next
 sign-in). The service's log is `C:\ProgramData\Omnitun\omnitund.log`
@@ -119,8 +120,10 @@ sudo cp packaging/omnitund.service /etc/systemd/system/ && sudo systemctl enable
 
 On Windows, `packaging\windows\build-msi.ps1` builds the installer (see
 its header for the tools it needs; the "Windows installers" workflow builds
-both and attaches them to a release, and `packaging/windows/winget.sh`
-then writes the winget manifests to submit); to try the service from a build, run
+both and attaches them to a release; `apple/release.sh --publish` then
+runs `packaging/windows/appcast.sh`, which signs them with Sparkle's key and
+attaches `appcast-windows.xml`, and `packaging/windows/winget.sh`
+writes the winget manifests to submit); to try the service from a build, run
 `target\debug\omnitund.exe --allow-writable-binaries` in an
 administrator terminal, with `wintun.dll` (from wintun.net) next to it.
 

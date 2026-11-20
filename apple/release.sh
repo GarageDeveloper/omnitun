@@ -15,6 +15,10 @@
 # its source archives are then those of the package. The commit must be on
 # the remote already.
 #
+# Then, unless WINDOWS=no, packaging/windows/appcast.sh --publish signs the
+# Windows MSIs the "Windows installers" workflow attaches (it waits for them)
+# and attaches appcast-windows.xml.
+#
 # NOTES=file: release notes (Markdown) for the Release and the appcast
 # (rendered to HTML by GitHub's Markdown API: gh must be logged in).
 set -eu
@@ -126,4 +130,8 @@ if [ "$publish" = yes ]; then
   gh release create "$tag" --verify-tag --repo "$REPO" --title "$PRODUCT $VERSION ($commit)" "$@" \
     "$out/$PRODUCT-$VERSION.pkg" "$out/appcast.xml"
   echo "published: https://github.com/$REPO/releases/tag/$tag"
+  # The Windows app's updates, once the workflow has attached the MSIs.
+  if [ "${WINDOWS:-yes}" != no ]; then
+    packaging/windows/appcast.sh --publish
+  fi
 fi

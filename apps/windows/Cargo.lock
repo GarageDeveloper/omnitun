@@ -2988,6 +2988,7 @@ version = "0.4.5"
 dependencies = [
  "anyhow",
  "async-trait",
+ "libloading",
  "serde",
  "serde_json",
  "sys-locale",

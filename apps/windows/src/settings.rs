@@ -85,6 +85,7 @@ pub fn set_settings(settings: Settings) -> Result<()> {
     }
     let text = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
     std::fs::write(path, text).map_err(|e| e.to_string())?;
+    crate::updates::set_automatic(settings.check_updates);
     if let Some(current) = SETTINGS.get() {
         *current.lock().unwrap() = settings;
     }
