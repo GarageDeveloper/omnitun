@@ -12,13 +12,19 @@ use std::ptr::{null, null_mut};
 use anyhow::{Context, bail};
 use vpn_core::SignAlgorithm;
 use windows_sys::Win32::Security::Cryptography::{
-    BCRYPT_PAD_PKCS1, BCRYPT_PAD_PSS, BCRYPT_PKCS1_PADDING_INFO, BCRYPT_PSS_PADDING_INFO, CERT_CHAIN_CONTEXT,
-    CERT_CHAIN_PARA, CERT_CONTEXT, CERT_KEY_PROV_INFO_PROP_ID, CERT_NCRYPT_KEY_SPEC, CERT_STORE_OPEN_EXISTING_FLAG,
-    CERT_STORE_PROV_PHYSICAL_W, CERT_STORE_PROV_SYSTEM_W, CERT_STORE_READONLY_FLAG, CERT_SYSTEM_STORE_CURRENT_USER,
-    CRYPT_ACQUIRE_CACHE_FLAG, CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG, CertCloseStore, CertEnumCertificatesInStore,
-    CertFreeCertificateChain, CertGetCertificateChain, CertGetCertificateContextProperty, CertOpenStore,
-    CryptAcquireCertificatePrivateKey, HCERTSTORE, NCryptSignHash, PKCS_7_ASN_ENCODING, X509_ASN_ENCODING,
+    BCRYPT_PAD_PKCS1, BCRYPT_PAD_PSS, BCRYPT_PKCS1_PADDING_INFO, BCRYPT_PSS_PADDING_INFO, CALG_SHA_256, CALG_SHA_384,
+    CALG_SHA_512, CALG_SHA1, CERT_CHAIN_CONTEXT, CERT_CHAIN_PARA, CERT_CONTEXT, CERT_KEY_PROV_INFO_PROP_ID,
+    CERT_NCRYPT_KEY_SPEC, CERT_STORE_OPEN_EXISTING_FLAG, CERT_STORE_PROV_PHYSICAL_W, CERT_STORE_PROV_SYSTEM_W,
+    CERT_STORE_READONLY_FLAG, CERT_SYSTEM_STORE_CURRENT_USER, CRYPT_ACQUIRE_CACHE_FLAG,
+    CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG, CRYPT_KEY_PROV_INFO, CRYPT_MACHINE_KEYSET, CertCloseStore,
+    CertEnumCertificatesInStore, CertFreeCertificateChain, CertGetCertificateChain, CertGetCertificateContextProperty,
+    CertOpenStore, CryptAcquireCertificatePrivateKey, CryptAcquireContextW, CryptCreateHash, CryptDestroyHash,
+    CryptReleaseContext, CryptSetHashParam, CryptSignHashW, HCERTSTORE, HP_HASHVAL, MS_ENH_RSA_AES_PROV_W,
+    NCryptSignHash, PKCS_7_ASN_ENCODING, PROV_RSA_AES, PROV_RSA_FULL, X509_ASN_ENCODING,
 };
+
+/// NTE_BAD_ALGID: the provider does not know the hash.
+const NTE_BAD_ALGID: i32 = 0x8009_0008_u32 as i32;
 
 const CERT_SYSTEM_STORE_CURRENT_USER_GROUP_POLICY: u32 = 7 << 16;
 const CERT_SYSTEM_STORE_LOCAL_MACHINE_GROUP_POLICY: u32 = 8 << 16;
@@ -64,21 +70,29 @@ pub fn chain(sha256: &str) -> anyhow::Result<Vec<Vec<u8>>> {
 }
 
 /// Signs `data` with the key of certificate `sha256`, hashing it first as
-/// the algorithm says. ECDSA signatures are DER.
+/// the algorithm says. ECDSA signatures are DER. CNG keys are preferred;
+/// a key of a CryptoAPI provider (an old certificate template, a PKCS#12
+/// imported for a CSP, a smart card with only a CSP) signs through it, RSA
+/// PKCS#1 only: CSPs know neither PSS nor ECDSA.
 pub fn sign(sha256: &str, algorithm: SignAlgorithm, data: &[u8]) -> anyhow::Result<Vec<u8>> {
+    sign_with(sha256, algorithm, data, CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG)
+}
+
+/// `sign`, opening the key with `acquire` (0: CryptoAPI only, for tests).
+fn sign_with(sha256: &str, algorithm: SignAlgorithm, data: &[u8], acquire: u32) -> anyhow::Result<Vec<u8>> {
     use ring::digest;
     let store = Store::open(CERT_STORE_PROV_SYSTEM_W, CERT_SYSTEM_STORE_CURRENT_USER, "MY")?;
     let cert = store.find(sha256)?;
-    let (hash, name, padding) = match algorithm {
-        SignAlgorithm::RsaPkcs1Sha1 => (&digest::SHA1_FOR_LEGACY_USE_ONLY, "SHA1", Padding::Pkcs1),
-        SignAlgorithm::RsaPkcs1Sha256 => (&digest::SHA256, "SHA256", Padding::Pkcs1),
-        SignAlgorithm::RsaPkcs1Sha384 => (&digest::SHA384, "SHA384", Padding::Pkcs1),
-        SignAlgorithm::RsaPkcs1Sha512 => (&digest::SHA512, "SHA512", Padding::Pkcs1),
-        SignAlgorithm::RsaPssSha256 => (&digest::SHA256, "SHA256", Padding::Pss),
-        SignAlgorithm::RsaPssSha384 => (&digest::SHA384, "SHA384", Padding::Pss),
-        SignAlgorithm::RsaPssSha512 => (&digest::SHA512, "SHA512", Padding::Pss),
-        SignAlgorithm::EcdsaSha256 => (&digest::SHA256, "SHA256", Padding::None),
-        SignAlgorithm::EcdsaSha384 => (&digest::SHA384, "SHA384", Padding::None),
+    let (hash, name, calg, padding) = match algorithm {
+        SignAlgorithm::RsaPkcs1Sha1 => (&digest::SHA1_FOR_LEGACY_USE_ONLY, "SHA1", CALG_SHA1, Padding::Pkcs1),
+        SignAlgorithm::RsaPkcs1Sha256 => (&digest::SHA256, "SHA256", CALG_SHA_256, Padding::Pkcs1),
+        SignAlgorithm::RsaPkcs1Sha384 => (&digest::SHA384, "SHA384", CALG_SHA_384, Padding::Pkcs1),
+        SignAlgorithm::RsaPkcs1Sha512 => (&digest::SHA512, "SHA512", CALG_SHA_512, Padding::Pkcs1),
+        SignAlgorithm::RsaPssSha256 => (&digest::SHA256, "SHA256", CALG_SHA_256, Padding::Pss),
+        SignAlgorithm::RsaPssSha384 => (&digest::SHA384, "SHA384", CALG_SHA_384, Padding::Pss),
+        SignAlgorithm::RsaPssSha512 => (&digest::SHA512, "SHA512", CALG_SHA_512, Padding::Pss),
+        SignAlgorithm::EcdsaSha256 => (&digest::SHA256, "SHA256", CALG_SHA_256, Padding::None),
+        SignAlgorithm::EcdsaSha384 => (&digest::SHA384, "SHA384", CALG_SHA_384, Padding::None),
     };
     let hashed = digest::digest(hash, data);
     let hashed = hashed.as_ref();
@@ -89,7 +103,7 @@ pub fn sign(sha256: &str, algorithm: SignAlgorithm, data: &[u8]) -> anyhow::Resu
     if unsafe {
         CryptAcquireCertificatePrivateKey(
             cert.0,
-            CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG | CRYPT_ACQUIRE_CACHE_FLAG,
+            acquire | CRYPT_ACQUIRE_CACHE_FLAG,
             null(),
             &mut key,
             &mut spec,
@@ -99,9 +113,20 @@ pub fn sign(sha256: &str, algorithm: SignAlgorithm, data: &[u8]) -> anyhow::Resu
     {
         return Err(std::io::Error::last_os_error()).context("the client certificate has no usable private key");
     }
-    if spec != CERT_NCRYPT_KEY_SPEC {
-        bail!("the client certificate's key is not a CNG key");
+    if spec == CERT_NCRYPT_KEY_SPEC {
+        sign_cng(key, name, padding, hashed)
+    } else {
+        if !matches!(padding, Padding::Pkcs1) {
+            bail!(
+                "the client certificate's key is in an old CryptoAPI provider, which can only make RSA PKCS#1 \
+                 signatures: import it again for a CNG provider"
+            );
+        }
+        sign_csp(&cert, key, spec, calg, hashed)
     }
+}
+
+fn sign_cng(key: usize, name: &str, padding: Padding, hashed: &[u8]) -> anyhow::Result<Vec<u8>> {
     let algorithm_id: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
     let pkcs1 = BCRYPT_PKCS1_PADDING_INFO { pszAlgId: algorithm_id.as_ptr() };
     // The salt as long as the hash, as TLS and IKE expect.
@@ -130,6 +155,128 @@ pub fn sign(sha256: &str, algorithm: SignAlgorithm, data: &[u8]) -> anyhow::Resu
         Padding::None => ecdsa_der(&signature)?,
         _ => signature,
     })
+}
+
+/// RSA PKCS#1 with the key of a CryptoAPI provider. The base and strong
+/// providers (PROV_RSA_FULL) hash no SHA-2: their keys are opened again in
+/// the AES provider, which reads the same containers.
+fn sign_csp(cert: &Certificate, provider: usize, spec: u32, calg: u32, hashed: &[u8]) -> anyhow::Result<Vec<u8>> {
+    // The hash before the provider it was made in: dropped in this order.
+    let (hash, _reopened) = match CspHash::new(provider, calg, hashed) {
+        Ok(hash) => (hash, None),
+        Err(e) if e.raw_os_error() == Some(NTE_BAD_ALGID) => {
+            let reopened = Provider::aes(cert)?
+                .context("the client certificate's CryptoAPI provider cannot sign with this hash")?;
+            let hash =
+                CspHash::new(reopened.0, calg, hashed).context("cannot hash for the client certificate's key")?;
+            (hash, Some(reopened))
+        }
+        Err(e) => return Err(e).context("cannot hash for the client certificate's key"),
+    };
+    let mut size = 0u32;
+    // SAFETY: a size query, then a buffer of that size, on a hash of the
+    // key's provider; `spec` is the key's (AT_SIGNATURE or AT_KEYEXCHANGE).
+    if unsafe { CryptSignHashW(hash.0, spec, null(), 0, null_mut(), &mut size) } == 0 {
+        return Err(std::io::Error::last_os_error()).context("cannot sign with the client certificate's key");
+    }
+    let mut signature = vec![0u8; size as usize];
+    if unsafe { CryptSignHashW(hash.0, spec, null(), 0, signature.as_mut_ptr(), &mut size) } == 0 {
+        return Err(std::io::Error::last_os_error()).context("cannot sign with the client certificate's key");
+    }
+    signature.truncate(size as usize);
+    // CryptoAPI writes it little-endian.
+    signature.reverse();
+    Ok(signature)
+}
+
+/// A CryptoAPI hash object holding an already computed hash.
+struct CspHash(usize);
+
+impl CspHash {
+    fn new(provider: usize, calg: u32, hashed: &[u8]) -> std::io::Result<Self> {
+        let mut hash = 0usize;
+        // SAFETY: a provider handle that outlives the hash; destroyed on
+        // drop. HP_HASHVAL takes a value as long as the algorithm's hash.
+        unsafe {
+            if CryptCreateHash(provider, calg, 0, 0, &mut hash) == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let hash = Self(hash);
+            if CryptSetHashParam(hash.0, HP_HASHVAL, hashed.as_ptr(), 0) == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(hash)
+        }
+    }
+}
+
+impl Drop for CspHash {
+    fn drop(&mut self) {
+        // SAFETY: a hash this value created.
+        unsafe { CryptDestroyHash(self.0) };
+    }
+}
+
+/// A CryptoAPI provider this module opened.
+struct Provider(usize);
+
+impl Provider {
+    /// The certificate's key container in the AES provider, if its key is
+    /// in one of Microsoft's software RSA providers; None otherwise.
+    fn aes(cert: &Certificate) -> anyhow::Result<Option<Self>> {
+        let mut size = 0u32;
+        // SAFETY: a size query, then a buffer of that size, aligned for
+        // the CRYPT_KEY_PROV_INFO it receives (strings point inside it).
+        unsafe {
+            if CertGetCertificateContextProperty(cert.0, CERT_KEY_PROV_INFO_PROP_ID, null_mut(), &mut size) == 0 {
+                return Ok(None);
+            }
+            let mut buffer = vec![0u64; (size as usize).div_ceil(8)];
+            if CertGetCertificateContextProperty(
+                cert.0,
+                CERT_KEY_PROV_INFO_PROP_ID,
+                buffer.as_mut_ptr().cast(),
+                &mut size,
+            ) == 0
+            {
+                return Ok(None);
+            }
+            let info = &*buffer.as_ptr().cast::<CRYPT_KEY_PROV_INFO>();
+            let provider = wide_string(info.pwszProvName);
+            if info.dwProvType != PROV_RSA_FULL || !provider.starts_with("Microsoft") {
+                return Ok(None);
+            }
+            let mut handle = 0usize;
+            let flags = info.dwFlags & CRYPT_MACHINE_KEYSET;
+            if CryptAcquireContextW(&mut handle, info.pwszContainerName, MS_ENH_RSA_AES_PROV_W, PROV_RSA_AES, flags)
+                == 0
+            {
+                return Err(std::io::Error::last_os_error())
+                    .context("cannot open the client certificate's key in the AES provider");
+            }
+            Ok(Some(Self(handle)))
+        }
+    }
+}
+
+impl Drop for Provider {
+    fn drop(&mut self) {
+        // SAFETY: a provider this value opened.
+        unsafe { CryptReleaseContext(self.0, 0) };
+    }
+}
+
+/// A NUL-terminated UTF-16 string, empty if null.
+///
+/// # Safety
+/// `s` is null or points to a NUL-terminated string.
+unsafe fn wide_string(s: *const u16) -> String {
+    if s.is_null() {
+        return String::new();
+    }
+    // SAFETY: as the caller says.
+    let len = (0..).take_while(|&i| unsafe { *s.add(i) } != 0).count();
+    String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(s, len) })
 }
 
 /// The roots added by an administrator, a group policy or the user.
@@ -288,5 +435,80 @@ mod tests {
         assert_eq!(&der[..2], &[0x30, 2 + 33 + 2 + 30]);
         assert_eq!(&der[2..5], &[0x02, 33, 0x00]);
         assert_eq!(&der[37..40], &[0x02, 30, 1]);
+    }
+
+    /// A self-signed certificate of the personal store whose key is in an
+    /// old CryptoAPI provider, removed with its key on drop.
+    struct CspCertificate {
+        der: Vec<u8>,
+        thumbprint: String,
+    }
+
+    impl CspCertificate {
+        fn new() -> Self {
+            let script = "$c = New-SelfSignedCertificate -Subject 'CN=omnitun CSP test' \
+                -CertStoreLocation Cert:\\CurrentUser\\My -KeySpec Signature -KeyAlgorithm RSA -KeyLength 2048 \
+                -Provider 'Microsoft Enhanced Cryptographic Provider v1.0'; \
+                $c.Thumbprint; [Convert]::ToBase64String($c.RawData)";
+            let out = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            let out = String::from_utf8(out.stdout).unwrap();
+            let mut lines = out.lines().map(str::trim).filter(|l| !l.is_empty());
+            let thumbprint = lines.next().unwrap().to_owned();
+            let der =
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, lines.next().unwrap()).unwrap();
+            Self { der, thumbprint }
+        }
+
+        fn sha256(&self) -> String {
+            use sha2::Digest;
+            hex::encode(sha2::Sha256::digest(&self.der))
+        }
+
+        fn verify(
+            &self,
+            algorithm: &'static dyn ring::signature::VerificationAlgorithm,
+            data: &[u8],
+            signature: &[u8],
+        ) {
+            use x509_parser::prelude::{FromDer, X509Certificate};
+            let (_, cert) = X509Certificate::from_der(&self.der).unwrap();
+            let key =
+                ring::signature::UnparsedPublicKey::new(algorithm, cert.public_key().subject_public_key.data.to_vec());
+            key.verify(data, signature).expect("the signature verifies with the certificate's key");
+        }
+    }
+
+    impl Drop for CspCertificate {
+        fn drop(&mut self) {
+            let script = format!("Remove-Item Cert:\\CurrentUser\\My\\{} -DeleteKey", self.thumbprint);
+            let _ = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                .status();
+        }
+    }
+
+    #[test]
+    fn csp_keys_sign() {
+        let cert = CspCertificate::new();
+        let data = b"IKE AUTH payload";
+        // Through CryptoAPI itself, SHA-1 and SHA-2 (the strong provider
+        // hashes no SHA-2: the key is opened again in the AES provider).
+        for (algorithm, verify) in [
+            (SignAlgorithm::RsaPkcs1Sha1, &ring::signature::RSA_PKCS1_2048_8192_SHA1_FOR_LEGACY_USE_ONLY),
+            (SignAlgorithm::RsaPkcs1Sha256, &ring::signature::RSA_PKCS1_2048_8192_SHA256),
+            (SignAlgorithm::RsaPkcs1Sha512, &ring::signature::RSA_PKCS1_2048_8192_SHA512),
+        ] {
+            let signature = sign_with(&cert.sha256(), algorithm, data, 0).unwrap();
+            cert.verify(verify, data, &signature);
+        }
+        let e = sign_with(&cert.sha256(), SignAlgorithm::RsaPssSha256, data, 0).unwrap_err();
+        assert!(e.to_string().contains("CryptoAPI"), "{e}");
+        // As the app does: CNG if Windows can open the key with it.
+        let signature = sign(&cert.sha256(), SignAlgorithm::RsaPkcs1Sha256, data).unwrap();
+        cert.verify(&ring::signature::RSA_PKCS1_2048_8192_SHA256, data, &signature);
     }
 }
